@@ -1445,8 +1445,82 @@ Command (SerenityG4K), en noir et vert néon. Il construit le jeu sur le PC du j
   - Le jeu ainsi construit tourne 4 min (11 554 images à 60 img/s) sans shader absent, sans dessin ignoré, avec
     une mémoire vidéo de 3,1 Go et des images correctes.
   - L'étape « lier », refaite avec l'icône, l'extrait et l'intègre (14 s).
-  - Le paquet final est `recomp/dist/StarFox-Recompile-0.1.zip` : 316 Mo, soit 1 075 Mo et 12 101 fichiers une fois
-    décompressé. Il ne contient aucun fichier dérivé du jeu et ses CRC sont vérifiés.
+  - Le paquet de cette vérification (0.1) a été remplacé par la release 1.0.0 (voir plus bas).
   - Les SPIR-V diffèrent de ceux faits avec MSYS2, parce que glslang 16.6 n'est pas 16.3 : 16.6 plie davantage les
     constantes, par exemple `uintBitsToFloat(0x3f000000u)` → `0.5`. 400 d'entre eux, tirés au hasard, passent
     `spirv-val` (Vulkan 1.3, blocs scalaires comme le runtime).
+- **A/B des shaders 16.3 / 16.6** (2026-11-10) : même exécutable, même cinématique (images 1 201 à 10 800), quatre parties
+  en alternance. Intervalle moyen 17,41 à 17,48 ms dans les deux cas, même nombre d'à-coups, temps GPU de l'image 6600
+  7,9 à 8,3 ms des deux côtés, aucune erreur : les SPIR-V de glslang 16.6 valent ceux de 16.3.
+
+## Version 1.0.0 : SpaceAnimalsRecomp (2026-11-10)
+
+Publiée sous le nom **SpaceAnimalsRecomp** (le launcher affiche « StarFox Remake [recompiled] ») :
+<https://github.com/SerenityG4K/SpaceAnimalsRecomp>, licence GPL-3.0, release v1.0.0.
+
+### Shaders précompilés (VK_EXT_graphics_pipeline_library)
+
+- **Principe** : chaque shader est compilé seul, une fois, en bibliothèque de pipeline.
+  - Sommets : bibliothèque « avant rastérisation », avec la fenêtre, le contrôle de profondeur [-1, 1] et le mode des
+    polygones.
+  - Fragments : profondeur et stencil dynamiques, sans état multi-échantillon, pour qu'elle se lie à toute sortie.
+  - Calculs : pipeline complet.
+  - Au dessin, il ne reste qu'à créer les entrées de sommets et la sortie (formats, mélange), sans shader, puis à lier
+    rapidement les quatre bibliothèques : 0,01 à 0,65 ms par pipeline (`RECOMP_PIPE_TIMING=1`).
+- **États dynamiques** (Vulkan 1.3, communs à tous les pipelines graphiques, réglés seulement quand ils changent) :
+  rejet et sens des faces, biais, test, écriture et comparaison de profondeur, test et opérations de stencil.
+  - Ils ne font plus partie de la clé des pipelines : 201 pipelines dans la cinématique au lieu de 255.
+  - Alpha → couverture, oublié jusque-là, entre dans la clé.
+- **`recomp_main --precompile`** : pas de fenêtre, pas de jeu. Il compile les 2 388 shaders du cache (1 137 sommets,
+  1 131 fragments, 120 calculs) en parallèle et écrit `pipelines.cache` (≈ 90 Mo, `VkPipelineCache`).
+  - Durée : 33,5 s à froid sur 16 fils (RTX 5070 Ti).
+  - `pipelines.ok` garde la marque : GPU, pilote, UUID du cache, liste des shaders, taille et date de l'exécutable.
+    Quand rien n'a changé, la commande s'arrête en 0,3 s (« @saute »).
+  - Elle est lancée par l'étape « pipelines » de `preparer.py` et par le launcher avant chaque partie (progression
+    « SHADERS xx % »).
+- **Au démarrage du jeu** (`warm_up`, avant la première image) : toutes les bibliothèques sont créées depuis le cache
+  en 1,6 s. Sans précompilation, c'est la compilation complète, avec « compilation des shaders xx % » dans le titre.
+  - Le cache est réécrit à la fermeture et au plus une fois par minute s'il a grandi.
+  - `RECOMP_NO_GPL=1` revient aux pipelines complets, compilés au premier dessin.
+- **Validation** (couche Khronos de MSYS2, `VK_ADD_LAYER_PATH`) : aucune erreur sur les bibliothèques. En jeu, une seule
+  sorte d'erreur, déjà là avant : VUID-…-Input-08733, un attribut R8G8B8A8_UINT lu en `vec4` flottant.
+- **Mesure** : le compteur « pipeline » de `RECOMP_PERF` couvre toute la section pipeline de chaque dessin (clé,
+  recherche, liaison, états dynamiques) ; ses ≈ 5 s sur la cinématique sont un coût fixe d'environ 0,5 ms par image,
+  pas des compilations. Le gain va au joueur dont le cache du pilote est vide (premier lancement, nouveau pilote) :
+  chaque nouveau matériau coûtait ≈ 200 ms de compilation au moment de son apparition.
+- **Piège de GCC** : passer `VkGraphicsPipelineCreateInfo` par valeur plantait. GCC le copiait avec un `vmovdqa`
+  (écriture AVX alignée sur 32 octets) dans une pile que Windows n'aligne que sur 16. `-Wa,-muse-unaligned-vector-move`
+  (runtime, `link.py`) rend toutes ces écritures non alignées, à la même vitesse.
+
+### Launcher 1.0
+
+- Titre « STARFOX / REMAKE [RECOMPILED] » ; version lue dans `recomp/VERSION`.
+- Choix **PLEIN ÉCRAN / FENÊTRÉ** sous le bouton principal, en plus de Réglages.
+- **JOUER** lance d'abord la compilation des shaders (`Tache::Shaders`), puis le jeu.
+  - Les tâches (construction, shaders, mise à jour) passent par `lancer_tache` et suivent le même protocole « @… ».
+  - `LANCEUR_ACTION=shaders` compile les shaders sans lancer le jeu (vérification).
+- **Mises à jour** (`launcher/maj.py`, seulement pour un paquet installé : `lanceur.exe` à côté de `recomp/`).
+  - Au démarrage, `--verifier` lit la dernière release ; une version plus récente s'affiche en haut
+    (« MISE À JOUR x DISPONIBLE »). La vérification se désactive dans Réglages.
+  - `--installer` télécharge `SpaceAnimalsRecomp-<v>-update.zip`, vérifie son SHA-256 (champ `digest` de GitHub, sinon
+    `SHA256SUMS.txt`), l'extrait dans `maj/` et installe par `outils.py` les outils que la version demande.
+  - `--finir` attend la fermeture du launcher, copie les fichiers et le relance.
+- **Reconstruction incrémentale** : chaque étape de `preparer.py` a une signature = copie + empreinte de son code + étapes
+  dont elle dépend.
+  - Après une mise à jour, le launcher voit `.preparation/version.ok` ≠ `recomp/VERSION` et propose
+    « METTRE À JOUR » ; seules les étapes dont le code a changé sont refaites.
+  - Les objets inchangés sont réutilisés par l'empreinte de `build.compile_one`.
+
+### Publication
+
+- `launcher/depot.py <dossier>` assemble le dépôt public. Il prend les fichiers de la racine dans `recomp/depot/`
+  (README anglais, LICENSE GPL-3.0, CHANGELOG, CONTRIBUTING, `.gitignore`), ces notes deviennent
+  `docs/DEV-NOTES-fr.md`, et il refuse tout fichier dérivé du jeu et toute trace personnelle.
+- `launcher/paquet.py <dossier>` produit `SpaceAnimalsRecomp-<v>-windows.zip` (316 Mo, outils compris),
+  `-update.zip` (1 Mo) et `SHA256SUMS.txt`.
+- Nouvelle version :
+  1. changer `recomp/VERSION` ;
+  2. compiler le launcher (`construire.py`) ;
+  3. lancer `depot.py` dans un clone du dépôt, puis commit et push ;
+  4. lancer `paquet.py` ;
+  5. `gh release create v<v> … *-windows.zip *-update.zip SHA256SUMS.txt`.
