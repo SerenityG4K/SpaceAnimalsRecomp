@@ -16,4 +16,7 @@ from your own copy.
 - **Updates**: the launcher checks this repository's releases, downloads and verifies an update (SHA-256), installs it,
   and rebuilds only the parts whose code changed.
 - **Game icon** taken from your copy at build time (never distributed).
-- Played so far: opening cinematic, training, Corneria and Meteo, at 60 fps with sound.
+- The whole game can be finished: it has been played through completely several times at 60 fps with sound, and it is
+  rather stable.
+- Known limits: 80 of the 2,468 shader stages are left to translate; 90 and 120 fps are not stable yet.
+- Planned: NVIDIA DLSS, frame generation, mod support, key remapping and several controllers, Linux.

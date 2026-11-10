@@ -13,10 +13,10 @@ the whole game runs as a native program. The goal is a full PC version of your o
 options, keyboard and controller, and the game's text and voices in any of its languages.
 
 > [!WARNING]
-> **Version 1.0.** The opening cinematic, the training mission, Corneria and Meteo have been played through on
-> SpaceAnimalsRecomp at 60 fps, with sound, subtitles, saving and loading. The rest of the campaign has not been verified
-> yet: expect bugs, wrong graphics or crashes in later missions. 90 and 120 fps are experimental. If you find a bug,
-> please report it on GitHub: every report shows how far the game really works.
+> **Version 1.0. The whole game can be finished from start to end.** It has been played through completely several
+> times on SpaceAnimalsRecomp, at 60 fps with sound, subtitles, saving and loading, and it is rather stable. Bugs can
+> still happen: 80 of the game's 2,468 shader stages are not translated yet, and 90 and 120 fps are not stable yet. If you
+> find a bug, please report it on GitHub: every report helps.
 
 > [!TIP]
 > **Want to contribute?** Read [CONTRIBUTING.md](CONTRIBUTING.md). Open an issue before starting on something big, so we
@@ -107,18 +107,20 @@ SpaceAnimalsRecomp so far.
 |---|---|---|---|
 | ✅ | Recompiler | 100% | The whole game (main, sdk and the four subsdk modules) recompiles from ARM64 to C++ and native x86-64 |
 | ✅ | Launcher and game setup | 100% | Copy check by SHA-256, extraction, code build, link and shader translation, all from your own file, with progress and logs |
-| ✅ | Shader translation | 100% | 2,388 of the 2,468 shader stages in the game translate to SPIR-V; the other 80 are the console's DLSS network, never drawn |
+| 🔧 | Shader translation | 97% | 2,388 of the game's 2,468 shader stages translate to SPIR-V; 80 are left to translate |
 | ✅ | Shader precompilation | 100% | Every shader compiled for your GPU on the first launch: no compilation stutter in game |
 | ✅ | Text and voice languages | 100% | Any of the game's 15 languages (Automatic follows Windows) |
 | ✅ | Sound | 100% | The game's audio, mixed by its own audio engine |
 | ✅ | Display | 100% | Full screen (borderless) or windowed, from the launcher or in game (Alt+Enter, F11); resolution up to 4K |
 | ✅ | Updates | 100% | One click in the launcher; only the parts that changed are rebuilt |
-| ✅ | Frame rate | 100% at 60 fps | A steady 60 fps; 90 and 120 fps are experimental (55 to 118 fps in Corneria for now) |
+| 🔧 | Frame rate | 90% | A steady 60 fps; 90 and 120 fps are not stable yet (55 to 118 fps in Corneria at 120 for now) |
 | 🔧 | Horizon OS services | 90% | Threads, files, controllers, applets, time and audio: everything the game has used so far |
-| 🔧 | Graphics (NVN on Vulkan) | 90% | Cutscenes and missions draw correctly so far, on NVIDIA; AMD and Intel are untested |
+| 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD and Intel are untested |
 | 🔧 | Controls | 70% | Keyboard and one XInput controller (Xbox layout), by button position; no remapping yet |
-| 🔧 | Tested in game | 30% | Opening cinematic, training, Corneria and Meteo; the rest of the campaign is not verified yet |
+| 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
 | 🗺️ | NVIDIA DLSS | 0% | Planned: DLSS on PC, with free output resolution |
+| 🗺️ | Frame generation | 0% | Planned: generated frames between the ones the game draws, for a higher frame rate on screen |
+| 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
 | 🗺️ | Key remapping and several controllers | 0% | Planned |
 | 🗺️ | Linux | 0% | Planned |
 
