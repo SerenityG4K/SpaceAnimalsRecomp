@@ -121,6 +121,7 @@ SpaceAnimalsRecomp so far.
 | 🗺️ | NVIDIA DLSS | 0% | Planned: DLSS on PC, with free output resolution |
 | 🗺️ | Frame generation | 0% | Planned: generated frames between the ones the game draws, for a higher frame rate on screen |
 | 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
+| 🗺️ | Online play | 0% | Planned: the game's online modes |
 | 🗺️ | Key remapping and several controllers | 0% | Planned |
 | 🗺️ | Linux | 0% | Planned |
 
