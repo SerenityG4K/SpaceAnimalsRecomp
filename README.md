@@ -13,10 +13,12 @@ the whole game runs as a native program. The goal is a full PC version of your o
 options, keyboard and controller, and the game's text and voices in any of its languages.
 
 > [!WARNING]
-> **Version 1.0. The whole game can be finished from start to end.** It has been played through completely several
-> times on SpaceAnimalsRecomp, at 60 fps with sound, subtitles, saving and loading, and it is rather stable. Bugs can
-> still happen: 80 of the game's 2,468 shader stages are not translated yet, and 90 and 120 fps are not stable yet. If you
-> find a bug, please report it on GitHub: every report helps.
+> **Experimental project: it runs, but it is not optimized yet.** SpaceAnimalsRecomp is at the "it runs" stage. The whole
+> game can be finished from start to end: it has been played through completely several times, at 60 fps with sound,
+> subtitles, saving and loading, and it is rather stable. But nothing has been optimized yet, and it has only been
+> tested on a powerful PC: **AMD Ryzen 7 9700X and NVIDIA GeForce RTX 5070 Ti**. How it runs on other hardware is not
+> known yet. Bugs can still happen: 80 of the game's 2,468 shader stages are not translated yet, and 90 and 120 fps are
+> not stable yet. If you find a bug, please report it on GitHub with your hardware: every report helps.
 
 > [!TIP]
 > **Want to contribute?** Read [CONTRIBUTING.md](CONTRIBUTING.md). Open an issue before starting on something big, so we
@@ -34,6 +36,7 @@ options, keyboard and controller, and the game's text and voices in any of its l
 
 - Use the latest release: the launcher tells you when there is a new one.
 - Search the [existing issues](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues) first.
+- Say which CPU and GPU you use (and your GPU driver version): only one configuration has been tested so far.
 - Attach the logs, all in `recomp\build\full\` next to `lanceur.exe`:
   - `recomp_run.log` for a game bug (the game writes a new one at each start, so take it right after the bug;
     the launcher keeps the previous one as `recomp_run_precedent.log`);
@@ -50,6 +53,9 @@ You need:
 - a CPU with AVX2 (2013 or newer);
 - a GPU with a Vulkan 1.3 driver (tested on NVIDIA; AMD and Intel are untested so far);
 - about 6 GB of free disk space during the build.
+
+The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti. The project is
+experimental and not optimized yet, so a less powerful PC may not reach a steady 60 fps.
 
 1. Download `SpaceAnimalsRecomp-1.0.0-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
    It bundles everything the build needs (Python, GCC, glslang): nothing else to install.
