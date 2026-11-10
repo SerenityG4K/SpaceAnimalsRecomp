@@ -21,6 +21,7 @@ SOURCES = {   # dossier (relatif à recomp/) → extensions
     "runtime": (".cpp", ".h", ".hpp", ".c", ".inl"),
     "shaders": (".py",),
     "bench": (".py",),
+    "licences": (".txt",),   # avis et licences des outils fournis dans le paquet (THIRD_PARTY_NOTICES.txt)
 }
 LANCEUR_FICHIERS = (".cpp", ".h", ".rc", ".manifest", ".py")
 INTERDITS = (".nup", ".bin", ".o", ".spv", ".mp4", ".log", ".save", ".ini", ".cache", ".png", ".jpg", ".jpeg", ".exe", ".dll",

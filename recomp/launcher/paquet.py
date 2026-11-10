@@ -12,6 +12,8 @@ Produit dans le dossier de sortie :
 Contenu :
   lanceur.exe                      le launcher (compilé par construire.py)
   LISEZMOI.txt                     mode d'emploi
+  THIRD_PARTY_NOTICES.txt          logiciels tiers fournis : versions, licences, adresses du code source
+  LICENCES/                        textes complets de ces licences (recomp/licences)
   recomp/*.py, hooks.txt, VERSION  recompilateur
   recomp/a64/*.py                  décodeur et traducteur ARM64 → C++
   recomp/runtime/**                runtime C++ (noyau, services, rendu Vulkan, en-têtes Vulkan tiers)
@@ -20,7 +22,8 @@ Contenu :
   recomp/launcher/maj.py           mises à jour depuis les releases GitHub
   recomp/launcher/outils.py        outils de construction depuis leurs sources officielles
   tools/nup.py, tools/nso.py       lecture de la copie .nup et des exécutables NSO
-  outils/                          Python, GCC, glslang (paquet complet seulement)
+  outils/                          Python, GCC, glslang (paquet complet seulement ; GCC et glslang réduits aux
+                                   fichiers que la construction utilise, voir outils.GARDER_GCC)
 
 Le joueur fournit sa propre copie (.nup) ; tout ce qui en dérive est produit sur son PC et y reste.
 """
@@ -44,13 +47,18 @@ https://github.com/SerenityG4K/SpaceAnimalsRecomp
 
 Ce paquet ne contient AUCUN fichier du jeu. Il recompile le jeu sur votre PC, à partir de votre propre copie.
 
+PROJET EXPÉRIMENTAL : on en est au stade « ça tourne », rien n'a encore été optimisé. Le jeu se termine en entier et
+reste plutôt stable, mais il n'a été testé que sur un PC costaud (AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti) : on ne
+sait pas encore comment il tourne ailleurs. Signalez vos bugs sur GitHub en précisant votre processeur et votre carte
+graphique.
+
 Il vous faut :
   - Windows 10 ou 11, 64 bits, processeur avec AVX2, carte graphique Vulkan 1.3 (pilote à jour) ;
   - votre copie de Star Fox (Nintendo Switch 2) au format .nup, avec la mise à jour 2.0.0 (v131072) ;
   - environ 6 Go libres pendant la construction ;
   - un dossier dont le chemin n'a que des caractères latins (par exemple C:\\Jeux\\StarFox) : le compilateur
     ne gère pas les autres. Les espaces sont acceptés : dans ce cas, le compilateur est copié une fois dans
-    C:\\ProgramData\\StarFoxRecomp (environ 1 Go).
+    C:\\ProgramData\\StarFoxRecomp (environ 400 Mo).
 
 Étapes :
   1. Décompressez ce dossier où vous voulez (pas dans Program Files).
@@ -72,6 +80,10 @@ recomp\\build\\full\\precompile.log (shaders), mise_a_jour.log (mises à jour).
 
 Les extraits vidéo du fond du launcher et l'icône du jeu sont tirés de votre copie et ne quittent jamais votre PC.
 Votre copie n'est jamais modifiée (lecture seule).
+
+Licences : SpaceAnimalsRecomp est sous licence GNU GPL v3. Le dossier outils contient des logiciels libres tiers,
+inchangés (GCC, binutils et MinGW-w64 de WinLibs, glslang, Python) : leurs licences et les adresses de leur code
+source sont dans THIRD_PARTY_NOTICES.txt, et les textes complets des licences dans le dossier LICENCES.
 
 Star Fox est une marque de Nintendo. Projet de fan, sans lien avec Nintendo.
 """
@@ -127,9 +139,9 @@ def main():
     out = os.path.join(sortie, f"{NOM}-{a.version}")
     if os.path.exists(out):
         sys.exit(f"{out} existe déjà")
-    exe = os.path.join(LANCEUR, "lanceur.exe")
+    exe = os.path.join(PROJET, "lanceur.exe")   # à la racine du projet depuis la 1.0.1 (construire.py)
     if not os.path.exists(exe):
-        sys.exit("lanceur.exe absent : python construire.py")
+        sys.exit("lanceur.exe absent de la racine du projet : python construire.py")
     copier(exe, os.path.join(out, "lanceur.exe"))
     with open(os.path.join(out, "LISEZMOI.txt"), "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write(LISEZMOI.format(version=a.version))
@@ -145,14 +157,30 @@ def main():
         copier(os.path.join(LANCEUR, f), os.path.join(r, "launcher", f))
     for f in ("nup.py", "nso.py"):
         copier(os.path.join(PROJET, "tools", f), os.path.join(out, "tools", f))
+    # avis et textes des licences des outils fournis : à la racine, dans les deux archives
+    licences = os.path.join(RECOMP, "licences")
+    copier(os.path.join(licences, "THIRD_PARTY_NOTICES.txt"), os.path.join(out, "THIRD_PARTY_NOTICES.txt"))
+    for f in sorted(os.listdir(licences)):
+        if f.endswith(".txt") and f != "THIRD_PARTY_NOTICES.txt":
+            copier(os.path.join(licences, f), os.path.join(out, "LICENCES", f))
     outils = os.path.join(RECOMP, "outils")
     if not os.path.isdir(outils):
         sys.exit("pas de dossier recomp/outils (python outils.py) : paquet complet impossible")
+    sys.path.insert(0, LANCEUR)
+    import outils as regles   # noqa: E402  (fichiers de GCC et de glslang utiles à la construction)
+    retires = taille_retiree = 0
     for racine, dossiers, fichiers in os.walk(outils):   # sans les archives téléchargées ni les caches Python
         dossiers[:] = [d for d in dossiers if d not in ("_archives", "__pycache__")]
         for f in fichiers:
             p = os.path.join(racine, f)
+            rel = os.path.relpath(p, outils).replace("\\", "/")
+            outil, _, dans_outil = rel.partition("/")
+            if dans_outil and not regles.garder(outil, dans_outil):
+                retires += 1
+                taille_retiree += os.path.getsize(p)
+                continue
             copier(p, os.path.join(out, "outils", os.path.relpath(p, outils)))
+    print(f"outils : {retires} fichiers inutiles à la construction écartés ({taille_retiree / 1e6:.0f} Mo)")
     # contrôle : rien qui vienne du jeu
     interdits = (".nup", ".bin", ".o", ".spv", ".mp4", ".log", ".save", ".ini", ".cache",
                  ".ico", ".jpg", ".jpeg", ".png")   # images : l'icône du jeu, les captures (lanceur.exe a la sienne)

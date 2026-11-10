@@ -1347,7 +1347,8 @@ holographiques des planètes sur la carte, au rendu rosé et sans dégradé).
 
 ## Launcher (2026-11-09)
 
-`recomp/launcher/lanceur.exe` : fenêtre de lancement dans l'esprit de celle du portage natif de Star Fox
+`lanceur.exe` (à la racine du projet depuis la 1.0.1, à côté de `recomp/`, comme dans le paquet ; sources dans
+`recomp/launcher/`) : fenêtre de lancement dans l'esprit de celle du portage natif de Star Fox
 Command (SerenityG4K), en noir et vert néon. Il construit le jeu sur le PC du joueur, à partir de **sa** copie
 (`.nup`), règle `recomp.ini` et lance le jeu.
 
@@ -1516,11 +1517,32 @@ Publiée sous le nom **SpaceAnimalsRecomp** (le launcher affiche « StarFox Rema
 - `launcher/depot.py <dossier>` assemble le dépôt public. Il prend les fichiers de la racine dans `recomp/depot/`
   (README anglais, LICENSE GPL-3.0, CHANGELOG, CONTRIBUTING, `.gitignore`), ces notes deviennent
   `docs/DEV-NOTES-fr.md`, et il refuse tout fichier dérivé du jeu et toute trace personnelle.
-- `launcher/paquet.py <dossier>` produit `SpaceAnimalsRecomp-<v>-windows.zip` (316 Mo, outils compris),
-  `-update.zip` (1 Mo) et `SHA256SUMS.txt`.
+- `launcher/paquet.py <dossier>` produit `SpaceAnimalsRecomp-<v>-windows.zip` (91 Mo depuis la 1.0.1, outils
+  allégés compris), `-update.zip` (1 Mo) et `SHA256SUMS.txt`.
 - Nouvelle version :
   1. changer `recomp/VERSION` ;
   2. compiler le launcher (`construire.py`) ;
   3. lancer `depot.py` dans un clone du dépôt, puis commit et push ;
   4. lancer `paquet.py` ;
   5. `gh release create v<v> … *-windows.zip *-update.zip SHA256SUMS.txt`.
+
+## Version 1.0.1 : paquet allégé et licences des outils (2026-11-10)
+
+- **Allègement** (`launcher/outils.py`, `GARDER_GCC`) : la liste des fichiers de GCC utiles vient d'une trace des vraies
+  commandes de la construction, avec le GCC fourni seul dans le PATH : 26 fichiers du runtime et du code généré compilés
+  avec `-v -MD`, `windres -v` (il appelle `gcc -E`, donc `cc1`), l'édition de liens complète avec `-v -Wl,--trace`, puis
+  la fermeture des DLL importées (tables d'import PE). 594 fichiers servent (136 Mo). On garde en plus, en entier, les
+  en-têtes C/C++ et les bibliothèques MinGW-w64, libstdc++ et libgcc : 4 093 fichiers, 382 Mo, contre 11 874 fichiers et
+  968 Mo pour WinLibs complet. glslang : `bin/glslang.exe` seul. `paquet.py` applique ce filtre en copiant
+  `recomp/outils` (qui reste complet, avec gdb, pour le développement) ; `outils.py` allège ce qu'il installe, sauf
+  avec `--complet`.
+- **Résultat** : paquet de 91 Mo au lieu de 316 Mo, 424 Mo décompressé au lieu de 1 076 Mo.
+- **Installations existantes** : une mise à jour ne touche pas `outils/` ; une installation 1.0.0 garde son GCC complet,
+  qui marche. La copie dans `C:\ProgramData\StarFoxRecomp\gcc-<empreinte>` (chemin avec espaces) est nommée d'après
+  l'archive WinLibs : une copie complète déjà faite par une autre installation est réutilisée telle quelle.
+- **Licences** : `recomp/licences/` contient `THIRD_PARTY_NOTICES.txt` (chaque composant fourni, sa version exacte, sa
+  licence, l'adresse de son code source) et les textes complets. Versions relevées dans les binaires : GMP 6.3.0,
+  MPFR 4.2.2, MPC 1.4.1, isl 0.28, libiconv 1.19, gettext 1.0, zstd 1.5.7, zlib 1.3.2, binutils 2.47.20260726.
+  `paquet.py` les met à la racine du paquet (`THIRD_PARTY_NOTICES.txt`, `LICENCES/`), dans les deux archives.
+- **Launcher** : `construire.py` écrit `lanceur.exe` à la racine du projet, à côté de `recomp/`, comme dans le paquet.
+  Ses réglages (`lanceur.ini`) sont à côté de lui. Dans cette disposition, le launcher vérifie aussi les releases.

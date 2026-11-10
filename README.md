@@ -57,10 +57,10 @@ You need:
 The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti. The project is
 experimental and not optimized yet, so a less powerful PC may not reach a steady 60 fps.
 
-1. Download `SpaceAnimalsRecomp-1.0.0-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
+1. Download `SpaceAnimalsRecomp-1.0.1-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
    It bundles everything the build needs (Python, GCC, glslang): nothing else to install.
 2. Extract it to a folder you can write to, **not** Program Files, whose path has only Latin characters, for example
-   `C:\Games\StarFox`. Spaces are fine: the compiler is then copied once to `C:\ProgramData\StarFoxRecomp` (about 1 GB).
+   `C:\Games\StarFox`. Spaces are fine: the compiler is then copied once to `C:\ProgramData\StarFoxRecomp` (about 400 MB).
 3. Run `lanceur.exe`. Choose your copy (**COPY › choose**: your `.nup` file), then click **BUILD THE GAME**.
    - The launcher checks that it is Star Fox 2.0.0 by the SHA-256 hashes in the file's index, without reading all 30 GB.
    - It extracts the executables, recompiles the whole game code (35 to 50 minutes, the launcher stays usable),
@@ -85,12 +85,18 @@ build, your saves and your settings stay.
 
 ### Shader precompilation
 
-Every one of the game's 2,388 shaders is compiled for your GPU once, on the first launch, and again only after a GPU
+Every shader the build extracts from your copy (2,308 of them) is compiled for your GPU once, on the first launch, and again only after a GPU
 driver update. SpaceAnimalsRecomp uses Vulkan graphics pipeline libraries (`VK_EXT_graphics_pipeline_library`): each
 shader is compiled on its own, ahead of time, and a draw only links precompiled pieces, which takes a fraction of a
 millisecond. The result is kept in `recomp\build\full\pipelines.cache`. Deleting it only means compiling again on the next
 launch. On a GPU without pipeline libraries, shaders are compiled the first time they are drawn, then kept in the same
 cache.
+
+**Known issue**: 80 more shaders that can be translated (72 of them compute shaders) are not extracted from your copy
+yet. The game loads them when it starts but takes them from elsewhere than the shader archive the build reads. They
+were there during the complete playthroughs, which were made on the developer's build. On a new install, a scene that
+uses one of them would miss that effect: if you see a missing effect, please report it. A fix is planned for the next
+version.
 
 ## Where are my saves?
 
@@ -113,7 +119,7 @@ SpaceAnimalsRecomp so far.
 |---|---|---|---|
 | ✅ | Recompiler | 100% | The whole game (main, sdk and the four subsdk modules) recompiles from ARM64 to C++ and native x86-64 |
 | ✅ | Launcher and game setup | 100% | Copy check by SHA-256, extraction, code build, link and shader translation, all from your own file, with progress and logs |
-| 🔧 | Shader translation | 97% | 2,388 of the game's 2,468 shader stages translate to SPIR-V; 80 are left to translate |
+| 🔧 | Shader translation | 97% | 2,388 of the game's 2,468 shader stages translate to SPIR-V; 80 are left to translate. A new install gets 2,308 of them for now (see Shader precompilation) |
 | ✅ | Shader precompilation | 100% | Every shader compiled for your GPU on the first launch: no compilation stutter in game |
 | ✅ | Text and voice languages | 100% | Any of the game's 15 languages (Automatic follows Windows) |
 | ✅ | Sound | 100% | The game's audio, mixed by its own audio engine |
@@ -162,8 +168,9 @@ Windows only for now.
 1. Clone the repository, then get the toolchain (Python 3.13 with zstandard, lz4 and capstone; GCC 16.2 from WinLibs;
    glslang 16.6), downloaded from their official sources with their SHA-256 hashes checked, into `recomp\outils`:
    `python recomp\launcher\outils.py`. MSYS2 UCRT64 with the same tools works too.
-2. Build the launcher: `python recomp\launcher\construire.py` (it writes `recomp\launcher\lanceur.exe`).
-3. Run `recomp\launcher\lanceur.exe` and build the game from it, or from a shell:
+2. Build the launcher: `python recomp\launcher\construire.py` (it writes `lanceur.exe` at the root of the repository,
+   next to `recomp`, as in the release package).
+3. Run `lanceur.exe` and build the game from it, or from a shell:
    `python -u recomp\launcher\preparer.py --copie "<your copy>.nup"`.
 4. To make release archives: `python recomp\launcher\paquet.py <output folder>`.
 
@@ -194,7 +201,7 @@ debugging switches (`RECOMP_*` environment variables), are in [docs/DEV-NOTES-fr
 - The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org)).
 - Libraries and tools: [Capstone](https://www.capstone-engine.org) (BSD), [python-zstandard](https://github.com/indygreg/python-zstandard)
   (BSD), [python-lz4](https://github.com/python-lz4/python-lz4) (BSD), [glslang](https://github.com/KhronosGroup/glslang)
-  (BSD-3-Clause and Apache 2.0), the Vulkan headers (Apache 2.0 or MIT), [GCC](https://gcc.gnu.org) through
+  (BSD-3-Clause and Apache 2.0), the Vulkan headers (Apache 2.0), [GCC](https://gcc.gnu.org) through
   [WinLibs](https://winlibs.com) (GPL 3 with the GCC Runtime Library Exception) and [Python](https://www.python.org) (PSF License).
 
 ## License
@@ -205,12 +212,18 @@ same license, with its source code, and keep the copyright notices and credit to
 Third-party components in `recomp/runtime/third_party/` keep their own licenses. The license covers this project's
 code only: it grants nothing for Nintendo's game, which you must supply yourself.
 
-The Windows release archive also bundles, unchanged, under their own licenses (sources and checksums in
-`outils\LISEZMOI.txt`):
+The full Windows package (`-windows.zip`) also bundles, in its `outils` folder, the unmodified binaries of the build
+tools, under their own licenses. GCC and glslang are reduced to the files the build uses.
 
-- Python 3.13.17 embeddable (PSF License), with zstandard 0.25.0 (BSD), lz4 4.4.5 (BSD) and capstone 5.0.7 (BSD);
-- GCC 16.2.0 from WinLibs, with MinGW-w64 14.0.0 and binutils (GPL 3 with the GCC Runtime Library Exception; the
-  MinGW-w64 runtime under its own permissive licenses). Their complete source code is available from the
-  [WinLibs release](https://github.com/brechtsanders/winlibs_mingw/releases/tag/16.2.0posix-23.1.3-14.0.0-ucrt-r3) that
-  these binaries come from, from the [GNU project](https://gcc.gnu.org) and from [MinGW-w64](https://www.mingw-w64.org);
-- glslang 16.6.0 (BSD-3-Clause, Apache 2.0 and other free licenses).
+- GCC 16.2.0, GNU Binutils 2.47 and MinGW-w64 14.0.0, from the
+  [WinLibs build](https://github.com/brechtsanders/winlibs_mingw/releases/tag/16.2.0posix-23.1.3-14.0.0-ucrt-r3)
+  (GPL 3, with the GCC Runtime Library Exception for the runtime libraries; MinGW-w64 under its own permissive licenses),
+  with the libraries the compiler uses: GMP, MPFR, MPC (LGPL 3), isl (MIT), libiconv, libintl (LGPL 2.1), zstd (BSD)
+  and zlib;
+- glslang 16.6.0 (BSD-3-Clause, Apache 2.0 and other free licenses);
+- Python 3.13.17 embeddable (PSF License), with zstandard 0.25.0, lz4 4.4.5 and capstone 5.0.7 (BSD).
+
+[`recomp/licences/THIRD_PARTY_NOTICES.txt`](recomp/licences/THIRD_PARTY_NOTICES.txt) lists every component with its exact
+version, its license and where to get its source code; the full license texts are next to it, in
+[`recomp/licences/`](recomp/licences/). Both are also at the root of every release package (`THIRD_PARTY_NOTICES.txt`
+and the `LICENCES` folder).

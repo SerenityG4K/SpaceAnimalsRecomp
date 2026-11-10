@@ -2,7 +2,9 @@
 """Télécharge les outils de construction fournis avec le paquet, depuis leurs sources officielles, et vérifie leur
 empreinte SHA-256 (publiée par python.org, PyPI et GitHub) : rien d'autre à installer pour le joueur.
 
-  python outils.py [--dest <dossier>] [--garder-archives]
+  python outils.py [--dest <dossier>] [--garder-archives] [--complet]
+
+GCC et glslang sont réduits aux fichiers que la construction utilise (voir GARDER_GCC), sauf avec --complet.
 
 Résultat (par défaut recomp/outils/) :
   python/     Python 3.13 embarquable, avec zstandard et lz4 (lecture de la copie, extraction des shaders)
@@ -52,6 +54,72 @@ OUTILS = [
      "sha256": "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b", "dest": "glslang", "racine": False,
      "licence": "BSD-3-Clause, Apache-2.0 et autres licences libres (voir le dépôt KhronosGroup/glslang)"},
 ]
+
+
+# ------------------------------------------------------------------------------------------ allègement
+# Fichiers de GCC et de glslang que la construction du jeu utilise vraiment. Liste établie par trace (2026-11-10) :
+# vraies commandes de build.py, fullbuild.py et link.py avec le GCC fourni seul dans le PATH, en relevant les
+# programmes appelés (-v), les en-têtes lus (-MD), les entrées de l'éditeur de liens (-Wl,--trace), la commande de
+# windres (qui appelle « gcc -E », donc cc1), puis les DLL importées par ces programmes. Les en-têtes et les
+# bibliothèques C/C++ (MinGW-w64, libstdc++, libgcc) sont gardés en entier. Tout le reste de WinLibs (Fortran,
+# Objective-C, LTO, gdb et son Python, CMake, Doxygen, Cppcheck, ctags, premake, nasm, yasm, ccache, gcov,
+# documentation…) ne sert pas et n'est pas distribué. `--complet` garde tout (développement : gdb…).
+_LIBEXEC = "libexec/gcc/x86_64-w64-mingw32/16.2.0/"
+_LIBGCC = "lib/gcc/x86_64-w64-mingw32/16.2.0/"
+GARDER_GCC = {
+    "fichiers": {
+        "version_info.txt", "mingwvars.bat",
+        # pilotes (windres appelle gcc -E) et DLL qu'ils importent
+        "bin/g++.exe", "bin/gcc.exe", "bin/windres.exe",
+        "bin/libiconv-2.dll", "bin/libintl-8.dll", "bin/libwinpthread-1.dll", "bin/libzstd.dll", "bin/zlib1.dll",
+        # compilateurs, éditeur de liens de GCC, greffon LTO (passé à collect2 par défaut) et leurs DLL
+        _LIBEXEC + "cc1.exe", _LIBEXEC + "cc1plus.exe", _LIBEXEC + "collect2.exe", _LIBEXEC + "lto-wrapper.exe",
+        _LIBEXEC + "liblto_plugin.dll", _LIBEXEC + "libgcc_s_seh-1.dll", _LIBEXEC + "libgmp-10.dll",
+        _LIBEXEC + "libiconv-2.dll", _LIBEXEC + "libisl-23.dll", _LIBEXEC + "libmpc-3.dll", _LIBEXEC + "libmpfr-6.dll",
+        _LIBEXEC + "libwinpthread-1.dll", _LIBEXEC + "libzstd.dll", _LIBEXEC + "zlib1.dll",
+        # assembleur et éditeur de liens (binutils) et leurs DLL
+        "x86_64-w64-mingw32/bin/as.exe", "x86_64-w64-mingw32/bin/ld.exe",
+        "x86_64-w64-mingw32/bin/libiconv-2.dll", "x86_64-w64-mingw32/bin/libintl-8.dll",
+        "x86_64-w64-mingw32/bin/libwinpthread-1.dll", "x86_64-w64-mingw32/bin/libzstd.dll",
+        "x86_64-w64-mingw32/bin/zlib1.dll",
+        # objets de démarrage et bibliothèques de GCC
+        _LIBGCC + "crtbegin.o", _LIBGCC + "crtend.o", _LIBGCC + "crtfastmath.o", _LIBGCC + "libgcc.a",
+        _LIBGCC + "libgcc_eh.a", _LIBGCC + "libgcov.a",
+        # bibliothèques C++ et d'exécution de GCC (lib/)
+        "lib/libstdc++.a", "lib/libstdc++.dll.a", "lib/libstdc++exp.a", "lib/libstdc++fs.a", "lib/libsupc++.a",
+        "lib/libstdc++.modules.json", "lib/libatomic.a", "lib/libatomic.dll.a", "lib/libatomic_asneeded.a",
+        "lib/libgcc_s.a", "lib/libssp.a", "lib/libssp.dll.a", "lib/libssp_nonshared.a", "lib/libquadmath.a",
+        "lib/libquadmath.dll.a", "lib/libgomp.a", "lib/libgomp.dll.a", "lib/libgomp.spec", "lib/libmangle.a",
+    },
+    # dossiers gardés en entier : en-têtes C/C++, CRT et bibliothèques d'import de MinGW-w64
+    "dossiers": ("include/c++/", "x86_64-w64-mingw32/include/", "x86_64-w64-mingw32/lib/", _LIBGCC + "include/",
+                 _LIBGCC + "include-fixed/"),
+}
+GARDER_GLSLANG = {"fichiers": {"bin/glslang.exe"}, "dossiers": ()}
+
+
+def garder(outil, rel):
+    """Le fichier `rel` (relatif au dossier de l'outil, séparateurs « / ») sert-il à la construction ?"""
+    regles = {"gcc": GARDER_GCC, "glslang": GARDER_GLSLANG}.get(outil)
+    if regles is None:   # python et ses modules : tout est utile
+        return True
+    rel = rel.replace("\\", "/")
+    return rel in regles["fichiers"] or rel.startswith(regles["dossiers"])
+
+
+def alleger(dossier, outil):
+    """Supprime de l'outil installé dans `dossier` ce que la construction n'utilise pas (voir GARDER_GCC)."""
+    n = taille = 0
+    for racine, _, fichiers in os.walk(dossier, topdown=False):
+        for f in fichiers:
+            p = os.path.join(racine, f)
+            if not garder(outil, os.path.relpath(p, dossier)):
+                taille += os.path.getsize(p)
+                os.remove(p)
+                n += 1
+        if racine != dossier and not os.listdir(racine):
+            os.rmdir(racine)
+    return n, taille
 
 
 def telecharger(url, chemin):
@@ -123,6 +191,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dest", default=os.path.join(RECOMP, "outils"))
     ap.add_argument("--garder-archives", action="store_true")
+    ap.add_argument("--complet", action="store_true", help="garder tout GCC et glslang (gdb… : développement)")
     a = ap.parse_args()
     dest = os.path.abspath(a.dest)
     archives = os.path.join(dest, "_archives")
@@ -151,6 +220,9 @@ def main():
             shutil.rmtree(cible)
         os.makedirs(cible, exist_ok=True)
         extraire(fichier, cible, o["racine"])
+        if o["nom"] in ("gcc", "glslang") and not a.complet:
+            n, taille = alleger(cible, o["nom"])
+            print(f"  allégé : {n} fichiers inutiles à la construction retirés ({taille / 1e6:.0f} Mo)", flush=True)
         if o["nom"] == "python":
             regler_python(cible)
             for p in OUTILS:   # les modules seront réinstallés dans ce nouveau Python
@@ -160,8 +232,11 @@ def main():
             f.write(o["sha256"] + "\n")
         print(f"  installé dans {cible}", flush=True)
     with open(os.path.join(dest, "LISEZMOI.txt"), "w", encoding="utf-8-sig", newline="\r\n") as f:
-        f.write("Outils de construction fournis avec le launcher (inchangés, téléchargés depuis leurs sources officielles,\n"
-                "empreintes SHA-256 vérifiées par recomp/launcher/outils.py).\n\n")
+        f.write("Outils de construction fournis avec le launcher (téléchargés depuis leurs sources officielles,\n"
+                "empreintes SHA-256 vérifiées par recomp/launcher/outils.py). GCC et glslang sont réduits aux fichiers\n"
+                "que la construction utilise ; les fichiers gardés sont inchangés.\n"
+                "Licences et liens vers le code source de chaque outil : THIRD_PARTY_NOTICES.txt et le dossier\n"
+                "LICENCES, à la racine du paquet.\n\n")
         for o in OUTILS:
             f.write(f"{o['nom']} {o['version']}\n  source : {o['url']}\n  SHA-256 : {o['sha256']}\n  licence : {o['licence']}\n\n")
     if not a.garder_archives:

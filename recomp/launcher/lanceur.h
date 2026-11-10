@@ -26,7 +26,7 @@
 namespace lz {
 
 constexpr float LARGEUR = 1000.f, HAUTEUR = 600.f;   // taille logique de la fenêtre (DIP)
-constexpr const wchar_t* VERSION = L"1.0.0";            // si recomp/VERSION est absent
+constexpr const wchar_t* VERSION = L"1.0.1";            // si recomp/VERSION est absent
 constexpr const wchar_t* NOM = L"StarFox Remake [recompiled]";
 constexpr const wchar_t* DEPOT = L"SerenityG4K/SpaceAnimalsRecomp";   // releases GitHub (mises à jour)
 

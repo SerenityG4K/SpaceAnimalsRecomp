@@ -95,8 +95,10 @@ GCC = []     # dossier bin du compilateur fourni (déterminé une fois : copie �
 def gcc_sans_espaces(outils):
     """Dossier bin de GCC utilisable. GCC (WinLibs) échoue à l'édition de liens s'il est installé dans un dossier dont
     le chemin contient des espaces : il coupe ses propres chemins internes, et une jonction ne suffit pas (GCC 16
-    remonte au chemin réel). Dans ce cas, le compilateur est copié une fois (≈ 1 Go) dans
-    C:\\ProgramData\\StarFoxRecomp\\gcc-<empreinte>, sans droits d'administrateur."""
+    remonte au chemin réel). Dans ce cas, le compilateur est copié une fois (≈ 400 Mo depuis la 1.0.1, ≈ 1 Go avec le
+    GCC complet de la 1.0.0) dans C:\\ProgramData\\StarFoxRecomp\\gcc-<empreinte>, sans droits d'administrateur.
+    L'empreinte est celle de l'archive WinLibs : une copie déjà faite par une autre installation (même complète, plus
+    grosse) est réutilisée telle quelle, puisqu'elle contient tous les fichiers dont la construction a besoin."""
     gcc = os.path.abspath(os.path.join(outils, "gcc"))
     if " " not in gcc or os.name != "nt":
         return os.path.join(gcc, "bin")

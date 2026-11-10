@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.1 — lighter package, third-party licenses
+
+- **Licenses of the bundled tools**: the package now has `THIRD_PARTY_NOTICES.txt`, which lists every bundled component
+  with its exact version, its license and where to get its source code, and a `LICENCES` folder with the full license
+  texts (GPL 3, LGPL 3 and 2.1, GCC Runtime Library Exception, MinGW-w64, isl, zlib, zstd, glslang). Both are also in
+  the source repository, in `recomp/licences/`.
+- **Lighter package**: GCC and glslang are reduced to the files the build uses (list made by tracing the real build
+  commands). The download is 91 MB instead of 316 MB, and 424 MB once extracted instead of 1.1 GB. When the install
+  path has spaces, the compiler copy in `C:\ProgramData\StarFoxRecomp` is about 400 MB instead of 1 GB. Removed:
+  Fortran, Objective-C, LTO, gdb and its Python, CMake, Doxygen, Cppcheck, ctags, premake, NASM, Yasm, ccache, gcov and
+  the documentation.
+- **Launcher**: in the source tree, `lanceur.exe` is now built at the root, next to `recomp`, as in the package.
+- **README**: the project is experimental. It is at the "it runs" stage, not optimized yet, and has only been tested on
+  an AMD Ryzen 7 9700X with an NVIDIA GeForce RTX 5070 Ti.
+- **Updating from 1.0.0** with the launcher: no code of the game changed, so nothing is rebuilt and **UPDATE GAME** takes
+  a few seconds. An install updated from 1.0.0 keeps its full compiler, which still works. To get the lighter one,
+  extract the 1.0.1 package to a new folder.
+- **Known issue** (also in 1.0.0): on a new install, the build extracts 2,308 of the game's shaders from your copy;
+  80 more (72 compute shaders) that the game loads at start are not extracted yet. A scene that uses one would miss
+  that effect. A fix is planned for the next version.
+
 ## 1.0.0 — first public release
 
 StarFox Remake [recompiled]: Star Fox (Nintendo Switch 2, update 2.0.0) as a native Windows program, built on your PC

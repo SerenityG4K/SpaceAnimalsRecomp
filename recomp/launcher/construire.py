@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Compile le launcher : recomp/launcher/lanceur.exe (Win32, Direct2D, DirectWrite, Media Foundation ; aucune DLL à
-fournir à côté).
+"""Compile le launcher : lanceur.exe à la racine du projet, à côté de recomp/, comme dans le paquet (Win32, Direct2D,
+DirectWrite, Media Foundation ; aucune DLL à fournir à côté).
 
   python construire.py [--out lanceur_new.exe]   # g++ et windres de MSYS2 (ucrt64) ou du PATH
 """
@@ -31,7 +31,9 @@ def outil(nom):
 def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    sortie = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else "lanceur.exe"   # autre nom si lanceur.exe tourne
+    # à la racine du projet, comme dans le paquet (recomp/ à côté) ; autre nom avec --out si lanceur.exe tourne.
+    # Chemin relatif au dossier du launcher : sans espaces, quel que soit le dossier du projet.
+    sortie = sys.argv[sys.argv.index("--out") + 1] if "--out" in sys.argv else os.path.join("..", "..", "lanceur.exe")
     os.makedirs(os.path.join(ICI, "build"), exist_ok=True)
     if not os.path.exists(os.path.join(ICI, "icone.ico")):
         subprocess.run([sys.executable, "-I", os.path.join(ICI, "icone.py")], check=True)
@@ -64,7 +66,8 @@ def main():
         print(messages[:12000])
     if r.returncode:
         return 1
-    print(f"OK {os.path.join(ICI, sortie)} ({os.path.getsize(os.path.join(ICI, sortie)) / 1e6:.1f} Mo)")
+    fini = os.path.abspath(os.path.join(ICI, sortie))
+    print(f"OK {fini} ({os.path.getsize(fini) / 1e6:.1f} Mo)")
     return 0
 
 
