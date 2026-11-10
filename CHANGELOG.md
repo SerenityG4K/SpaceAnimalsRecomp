@@ -19,4 +19,4 @@ from your own copy.
 - The whole game can be finished: it has been played through completely several times at 60 fps with sound, and it is
   rather stable.
 - Known limits: 80 of the 2,468 shader stages are left to translate; 90 and 120 fps are not stable yet.
-- Planned: NVIDIA DLSS, frame generation, mod support, online play, key remapping and several controllers, Linux.
+- Planned: NVIDIA DLSS, frame generation, mod support, online play, mouse controls, key remapping and several controllers, Linux.

@@ -116,12 +116,13 @@ SpaceAnimalsRecomp so far.
 | 🔧 | Frame rate | 90% | A steady 60 fps; 90 and 120 fps are not stable yet (55 to 118 fps in Corneria at 120 for now) |
 | 🔧 | Horizon OS services | 90% | Threads, files, controllers, applets, time and audio: everything the game has used so far |
 | 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD and Intel are untested |
-| 🔧 | Controls | 70% | Keyboard and one XInput controller (Xbox layout), by button position; no remapping yet |
+| 🔧 | Controls | 70% | Keyboard and one XInput controller (Xbox layout), by button position; no mouse or remapping yet |
 | 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
 | 🗺️ | NVIDIA DLSS | 0% | Planned: DLSS on PC, with free output resolution |
 | 🗺️ | Frame generation | 0% | Planned: generated frames between the ones the game draws, for a higher frame rate on screen |
 | 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
 | 🗺️ | Online play | 0% | Planned: the game's online modes |
+| 🗺️ | Mouse controls | 0% | Planned: the game's mouse mode, with the PC mouse |
 | 🗺️ | Key remapping and several controllers | 0% | Planned |
 | 🗺️ | Linux | 0% | Planned |
 
