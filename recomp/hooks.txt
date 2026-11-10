@@ -1,0 +1,13 @@
+# Fonctions « accrochées » : leurs appels directs (bl/b) passent par le dispatch, pour qu'un
+# remplacement natif (runtime/os/hle_*.cpp) s'applique aussi aux appels internes au module.
+# Format : <module> <symbole exporté>. Toute modification impose de reconstruire le module.
+
+# fibres nn::os → fibres Windows (pile hôte + état CPU par fibre) ; nn::async les utilise
+sdk _ZN2nn2os15InitializeFiberEPNS0_9FiberTypeEPFS2_PvES3_S3_mi
+sdk _ZN2nn2os13FinalizeFiberEPNS0_9FiberTypeE
+sdk _ZN2nn2os13SwitchToFiberEPNS0_9FiberTypeE
+sdk _ZN2nn2os15GetCurrentFiberEv
+
+# coroutines du moteur (assembleur maison façon boost.context) : changement de contexte
+# (sauve les registres préservés, range sp dans *x0, reprend le contexte *x1) → fibres Windows
+main 0xba33c30

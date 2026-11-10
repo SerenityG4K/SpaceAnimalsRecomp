@@ -1,0 +1,18 @@
+# Rien du jeu ni de ce qui en dérive : jamais dans le dépôt
+*.nup
+extracted/
+work/
+recomp/build/
+recomp/launcher/extraits/
+recomp/launcher/build/
+# outils téléchargés (outils.py), launcher compilé, réglages et mises à jour locales
+recomp/outils/
+outils/
+recomp/launcher/lanceur.exe
+lanceur.exe
+lanceur.ini
+maj/
+mise_a_jour.log
+dist/
+__pycache__/
+*.pyc
