@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.2 — launcher background included, shorter build
+
+- **Launcher background included**: the clips that play behind the launcher (gameplay recorded by SerenityG4K) now
+  come with the package. The build no longer runs the game for several minutes to record them; the launcher shows them
+  from the first start. **SETTINGS › RE-RECORD FOOTAGE** still records new ones from your own copy.
+- **Shaders created by the game**: the build now runs the game for a few seconds, muted, to collect the 80 shaders the
+  game creates when it starts (they are not in the shader archive of the copy), then translates and precompiles them
+  with the others: 2,388 shaders. Up to 1.0.1, the clip recording did this along the way.
+- **Correction of the 1.0.1 notes**: they said that a new install lacked these 80 shaders. In fact the clip recording
+  collected them; only a build where the recording was skipped or failed lacked them.
+- **Updating from 1.0.1** with the launcher: the update is 60 MB, because of the clips. Nothing is rebuilt.
+
 ## 1.0.1 — lighter package, third-party licenses
 
 - **Licenses of the bundled tools**: the package now has `THIRD_PARTY_NOTICES.txt`, which lists every bundled component

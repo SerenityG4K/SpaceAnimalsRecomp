@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Assemble la release à distribuer : launcher, sources du recompilateur et outils, SANS rien qui vienne du jeu (ni copie,
-ni code généré, ni objets, ni shaders, ni extraits, ni icône, ni journaux).
+ni code généré, ni objets, ni shaders, ni icône, ni journaux). Seule exception, voulue par SerenityG4K depuis la 1.0.2 :
+les extraits vidéo du fond du launcher (son gameplay, recomp/launcher/extraits).
 
   python paquet.py <dossier de sortie> [--version 1.0.0] [--garder]
 
@@ -21,6 +22,7 @@ Contenu :
   recomp/launcher/preparer.py      construction (bouton « RECOMPILER LE JEU »)
   recomp/launcher/maj.py           mises à jour depuis les releases GitHub
   recomp/launcher/outils.py        outils de construction depuis leurs sources officielles
+  recomp/launcher/extraits/*.mp4   extraits vidéo du fond du launcher (gameplay de SerenityG4K, fournis à sa demande)
   tools/nup.py, tools/nso.py       lecture de la copie .nup et des exécutables NSO
   outils/                          Python, GCC, glslang (paquet complet seulement ; GCC et glslang réduits aux
                                    fichiers que la construction utilise, voir outils.GARDER_GCC)
@@ -65,9 +67,9 @@ Il vous faut :
   2. Lancez lanceur.exe.
   3. Choisissez votre copie (COPIE › choisir), puis cliquez « RECOMPILER LE JEU ».
      Comptez 35 à 50 minutes : le launcher reste utilisable pendant ce temps.
-  4. Vers la fin, tous les shaders du jeu sont compilés pour votre carte graphique (moins d'une minute) : plus
-     aucune saccade de compilation en jeu. Puis le jeu s'ouvre quelques minutes, sans le son, pour enregistrer
-     les extraits du fond du launcher : laissez-le faire.
+  4. Vers la fin, tous les shaders du jeu sont compilés pour votre carte graphique (environ une minute) : plus
+     aucune saccade de compilation en jeu. Le jeu s'ouvre aussi quelques secondes, sans le son, pour relever les
+     shaders qu'il crée au démarrage : laissez-le faire.
   5. Cliquez « JOUER ». Sous le bouton : plein écran ou fenêtré. Réglages : langue du jeu, résolution, images
      par seconde, volume, mises à jour.
 
@@ -78,7 +80,8 @@ launcher ; « METTRE À JOUR LE JEU » refait ensuite seulement les étapes dont
 Journaux : recomp\\build\\full\\preparation.log (construction), recomp\\build\\full\\recomp_run.log (partie),
 recomp\\build\\full\\precompile.log (shaders), mise_a_jour.log (mises à jour).
 
-Les extraits vidéo du fond du launcher et l'icône du jeu sont tirés de votre copie et ne quittent jamais votre PC.
+Les extraits vidéo du fond du launcher (gameplay enregistré par SerenityG4K) sont fournis avec le paquet. L'icône du jeu
+est tirée de votre copie et ne quitte jamais votre PC.
 Votre copie n'est jamais modifiée (lecture seule).
 
 Licences : SpaceAnimalsRecomp est sous licence GNU GPL v3. Le dossier outils contient des logiciels libres tiers,
@@ -155,6 +158,12 @@ def main():
             copier(os.path.join(RECOMP, "shaders", f), os.path.join(r, "shaders", f))
     for f in ("preparer.py", "maj.py", "outils.py"):
         copier(os.path.join(LANCEUR, f), os.path.join(r, "launcher", f))
+    # extraits du fond du launcher : gameplay enregistré par SerenityG4K, distribué à sa demande (1.0.2)
+    extraits = sorted(f for f in os.listdir(os.path.join(LANCEUR, "extraits")) if f.startswith("extrait_") and f.endswith(".mp4"))
+    if not extraits:
+        sys.exit("aucun extrait dans recomp/launcher/extraits")
+    for f in extraits:
+        copier(os.path.join(LANCEUR, "extraits", f), os.path.join(r, "launcher", "extraits", f))
     for f in ("nup.py", "nso.py"):
         copier(os.path.join(PROJET, "tools", f), os.path.join(out, "tools", f))
     # avis et textes des licences des outils fournis : à la racine, dans les deux archives
@@ -186,7 +195,8 @@ def main():
                  ".ico", ".jpg", ".jpeg", ".png")   # images : l'icône du jeu, les captures (lanceur.exe a la sienne)
     for racine, _, fichiers in os.walk(out):
         for f in fichiers:
-            if f.lower().endswith(interdits) and os.path.join(out, "outils") not in racine:
+            extrait = os.path.normpath(racine) == os.path.normpath(os.path.join(r, "launcher", "extraits")) and                 f.startswith("extrait_") and f.endswith(".mp4")
+            if f.lower().endswith(interdits) and os.path.join(out, "outils") not in racine and not extrait:
                 sys.exit(f"fichier interdit dans le paquet : {os.path.join(racine, f)}")
     taille = sum(os.path.getsize(os.path.join(rt, f)) for rt, _, fs in os.walk(out) for f in fs)
     print(f"paquet : {out} ({taille / 1e6:.1f} Mo)")

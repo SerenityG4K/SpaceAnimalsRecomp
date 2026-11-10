@@ -831,6 +831,9 @@ void page_construction(float t) {
         else texte(T("cons_fini"), F_GRAS, PX0 + 24, ry, VERT);
     } else if (c.active && c.courante >= 0 && c.courante < (int)c.etapes.size() && c.etapes[c.courante] == "extraits") {
         texte_lignes(T("cons_info_extraits"), F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, VERT_PALE);
+    } else if (c.active && c.courante >= 0 && c.courante < (int)c.etapes.size() && c.etapes[c.courante] == "pipelines" &&
+               c.info == L"jeu") {   // relevé des shaders créés par le jeu (preparer.py, releve_shaders)
+        texte_lignes(T("cons_info_releve"), F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, VERT_PALE);
     }
     // journal : dernières lignes
     const float jy0 = PY0 + 352, jy1 = PY1 - 56;

@@ -61,7 +61,7 @@ experimental and not optimized yet, so a less powerful PC may not reach a steady
 Deck (SteamOS), the Windows build would have to run through Proton. Feedback is welcome in the
 [Issues](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues).
 
-1. Download `SpaceAnimalsRecomp-1.0.1-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
+1. Download `SpaceAnimalsRecomp-1.0.2-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
    It bundles everything the build needs (Python, GCC, glslang): nothing else to install.
 2. Extract it to a folder you can write to, **not** Program Files, whose path has only Latin characters, for example
    `C:\Games\StarFox`. Spaces are fine: the compiler is then copied once to `C:\ProgramData\StarFoxRecomp` (about 400 MB).
@@ -69,16 +69,16 @@ Deck (SteamOS), the Windows build would have to run through Proton. Feedback is 
    - The launcher checks that it is Star Fox 2.0.0 by the SHA-256 hashes in the file's index, without reading all 30 GB.
    - It extracts the executables, recompiles the whole game code (35 to 50 minutes, the launcher stays usable),
      links `recomp_main.exe` and translates the game's shaders.
-   - It then compiles every shader for your GPU, like recent PC games do on their first launch (under a minute), so
-     there is no shader compilation stutter in game.
-   - At the end, the game opens for a few minutes, muted, to record clips of its cutscenes for the launcher's
-     background: let it run. These clips come from your copy and never leave your PC.
+   - It then compiles every shader for your GPU, like recent PC games do on their first launch (about a minute), so
+     there is no shader compilation stutter in game. The game also opens for a few seconds, muted, to collect the
+     shaders it creates when it starts: let it run.
 4. Click **PLAY**. Under the button, choose **FULL SCREEN** or **WINDOWED** (Alt+Enter or F11 also switch in game).
    **SETTINGS** has the game language (15 choices), resolution (up to 4K), frame rate, native or console-like 3D
    rendering, volume and update checks.
 
 Your copy is never modified (read-only). The game's own icon is taken from your copy at build time and shown on
-`recomp_main.exe` and in the launcher's window; it is never distributed either.
+`recomp_main.exe` and in the launcher's window; it is never distributed. The launcher's background clips, gameplay
+recorded by SerenityG4K, come with the package.
 
 ### Updates
 
@@ -89,18 +89,16 @@ build, your saves and your settings stay.
 
 ### Shader precompilation
 
-Every shader the build extracts from your copy (2,308 of them) is compiled for your GPU once, on the first launch, and again only after a GPU
+Every one of the game's 2,388 translated shaders is compiled for your GPU once, on the first launch, and again only after a GPU
 driver update. SpaceAnimalsRecomp uses Vulkan graphics pipeline libraries (`VK_EXT_graphics_pipeline_library`): each
 shader is compiled on its own, ahead of time, and a draw only links precompiled pieces, which takes a fraction of a
 millisecond. The result is kept in `recomp\build\full\pipelines.cache`. Deleting it only means compiling again on the next
 launch. On a GPU without pipeline libraries, shaders are compiled the first time they are drawn, then kept in the same
 cache.
 
-**Known issue**: 80 more shaders that can be translated (72 of them compute shaders) are not extracted from your copy
-yet. The game loads them when it starts but takes them from elsewhere than the shader archive the build reads. They
-were there during the complete playthroughs, which were made on the developer's build. On a new install, a scene that
-uses one of them would miss that effect: if you see a missing effect, please report it. A fix is planned for the next
-version.
+2,308 of them come from the shader archive of your copy. The other 80 (72 of them compute shaders) are created by the
+game when it starts, from elsewhere in your copy: the build runs the game for a few seconds to collect them, then
+translates and compiles them too.
 
 ## Where are my saves?
 
@@ -123,7 +121,7 @@ SpaceAnimalsRecomp so far.
 |---|---|---|---|
 | ✅ | Recompiler | 100% | The whole game (main, sdk and the four subsdk modules) recompiles from ARM64 to C++ and native x86-64 |
 | ✅ | Launcher and game setup | 100% | Copy check by SHA-256, extraction, code build, link and shader translation, all from your own file, with progress and logs |
-| 🔧 | Shader translation | 97% | 2,388 of the game's 2,468 shader stages translate to SPIR-V; 80 are left to translate. A new install gets 2,308 of them for now (see Shader precompilation) |
+| 🔧 | Shader translation | 97% | 2,388 of the game's 2,468 shader stages translate to SPIR-V; 80 are left to translate |
 | ✅ | Shader precompilation | 100% | Every shader compiled for your GPU on the first launch: no compilation stutter in game |
 | ✅ | Text and voice languages | 100% | Any of the game's 15 languages (Automatic follows Windows) |
 | ✅ | Sound | 100% | The game's audio, mixed by its own audio engine |

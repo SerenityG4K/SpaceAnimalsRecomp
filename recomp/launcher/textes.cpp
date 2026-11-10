@@ -115,6 +115,8 @@ const Texte TEXTES[] = {
      L"Allow about 35 min on 16 threads and 4 GB of free disk space. The launcher stays usable."},
     {"cons_info_extraits", L"Le jeu s'ouvre quelques minutes, sans le son, pour enregistrer ses cinématiques.",
      L"The game opens for a few minutes, muted, to record its cutscenes."},
+    {"cons_info_releve", L"Le jeu s'ouvre quelques secondes, sans le son, pour relever les shaders qu'il crée au démarrage.",
+     L"The game opens for a few seconds, muted, to collect the shaders it creates when it starts."},
     {"deja_fait", L"déjà fait", L"already done"},
     {"annuler", L"ANNULER", L"CANCEL"},
     {"fermer", L"FERMER", L"CLOSE"},

@@ -1546,3 +1546,19 @@ Publiée sous le nom **SpaceAnimalsRecomp** (le launcher affiche « StarFox Rema
   `paquet.py` les met à la racine du paquet (`THIRD_PARTY_NOTICES.txt`, `LICENCES/`), dans les deux archives.
 - **Launcher** : `construire.py` écrit `lanceur.exe` à la racine du projet, à côté de `recomp/`, comme dans le paquet.
   Ses réglages (`lanceur.ini`) sont à côté de lui. Dans cette disposition, le launcher vérifie aussi les releases.
+
+## Version 1.0.2 : extraits fournis, relevé des shaders (2026-11-10)
+
+- **Extraits du fond du launcher fournis** : à la demande de l'utilisateur (« c'est juste mon gameplay »), les 6 extraits
+  de `launcher/extraits/` (59 Mo, vidéo seule) sont dans le paquet et dans la mise à jour. `paquet.py` les copie (seule
+  exception à la règle « rien du jeu dans le paquet ») ; ils restent hors du dépôt git.
+- **Étape « extraits »** : sautée si des extraits sont déjà là, sauf demande explicite (`--etapes …,extraits`, bouton
+  « RÉENREGISTRER LES EXTRAITS » des Réglages). « RECONSTRUIRE » (`--forcer`) ne les réenregistre plus.
+- **Relevé des shaders** (`preparer.releve_shaders`, dans l'étape « pipelines », une fois par exécutable construit) : le
+  jeu crée au démarrage 159 shaders absents des paquets de `data.zip` (80 traduisibles, dont 72 calculs, et les 79 du
+  réseau DLSS de la console) et les écrit dans `shaders/` (« shader inconnu »). Le jeu est lancé fenêtré, sans le son,
+  avec une sauvegarde à part, jusqu'à sa 600e image ; puis `shaderc.py --nouveaux` et une seconde précompilation.
+  Jusqu'à la 1.0.1, l'enregistrement des extraits faisait ce relevé au passage (`e_extraits`) : l'essai 1.0.1 sans
+  extraits (`--sans-extraits`) avait donc 2 308 shaders, et la note « problème connu » de la 1.0.1 était fausse pour
+  une installation normale.
+- Le launcher affiche « Le jeu s'ouvre quelques secondes… » pendant le relevé (`cons_info_releve`).

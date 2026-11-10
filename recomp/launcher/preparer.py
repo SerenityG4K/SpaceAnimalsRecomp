@@ -11,13 +11,17 @@ mise à jour, seules les étapes dont le code a changé sont refaites) :
   recompiler  code ARM64 → C++ → objets x86-64 (fullbuild.py, ≈ 35 min sur 16 fils ; objets inchangés réutilisés)
   lier        exécutable recomp/build/full/recomp_main.exe (link.py)
   shaders     shaders du jeu extraits de la romfs puis traduits en SPIR-V (romfs_shaders.py, shaderc.py)
-  pipelines   tous les shaders compilés pour ce GPU (recomp_main --precompile → pipelines.cache) : aucune saccade
-  extraits    quelques extraits des cinématiques, enregistrés par le jeu recompilé, pour le fond du launcher
+  pipelines   tous les shaders compilés pour ce GPU (recomp_main --precompile → pipelines.cache) : aucune saccade ;
+              une fois par exécutable construit, le jeu est aussi lancé quelques secondes pour relever les shaders qu'il
+              crée au démarrage (absents des paquets de la romfs), qui sont alors traduits et compilés eux aussi
+  extraits    extraits des cinématiques pour le fond du launcher. Depuis la 1.0.2, ils sont fournis avec le paquet :
+              l'étape n'est faite que s'ils manquent, ou sur demande (--etapes …,extraits : bouton « RÉENREGISTRER »)
 
 Le launcher lit la sortie : lignes « @etapes … », « @etape <id> », « @progres <0-1> », « @info <texte> »,
 « @ok <id> », « @saute <id> », « @fini », « @erreur <texte> » ; les autres lignes vont au journal.
 
-Tout ce que produit ce script dérive de la copie du joueur et reste sur son PC (jamais distribué).
+Tout ce que produit ce script dérive de la copie du joueur et reste sur son PC (jamais distribué). Seuls les extraits
+fournis avec le paquet (gameplay enregistré par SerenityG4K) sont distribués, à sa demande.
 """
 import argparse
 import glob
@@ -549,6 +553,72 @@ def e_pipelines(copie, a):
             raise Echec("précompilation des shaders : " + l[8:])
 
     lancer([exe, "--precompile"], FULL, analyse)
+    # une fois par exécutable : les shaders que le jeu crée au démarrage, puis leur compilation pour ce GPU
+    cle = releve_cle()
+    if cle and not deja_fait("releve", cle):
+        avant = compter(os.path.join(FULL, "shader_cache"), "*.spv")
+        if releve_shaders(a):
+            noter("releve", cle)
+        if compter(os.path.join(FULL, "shader_cache"), "*.spv") != avant:
+            dire("@info " + "shaders du jeu")
+            lancer([exe, "--precompile"], FULL, analyse)
+
+
+def releve_cle():
+    """Identité de l'exécutable construit (taille, date) : le relevé est refait après chaque nouvelle édition de liens."""
+    try:
+        s = os.stat(os.path.join(FULL, "recomp_main.exe"))
+    except OSError:
+        return None
+    return f"{s.st_size}:{int(s.st_mtime)}"
+
+
+def releve_shaders(a):
+    """Le jeu crée au démarrage des shaders qui ne sont dans aucun paquet de shaders de la romfs (80 traduisibles, et les
+    79 du réseau DLSS de la console) : il les écrit dans shaders/ (« shader inconnu »). On le lance quelques secondes,
+    fenêtré, sans le son et avec une sauvegarde à part, jusqu'à sa 600e image, puis on traduit ces nouveaux shaders.
+    Jusqu'à la 1.0.1, l'enregistrement des extraits faisait ce relevé au passage. Renvoie False si le jeu n'a pas
+    atteint sa 600e image (le relevé sera retenté à la prochaine construction) ; ce n'est jamais bloquant."""
+    exe = os.path.join(FULL, "recomp_main.exe")
+    save = os.path.join(FULL, "essai_releve")
+    journal = os.path.join(FULL, "releve_shaders.log")
+    shutil.rmtree(save, ignore_errors=True)
+    os.makedirs(save, exist_ok=True)
+    try:
+        os.remove(journal)
+    except OSError:
+        pass
+    env = outils_env()
+    env.update({"RECOMP_SAVE_DIR": save, "RECOMP_WINDOW": "windowed", "RECOMP_VOLUME": "0"})
+    dire("@info jeu")
+    p = subprocess.Popen([exe, "--log", journal], cwd=FULL, env=env, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    t0, limite, texte, fini = time.time(), 180, "", False
+    try:
+        while p.poll() is None and time.time() - t0 < limite:
+            try:
+                texte = open(journal, encoding="utf-8", errors="replace").read()
+            except OSError:
+                pass
+            if " image 600 :" in texte:
+                fini = True
+                break
+            dire(f"@progres {min(0.99, (time.time() - t0) / 30):.3f}")
+            time.sleep(0.5)
+    finally:
+        if p.poll() is None:
+            p.kill()
+            try:
+                p.wait(15)
+            except subprocess.TimeoutExpired:
+                pass
+        shutil.rmtree(save, ignore_errors=True)
+    n = texte.count("shader inconnu")
+    dire(f"relevé des shaders : {n} créés par le jeu au démarrage en {time.time() - t0:.0f} s"
+         + ("" if fini else f" (relevé incomplet : voir {journal})"))
+    lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "shaders", "shaderc.py"), "--nouveaux", "-j", str(a.fils)],
+           RECOMP)
+    return fini
 
 
 FONCTIONS = {"extraire": e_extraire, "images": e_images, "recompiler": e_recompiler, "lier": e_lier,
@@ -566,6 +636,7 @@ def main():
     ap.add_argument("--sans-extraits", action="store_true")
     a = ap.parse_args()
     etapes = [e for e in a.etapes.split(",") if e in ETAPES]
+    explicite = a.etapes != ",".join(ETAPES)   # --etapes donné (bouton « RÉENREGISTRER LES EXTRAITS »)
     if a.sans_extraits and "extraits" in etapes:
         etapes.remove("extraits")
     dire("@etapes " + ",".join(etapes))
@@ -584,6 +655,10 @@ def main():
             dire(f"@etape {e}")
             if (not a.forcer and e not in TOUJOURS and deja_fait(e, sig[e])
                     and not (e == "extraits" and compter(EXTRAITS, "extrait_*.mp4") == 0)):
+                dire(f"@saute {e}")
+                continue
+            # extraits fournis avec le paquet (1.0.2) : enregistrés seulement s'ils manquent, ou sur demande explicite
+            if e == "extraits" and not explicite and compter(EXTRAITS, "extrait_*.mp4") > 0:
                 dire(f"@saute {e}")
                 continue
             t = time.time()
