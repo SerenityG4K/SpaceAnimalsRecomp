@@ -13,7 +13,8 @@
   the documentation.
 - **Launcher**: in the source tree, `lanceur.exe` is now built at the root, next to `recomp`, as in the package.
 - **README**: the project is experimental. It is at the "it runs" stage, not optimized yet, and has only been tested on
-  an AMD Ryzen 7 9700X with an NVIDIA GeForce RTX 5070 Ti.
+  an AMD Ryzen 7 9700X with an NVIDIA GeForce RTX 5070 Ti. Handheld PCs (Steam Deck, Lenovo Legion Go, ASUS ROG Ally…)
+  are not tested yet.
 - **Updating from 1.0.0** with the launcher: no code of the game changed, so nothing is rebuilt and **UPDATE GAME** takes
   a few seconds. An install updated from 1.0.0 keeps its full compiler, which still works. To get the lighter one,
   extract the 1.0.1 package to a new folder.

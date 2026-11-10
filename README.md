@@ -57,6 +57,10 @@ You need:
 The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti. The project is
 experimental and not optimized yet, so a less powerful PC may not reach a steady 60 fps.
 
+**Handheld PCs:** not tested yet on handhelds such as the Steam Deck, Lenovo Legion Go or ASUS ROG Ally. On the Steam
+Deck (SteamOS), the Windows build would have to run through Proton. Feedback is welcome in the
+[Issues](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues).
+
 1. Download `SpaceAnimalsRecomp-1.0.1-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
    It bundles everything the build needs (Python, GCC, glslang): nothing else to install.
 2. Extract it to a folder you can write to, **not** Program Files, whose path has only Latin characters, for example
