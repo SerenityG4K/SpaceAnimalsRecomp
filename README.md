@@ -52,7 +52,10 @@ You need:
 - Windows 10 or 11, 64-bit;
 - a CPU with AVX2 (2013 or newer);
 - a GPU with a Vulkan 1.3 driver (tested on NVIDIA; AMD and Intel are untested so far);
-- about 6 GB of free disk space during the build.
+- about 6 GB of free disk space during the build;
+- **memory: 32 GB of RAM.** The game needs about 13 GB of free memory (RAM and page file) to run, so 16 GB of RAM is
+  not enough yet ([#5](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues/5)). Close other programs (another
+  game, the browser…) before playing.
 
 The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti. The project is
 experimental and not optimized yet, so a less powerful PC may not reach a steady 60 fps.
@@ -110,7 +113,7 @@ close the game and copy the whole `save` folder.
 - Your own Star Fox for Nintendo Switch 2 (cartridge or digital) with its **2.0.0 update** (v131072), dumped from your own
   console as a single `.nup` file (title ID `0400E88025B1A000`). The launcher tells you if the file isn't the right
   game or version.
-- Windows 10 or 11 on x86-64 with AVX2, and a GPU with Vulkan 1.3.
+- Windows 10 or 11 on x86-64 with AVX2, a GPU with Vulkan 1.3, and 32 GB of RAM.
 
 ## Status
 
