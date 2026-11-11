@@ -53,8 +53,8 @@ You need:
 - a CPU with AVX2 (2013 or newer);
 - a GPU with a Vulkan 1.3 driver (tested on NVIDIA; AMD and Intel are untested so far);
 - about 6 GB of free disk space during the build;
-- **memory: 32 GB of RAM.** The game needs about 13 GB of free memory (RAM and page file) to run, so 16 GB of RAM is
-  not enough yet ([#5](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues/5)). Close other programs (another
+- **memory: 32 GB of RAM.** The game needs a lot of free memory (RAM and page file) for now, so 16 GB of RAM is not
+  enough yet ([#5](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues/5)). Close other programs (another
   game, the browser…) before playing.
 
 The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti. The project is
