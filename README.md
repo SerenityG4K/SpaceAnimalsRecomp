@@ -150,6 +150,7 @@ SpaceAnimalsRecomp so far.
 | 🔧 | Controls | 75% | Keyboard (keys changeable in the launcher) and one XInput controller (Xbox layout), by button position; no mouse yet |
 | 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
 | 🗺️ | NVIDIA DLSS | 0% | Planned: DLSS on PC, with free output resolution |
+| 🗺️ | AMD FSR 3 | 0% | Planned after DLSS: FSR 3 upscaling, for all graphics cards |
 | 🗺️ | Frame generation | 0% | Planned: generated frames between the ones the game draws, for a higher frame rate on screen |
 | 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
 | 🗺️ | Online play | 0% | Planned: the game's online modes |
