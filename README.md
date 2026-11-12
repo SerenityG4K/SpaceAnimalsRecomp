@@ -154,6 +154,7 @@ SpaceAnimalsRecomp so far.
 | 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
 | 🗺️ | Online play | 0% | Planned: the game's online modes |
 | 🗺️ | Mouse controls | 0% | Planned: the game's mouse mode, with the PC mouse |
+| 🗺️ | amiibo | 0% | Planned: the game's amiibo features |
 | 🗺️ | Controller remapping and several controllers | 0% | Planned |
 | 🗺️ | PlayStation and Switch Pro controllers, rumble | 0% | Planned (asked for in #3) |
 | 🗺️ | Linux | 0% | Planned |
