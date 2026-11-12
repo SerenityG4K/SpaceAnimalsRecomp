@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Construit le jeu sur le PC du joueur, à partir de SA copie (.nup) : ce que lance « RECOMPILER LE JEU ».
 
-  python -u preparer.py --copie <jeu.nup> [--fils N] [--etapes verifier,extraire,...] [--forcer] [--sans-extraits]
+  python -u preparer.py --copie <jeu.nup> [--fils N] [--etapes verifier,extraire,...] [--forcer]
 
 Étapes (chacune est sautée si elle est déjà faite pour cette copie ET pour la version actuelle de son code : après une
 mise à jour, seules les étapes dont le code a changé sont refaites) :
@@ -14,8 +14,12 @@ mise à jour, seules les étapes dont le code a changé sont refaites) :
   pipelines   tous les shaders compilés pour ce GPU (recomp_main --precompile → pipelines.cache) : aucune saccade ;
               une fois par exécutable construit, le jeu est aussi lancé quelques secondes pour relever les shaders qu'il
               crée au démarrage (absents des paquets de la romfs), qui sont alors traduits et compilés eux aussi
-  extraits    extraits des cinématiques pour le fond du launcher. Depuis la 1.0.2, ils sont fournis avec le paquet :
-              l'étape n'est faite que s'ils manquent, ou sur demande (--etapes …,extraits : bouton « RÉENREGISTRER »)
+
+Les extraits vidéo du fond du launcher (recomp/launcher/extraits) sont fournis avec le paquet et publiés dans le dépôt.
+Jusqu'à la 1.0.2, une étape « extraits » lançait le jeu pour les enregistrer. Elle n'existe plus depuis la 1.0.3
+(demande de l'utilisateur, 2026-11-11 : « il n'y a pas de réenregistrement, le launcher utilise la vidéo du repo, rien
+de plus ») : rien ici ne crée, ne remplace ni n'efface ces fichiers. « --etapes …,extraits » et « --sans-extraits »
+(anciens launchers) sont acceptés et ignorés.
 
 Le launcher lit la sortie : lignes « @etapes … », « @etape <id> », « @progres <0-1> », « @info <texte> »,
 « @ok <id> », « @saute <id> », « @fini », « @erreur <texte> » ; les autres lignes vont au journal.
@@ -42,7 +46,6 @@ RACINE = os.path.dirname(RECOMP)                 # extracted/ et work/ (a64/modu
 OUTILS = os.path.join(RACINE, "tools")           # nup.py, nso.py
 FULL = os.path.join(RECOMP, "build", "full")
 MARQUES = os.path.join(FULL, ".preparation")
-EXTRAITS = os.path.join(LANCEUR, "extraits")
 
 TITRE = 0x0400E88025B1A000
 VERSION = 131072                                 # patch 2.0.0
@@ -57,17 +60,17 @@ EXEFS = {
     "subsdk2": "517e7eb922bbe312740b9e4af4eab01aeeec6d5b230b5fa9ef28fcd897ed18d8",
     "subsdk3": "164f09d5abfc3a31df47e2665087aabbf704943286806d1a5b685de675a22cd8",
 }
-ETAPES = ["verifier", "extraire", "images", "recompiler", "lier", "shaders", "pipelines", "extraits"]
+ETAPES = ["verifier", "extraire", "images", "recompiler", "lier", "shaders", "pipelines"]
 # Code dont dépend chaque étape (chemins relatifs à la racine, motifs glob) et étape dont elle reprend le résultat :
 # une étape est refaite quand ce code change, ou quand l'étape dont elle dépend a été refaite.
 DEPENDANCES = {
     "extraire": ([], ["tools/nup.py"]),
     "images": (["extraire"], ["tools/nso.py"]),
     "recompiler": (["images"], ["recomp/recomp.py", "recomp/build.py", "recomp/fullbuild.py", "recomp/hooks.txt",
+                                "recomp/lots.txt",
                                 "recomp/a64/*.py", "recomp/runtime/*.h"]),
     "lier": (["recompiler"], ["recomp/link.py", "recomp/runtime/*.cpp", "recomp/runtime/os/*.cpp", "recomp/runtime/os/*.h"]),
     "shaders": ([], ["recomp/shaders/*.py"]),
-    "extraits": ([], []),
 }
 # étape refaite à chaque construction : recomp_main --precompile ne recompile que si le GPU, le pilote ou les shaders
 # ont changé (sa propre marque, pipelines.ok)
@@ -116,8 +119,8 @@ def gcc_sans_espaces(outils):
     dest = os.path.join(base, "StarFoxRecomp", "gcc-" + hashlib.sha1(ident).hexdigest()[:10])
     if os.path.exists(os.path.join(dest, ".complet")):
         return os.path.join(dest, "bin")
-    dire("@info compilateur → " + dest)
-    dire(f"copie du compilateur vers {dest} (chemin sans espaces, une seule fois)")
+    dire("@info compiler → " + dest)
+    dire(f"copying the compiler to {dest} (path without spaces, only once)")
     try:
         shutil.rmtree(dest + ".part", ignore_errors=True)
         shutil.copytree(gcc, dest + ".part")
@@ -127,7 +130,7 @@ def gcc_sans_espaces(outils):
         open(os.path.join(dest, ".complet"), "w").close()
         return os.path.join(dest, "bin")
     except OSError as e:
-        dire(f"copie impossible ({e}) : le compilateur fourni risque d'échouer dans {gcc}")
+        dire(f"copy impossible ({e}): the bundled compiler may fail in {gcc}")
         return os.path.join(gcc, "bin")
 
 
@@ -180,8 +183,9 @@ def lancer(cmd, cwd, analyse=None, env=None):
             analyse(ligne)
     if p.wait():
         nom = next((os.path.basename(c) for c in cmd if str(c).endswith((".py", ".exe"))), os.path.basename(cmd[0]))
-        raise Echec(f"{nom} a échoué (code {p.returncode}) : "
-                    + (queue[-1] if queue else ""))
+        e = Echec(f"{nom} failed (code {p.returncode}): " + (queue[-1] if queue else ""))
+        e.sortie = list(queue)   # dernières lignes (diagnostic : manque de mémoire…)
+        raise e
 
 
 class Copie:
@@ -192,28 +196,28 @@ class Copie:
         try:
             self.n = nup.Nup(chemin)
         except Exception as e:  # noqa: BLE001
-            raise Echec(f"ce fichier n'est pas une copie .nup lisible ({e})")
+            raise Echec(f"this file is not a readable .nup game copy ({e})")
         self.index = None
         for i, c in enumerate(self.n.contents):
             if c["type"] == 1 and (c["title_id"] & ~0xFFF) == TITRE and c.get("version") == VERSION:
                 self.index = i
         if self.index is None:
             titres = ", ".join(f"{c['title_id']:016X} v{c.get('version')}" for c in self.n.contents)
-            raise Echec(f"copie non reconnue : il faut Star Fox (0400E88025B1A000) avec la mise à jour 2.0.0 "
-                        f"(v131072) ; trouvé : {titres or 'aucun contenu'}")
+            raise Echec(f"game copy not recognized: Star Fox (0400E88025B1A000) with update 2.0.0 is required "
+                        f"(v131072); found: {titres or 'no content'}")
         self.fichiers = {p: fi for p, fi in self.n.walk(self.index)}
 
     def verifier(self):
         for m, attendu in EXEFS.items():
             fi = self.fichiers.get(f"exefs/{m}")
             if fi is None:
-                raise Echec(f"exefs/{m} absent de la copie")
+                raise Echec(f"exefs/{m} missing from the game copy")
             h = fi["sha256"].hex() if isinstance(fi["sha256"], (bytes, bytearray)) else str(fi["sha256"])
             if h != attendu:
-                raise Echec(f"exefs/{m} ne correspond pas à la version 2.0.0 (copie modifiée ou autre version)")
+                raise Echec(f"exefs/{m} does not match version 2.0.0 (modified game copy or other version)")
         dz = self.fichiers.get("romfs/data.zip")
         if dz is None or dz["compressed"]:
-            raise Echec("romfs/data.zip absent de la copie, ou dans un format non prévu")
+            raise Echec("romfs/data.zip missing from the game copy, or in an unexpected format")
 
     def signature(self):
         return EXEFS["main"][:16] + ":" + os.path.basename(self.chemin)
@@ -224,18 +228,18 @@ def verifier_pc(construire):
     if os.name == "nt":
         import ctypes
         if not ctypes.windll.kernel32.IsProcessorFeaturePresent(40):   # PF_AVX2_INSTRUCTIONS_AVAILABLE
-            raise Echec("ce processeur n'a pas les instructions AVX2 : le jeu recompilé ne peut pas y tourner")
+            raise Echec("this processor lacks the AVX2 instructions: the recompiled game cannot run on it")
         if not os.path.exists(os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "vulkan-1.dll")):
-            dire("attention : Vulkan introuvable (vulkan-1.dll) : installez le pilote de votre carte graphique")
+            dire("warning: Vulkan not found (vulkan-1.dll): install your graphics card driver")
         try:   # GCC passe par les API ANSI : un chemin hors de la page de code de Windows le ferait échouer
             RACINE.encode("mbcs", errors="strict")
         except UnicodeEncodeError:
-            raise Echec("le chemin du dossier contient des caractères que le compilateur ne gère pas : "
-                        "déplacez le dossier du jeu (par exemple dans C:\\Jeux\\StarFox)")
+            raise Echec("the folder path contains characters the compiler cannot handle: "
+                        "move the game folder (for example to C:\\Jeux\\StarFox)")
     if construire:
         libre = shutil.disk_usage(RACINE).free
         if libre < 6e9:
-            raise Echec(f"espace disque insuffisant : {libre / 1e9:.1f} Go libres, il en faut environ 6")
+            raise Echec(f"not enough disk space: {libre / 1e9:.1f} GB free, about 6 are needed")
 
 
 def marque(etape):
@@ -263,7 +267,7 @@ def signatures(copie_sig):
     def code(motifs):
         h = hashlib.sha256()
         for m in motifs:
-            for p in sorted(glob.glob(os.path.join(RACINE, *m.split("/")))):
+            for p in sorted(glob.glob(os.path.join(glob.escape(RACINE), *m.split("/")))):
                 h.update(os.path.relpath(p, RACINE).replace("\\", "/").encode() + b"\0")
                 with open(p, "rb") as f:
                     h.update(hashlib.sha256(f.read()).digest())
@@ -294,7 +298,7 @@ def e_extraire(copie, a):
         dire(f"@info exefs/{m}")
         ok = copie.n.extract(copie.fichiers[f"exefs/{m}"], os.path.join(dest, m), verify=True)
         if ok is False:
-            raise Echec(f"exefs/{m} : empreinte différente après extraction (copie abîmée ?)")
+            raise Echec(f"exefs/{m}: SHA-256 hash differs after extraction (damaged game copy?)")
         dire(f"@progres {(k + 1) / len(a_faire):.3f}")
 
 
@@ -317,21 +321,120 @@ def e_recompiler(copie, a):
     actuel = {"m": None}
 
     def analyse(l):
-        m = re.match(r"(\w+): (\d+)/(\d+) lots compilés", l)
+        m = re.match(r"(\w+): (\d+)/(\d+) batches compiled", l)
         if m and m.group(1) in fait:
             fait[m.group(1)] = int(m.group(2)) / max(1, int(m.group(3)))
-        m2 = re.match(r"(\w+): (tour \d+|\d+ fonctions)", l)
+        m2 = re.match(r"(\w+): (round \d+|\d+ functions)", l)
         if m2 and m2.group(1) in fait and actuel["m"] != m2.group(1):
             actuel["m"] = m2.group(1)
             dire(f"@info {m2.group(1)}")
-        m3 = re.match(r"(\w+): terminé", l)
+        m3 = re.match(r"(\w+): done", l)
         if m3 and m3.group(1) in fait:
             fait[m3.group(1)] = 1.0
         dire(f"@progres {sum(fait[k] * POIDS[k] for k in fait) / total:.3f}")
 
     ordre = ["sdk", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "main"]
-    lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "fullbuild.py"), *ordre, "-j", str(a.fils)], RECOMP,
-           analyse)
+    compilateur_a_niveau()
+    fils = fils_selon_memoire(a.fils)
+    for essai in range(4):
+        try:
+            lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "fullbuild.py"), *ordre, "-j", str(fils)], RECOMP,
+                   analyse)
+            return
+        except Echec as e:
+            # certains lots demandent bien plus que la moyenne : si la mémoire a manqué (MemoryError dans Python, « out
+            # of memory » dans cc1plus), on recommence avec deux fois moins de tâches. Les lots déjà compilés sont
+            # gardés (empreinte de chaque objet) : seuls ceux qui ont échoué sont refaits.
+            memoire = any("out of memory" in l or "MemoryError" in l for l in getattr(e, "sortie", []))
+            if not memoire or fils == 1 or essai == 3:
+                raise
+            fils = max(1, fils // 2)
+            dire(f"not enough memory during recompilation: retrying with {fils} parallel compilation(s) "
+                 "(batches already compiled are kept)")
+            dire("@info " + ("memory: retrying"))
+
+
+# Mémoire d'une tâche de recompilation (relevé du 2026-11-10 pendant main) : le processus Python de fullbuild.py garde
+# ≈ 0,85 Go pendant que g++ compile son lot, et cc1plus prend jusqu'à 1 Go. 15 tâches demandaient ≈ 28 Go : sur un PC
+# où les programmes ouverts en prennent déjà beaucoup, la construction échouait (MemoryError) ou passait des minutes
+# dans le fichier d'échange. Le nombre de tâches est donc borné par la mémoire libre au départ.
+# Depuis la 1.0.3, fullbuild.py génère les lots dans un ou deux processus Python seulement (≈ 1,7 Go en tout, compris
+# dans la réserve) et lance les compilateurs à part : une tâche ne coûte plus que son compilateur (≈ 1,3 Go en moyenne,
+# jusqu'à 2,5 Go pour les plus gros lots ; un manque de mémoire relance l'étape avec deux fois moins de tâches).
+# Avec clang (fourni depuis la 1.0.3, build.compilateur_genere), une compilation prend ≈ 180 Mo, 330 Mo pour le plus
+# gros lot (relevé du 2026-11-11, -O1) : 0,4 Go par tâche laisse de la marge. Les processus Python de fullbuild.py ne
+# prennent plus que ≈ 170 Mo chacun (≈ 1 Go jusqu'à la 1.0.2) : 2 Go de réserve pour eux et pour le système.
+GO_PAR_TACHE = 1.4
+GO_PAR_TACHE_CLANG = 0.4
+GO_RESERVE = 2.0
+
+
+def avec_clang():
+    """Le code généré sera-t-il compilé par clang ? Même règle que build.compilateur_genere : RECOMP_CXX, sinon
+    clang++.exe à côté du g++ que la construction trouve (outils fournis, MSYS2, PATH)."""
+    choix = os.environ.get("RECOMP_CXX")
+    if choix:
+        return "clang" in os.path.basename(choix).lower()
+    gxx = shutil.which("g++", path=outils_env()["PATH"])
+    return bool(gxx) and os.path.exists(os.path.join(os.path.dirname(gxx), "clang++.exe"))
+
+
+def compilateur_a_niveau():
+    """Joueur venu de la 1.0.2 (g++ seul, archive gardée par la mise à jour) qui n'a pas d'objets à garder : la
+    construction complète est 3 fois plus rapide et demande 3 fois moins de mémoire par tâche avec Clang, donc
+    l'archive actuelle du compilateur est installée d'abord (outils.py --niveau, une seule fois). Tant qu'il a ses
+    objets compilés par g++, rien n'est fait : ils restent valables. Un échec (pas de réseau…) laisse g++ en place."""
+    if os.environ.get("RECOMP_CXX") or avec_clang():
+        return
+    objets = glob.glob(os.path.join(glob.escape(RECOMP), "build", "full", "main", "main_*.o"))
+    if len(objets) >= 100:
+        return
+    for base in dossiers_outils():
+        if not os.path.exists(os.path.join(base, ".installe", "gcc")):
+            continue
+        dire("@info Clang")
+        dire("full build to do with g++ only: installing the current compiler (Clang, only once)")
+        r = subprocess.run([sys.executable, "-X", "utf8", os.path.join(LANCEUR, "outils.py"), "--dest", base, "--niveau"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        for ligne in (r.stdout + r.stderr).splitlines()[-8:]:
+            dire("  " + ligne)
+        if r.returncode:
+            dire("installation impossible: the build continues with g++")
+        GCC.clear()   # dossier du compilateur à redéterminer (copie éventuelle hors des espaces)
+        return
+
+
+def memoire_libre():
+    """(Go de RAM disponibles, Go validables disponibles : RAM + fichier d'échange).
+    RECOMP_MEM_LIBRE_GO=n : valeur imposée (essais : simuler un PC qui a peu de mémoire libre)."""
+    if os.environ.get("RECOMP_MEM_LIBRE_GO"):
+        v = float(os.environ["RECOMP_MEM_LIBRE_GO"])
+        return v, v
+    import ctypes
+
+    class Etat(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong), ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+    e = Etat()
+    e.dwLength = ctypes.sizeof(Etat)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(e)):
+        raise OSError("GlobalMemoryStatusEx")
+    return e.ullAvailPhys / 1e9, e.ullAvailPageFile / 1e9
+
+
+def fils_selon_memoire(demandes):
+    try:
+        ram, validable = memoire_libre()
+    except (OSError, AttributeError):
+        return demandes
+    clang = avec_clang()
+    n = max(1, min(demandes, int((min(ram, validable) - GO_RESERVE) / (GO_PAR_TACHE_CLANG if clang else GO_PAR_TACHE))))
+    dire(f"free memory: {ram:.0f} GB of RAM, {validable:.0f} GB of commit, compiler {'clang' if clang else 'g++'}"
+         f" → {n} parallel compilation(s)"
+         + (f" instead of {demandes} (closing other programs speeds up the build)" if n < demandes else ""))
+    return n
 
 
 def png(largeur, hauteur, rgba):
@@ -443,7 +546,7 @@ def extraire_icone(copie):
         if jpg:
             break
     if not jpg:
-        dire("icône du jeu absente des métadonnées de la copie : exécutable sans icône")
+        dire("game icon missing from the game copy metadata: executable without icon")
         return
     os.makedirs(FULL, exist_ok=True)
     chemin_jpg = os.path.join(FULL, "icone.jpg")
@@ -451,9 +554,9 @@ def extraire_icone(copie):
         f.write(jpg)
     try:
         jpeg_vers_ico(chemin_jpg, ico)
-        dire(f"icône du jeu : {ico} ({os.path.getsize(ico)} octets)")
+        dire(f"game icon: {ico} ({os.path.getsize(ico)} bytes)")
     except Exception as e:  # noqa: BLE001   (sans icône, le jeu fonctionne pareil)
-        dire(f"icône non convertie : {e}")
+        dire(f"icon not converted: {e}")
     finally:
         os.remove(chemin_jpg)
 
@@ -464,12 +567,15 @@ def e_lier(copie, a):
     dire("@progres 0.2")
     lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "link.py")], RECOMP)
     if not os.path.exists(os.path.join(FULL, "recomp_main.exe")):
-        raise Echec("l'exécutable n'a pas été produit")
+        raise Echec("the executable was not produced")
 
 
 def compter(dossier, motif):
+    # glob.escape : un dossier d'installation qui contient [ ] * ou ? (« Jeux [Switch 2] ») n'est pas un motif. Sans
+    # cela, rien n'était compté : la traduction des shaders restait à 35 % puis échouait (« trop peu de shaders
+    # traduits », issue n° 1, 2026-11-11), et les signatures des étapes ne voyaient aucun fichier de code.
     try:
-        return len(glob.glob(os.path.join(dossier, motif)))
+        return len(glob.glob(os.path.join(glob.escape(dossier), motif)))
     except OSError:
         return 0
 
@@ -503,40 +609,10 @@ def e_shaders(copie, a):
     finally:
         arret.set()
         t.join()
-    if compter(cache, "*.spv") < 2000:
-        raise Echec("trop peu de shaders traduits")
-
-
-def e_extraits(copie, a):
-    exe = os.path.join(FULL, "recomp_main.exe")
-    save = os.path.join(FULL, "essai_extraits")
-    shutil.rmtree(save, ignore_errors=True)
-    os.makedirs(save, exist_ok=True)
-    os.makedirs(EXTRAITS, exist_ok=True)
-    for f in glob.glob(os.path.join(EXTRAITS, "extrait_*.mp4*")):
-        os.remove(f)
-    env = outils_env()
-    env.update({"RECOMP_SAVE_DIR": save, "RECOMP_AUTOPRESS": "1", "RECOMP_WINDOW": "windowed", "RECOMP_VOLUME": "0",
-                "RECOMP_RECORD_DIR": EXTRAITS, "RECOMP_RECORD_EXIT": "1", "RECOMP_RECORD_CLIPS": "6"})
-    dire("@info jeu")
-    p = subprocess.Popen([exe, "--log", os.path.join(FULL, "extraits.log")], cwd=FULL, env=env,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    t0, limite = time.time(), 420
-    while p.poll() is None and time.time() - t0 < limite:
-        n = compter(EXTRAITS, "extrait_*.mp4")
-        dire(f"@progres {min(0.99, max(n / 6, (time.time() - t0) / limite)):.3f}")
-        time.sleep(1.0)
-    if p.poll() is None:
-        p.kill()
-    shutil.rmtree(save, ignore_errors=True)
-    n = compter(EXTRAITS, "extrait_*.mp4")
-    if n == 0:
-        raise Echec("aucun extrait enregistré (voir build/full/extraits.log)")
-    dire(f"@info {n}")
-    # le jeu crée au démarrage des shaders absents de la romfs (vidés dans shaders/ pendant cette partie) :
-    # on les traduit aussi, pour une installation identique à une installation faite en jouant
-    lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "shaders", "shaderc.py"), "--nouveaux", "-j", str(a.fils)],
-           RECOMP)
+    n = compter(cache, "*.spv")
+    dire(f"shaders: {compter(dump, 'h*_r.bin')} extracted from the game copy, {n} translated to SPIR-V ({cache})")
+    if n < 2000:
+        raise Echec(f"too few shaders translated ({n} out of ≈ 2 300: see the '[glslang]' lines of the log)")
 
 
 def e_pipelines(copie, a):
@@ -550,7 +626,7 @@ def e_pipelines(copie, a):
         elif l.startswith("@saute"):
             dire("@info " + l[7:])
         elif l.startswith("@erreur "):
-            raise Echec("précompilation des shaders : " + l[8:])
+            raise Echec("shader precompilation: " + l[8:])
 
     lancer([exe, "--precompile"], FULL, analyse)
     # une fois par exécutable : les shaders que le jeu crée au démarrage, puis leur compilation pour ce GPU
@@ -560,7 +636,7 @@ def e_pipelines(copie, a):
         if releve_shaders(a):
             noter("releve", cle)
         if compter(os.path.join(FULL, "shader_cache"), "*.spv") != avant:
-            dire("@info " + "shaders du jeu")
+            dire("@info " + "game shaders")
             lancer([exe, "--precompile"], FULL, analyse)
 
 
@@ -576,7 +652,8 @@ def releve_cle():
 def releve_shaders(a):
     """Le jeu crée au démarrage des shaders qui ne sont dans aucun paquet de shaders de la romfs (80 traduisibles, et les
     79 du réseau DLSS de la console) : il les écrit dans shaders/ (« shader inconnu »). On le lance quelques secondes,
-    fenêtré, sans le son et avec une sauvegarde à part, jusqu'à sa 600e image, puis on traduit ces nouveaux shaders.
+    sans fenêtre visible (RECOMP_WINDOW_HIDDEN, depuis la 1.0.3 : le joueur ne voit plus le jeu s'ouvrir tout seul),
+    sans le son et avec une sauvegarde à part, jusqu'à sa 600e image, puis on traduit ces nouveaux shaders.
     Jusqu'à la 1.0.1, l'enregistrement des extraits faisait ce relevé au passage. Renvoie False si le jeu n'a pas
     atteint sa 600e image (le relevé sera retenté à la prochaine construction) ; ce n'est jamais bloquant."""
     exe = os.path.join(FULL, "recomp_main.exe")
@@ -589,7 +666,7 @@ def releve_shaders(a):
     except OSError:
         pass
     env = outils_env()
-    env.update({"RECOMP_SAVE_DIR": save, "RECOMP_WINDOW": "windowed", "RECOMP_VOLUME": "0"})
+    env.update({"RECOMP_SAVE_DIR": save, "RECOMP_WINDOW": "windowed", "RECOMP_VOLUME": "0", "RECOMP_WINDOW_HIDDEN": "1"})
     dire("@info jeu")
     p = subprocess.Popen([exe, "--log", journal], cwd=FULL, env=env, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
@@ -600,7 +677,7 @@ def releve_shaders(a):
                 texte = open(journal, encoding="utf-8", errors="replace").read()
             except OSError:
                 pass
-            if " image 600 :" in texte:
+            if " frame 600:" in texte:
                 fini = True
                 break
             dire(f"@progres {min(0.99, (time.time() - t0) / 30):.3f}")
@@ -613,16 +690,16 @@ def releve_shaders(a):
             except subprocess.TimeoutExpired:
                 pass
         shutil.rmtree(save, ignore_errors=True)
-    n = texte.count("shader inconnu")
-    dire(f"relevé des shaders : {n} créés par le jeu au démarrage en {time.time() - t0:.0f} s"
-         + ("" if fini else f" (relevé incomplet : voir {journal})"))
+    n = texte.count("unknown shader")
+    dire(f"shader survey: {n} created by the game at startup in {time.time() - t0:.0f} s"
+         + ("" if fini else f" (survey incomplete: see {journal})"))
     lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "shaders", "shaderc.py"), "--nouveaux", "-j", str(a.fils)],
            RECOMP)
     return fini
 
 
 FONCTIONS = {"extraire": e_extraire, "images": e_images, "recompiler": e_recompiler, "lier": e_lier,
-             "shaders": e_shaders, "pipelines": e_pipelines, "extraits": e_extraits}
+             "shaders": e_shaders, "pipelines": e_pipelines}
 
 
 def main():
@@ -633,13 +710,43 @@ def main():
     ap.add_argument("--fils", type=int, default=max(1, (os.cpu_count() or 2) - 1))
     ap.add_argument("--etapes", default=",".join(ETAPES))
     ap.add_argument("--forcer", action="store_true")
-    ap.add_argument("--sans-extraits", action="store_true")
+    ap.add_argument("--sans-extraits", action="store_true", help="sans effet (accepté pour les anciens launchers)")
+    ap.add_argument("--a-refaire", action="store_true",
+                    help="écrit « @a_refaire étape,étape » (les étapes que la construction referait) et ne fait rien d'autre")
     a = ap.parse_args()
+    if a.a_refaire:
+        # Question du launcher à son démarrage : le jeu construit est-il encore celui de ces sources et de cette copie ?
+        # Une étape dont la signature a changé (mise à jour du code dont elle dépend, autre copie du jeu) est à refaire :
+        # le launcher impose alors la reconstruction avant de laisser jouer. Rien n'est écrit ni construit ici.
+        try:
+            copie = Copie(a.copie)
+            copie.verifier()
+            sig = signatures(copie.signature())
+            dire("@a_refaire " + ",".join(e for e in ETAPES if e not in TOUJOURS and e != "verifier"
+                                          and not deja_fait(e, sig[e])))
+            return 0
+        except Exception as ex:  # noqa: BLE001
+            dire(f"@erreur {type(ex).__name__}: {ex}")
+            return 1
+    # Le jeu refuse de démarrer quand il a été construit par une autre version que les sources installées
+    # (host_main.cpp, version_du_jeu_a_jour) ; pendant une construction, c'est justement le cas tant que la version
+    # n'est pas notée à la fin : le lancement du jeu fait ici (relevé des shaders) est exempté.
+    os.environ["RECOMP_CONSTRUCTION"] = "1"
     etapes = [e for e in a.etapes.split(",") if e in ETAPES]
-    explicite = a.etapes != ",".join(ETAPES)   # --etapes donné (bouton « RÉENREGISTRER LES EXTRAITS »)
-    if a.sans_extraits and "extraits" in etapes:
-        etapes.remove("extraits")
     dire("@etapes " + ",".join(etapes))
+    try:   # copie de secours des sauvegardes du joueur avant de toucher à quoi que ce soit (sauvegardes.py)
+        sys.path.insert(0, LANCEUR)
+        import sauvegardes
+        sauvegardes.secours("construction", dire)
+    except Exception as ex:  # noqa: BLE001
+        dire(f"saves: {type(ex).__name__}: {ex}")
+    try:   # en tête du journal : ce qu'il faut pour comprendre un échec chez un joueur (rapport de bug)
+        import rapport
+        dire(rapport.ligne_systeme())
+        dire(f"Python {sys.version.split()[0]}; {a.fils} thread(s) requested; steps {','.join(etapes)}"
+             + ("; redo everything" if a.forcer else ""))
+    except Exception as ex:  # noqa: BLE001
+        dire(f"log header: {type(ex).__name__}: {ex}")
     t0 = time.time()
     try:
         dire("@etape verifier")
@@ -653,12 +760,7 @@ def main():
             if e == "verifier":
                 continue
             dire(f"@etape {e}")
-            if (not a.forcer and e not in TOUJOURS and deja_fait(e, sig[e])
-                    and not (e == "extraits" and compter(EXTRAITS, "extrait_*.mp4") == 0)):
-                dire(f"@saute {e}")
-                continue
-            # extraits fournis avec le paquet (1.0.2) : enregistrés seulement s'ils manquent, ou sur demande explicite
-            if e == "extraits" and not explicite and compter(EXTRAITS, "extrait_*.mp4") > 0:
+            if not a.forcer and e not in TOUJOURS and deja_fait(e, sig[e]):
                 dire(f"@saute {e}")
                 continue
             t = time.time()
@@ -666,14 +768,14 @@ def main():
             if e not in TOUJOURS:
                 noter(e, sig[e])
             dire(f"@ok {e}")
-            dire(f"{e} : {time.time() - t:.0f} s")
-        if set(etapes) >= set(ETAPES) - {"extraits"}:   # construction complète : jeu à jour pour cette version
+            dire(f"{e}: {time.time() - t:.0f} s")
+        if set(etapes) >= set(ETAPES):   # construction complète : jeu à jour pour cette version
             noter("version", version_sources())
     except Echec as ex:
         dire(f"@erreur {ex}")
         return 1
     except Exception as ex:  # noqa: BLE001
-        dire(f"@erreur {type(ex).__name__} : {ex}")
+        dire(f"@erreur {type(ex).__name__}: {ex}")
         return 1
     dire(f"@fini {time.time() - t0:.0f}")
     return 0

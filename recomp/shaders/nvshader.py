@@ -25,7 +25,7 @@ class Stage:
         self.cb1 = cb1   # banque constante 1 du programme (tables de saut de BRX, constantes)
         w = struct.unpack_from("<64I", ctl.ljust(256, b"\0"))
         if w[0] != CTL_MAGIC:
-            raise ValueError(f"{name}: section de contrôle inattendue 0x{w[0]:08x}")
+            raise ValueError(f"{name}: unexpected control section 0x{w[0]:08x}")
         self.code_size = w[0x38 // 4]
         self.num_regs = w[0x4c // 4]
         self.local_size = (w[0x58 // 4], w[0x5c // 4], w[0x60 // 4])

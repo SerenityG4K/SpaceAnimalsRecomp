@@ -53,7 +53,7 @@ void set_borderless(HWND h, bool on) {
         SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
     }
     g_borderless = on;
-    HLOG("gfx", "fenêtre : %s", on ? "plein écran sans bordure" : "fenêtrée");
+    HLOG("gfx", "window: %s", on ? "borderless fullscreen" : "windowed");
 }
 
 LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -81,7 +81,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         FillRect(dc, &rc, br);
         DeleteObject(br);
         char txt[160];
-        snprintf(txt, sizeof txt, "image %llu  -  %.1f img/s  -  rendu NVN non traduit (couleur d'effacement)",
+        snprintf(txt, sizeof txt, "frame %llu  -  %.1f fps  -  NVN rendering not translated (clear color)",
                  (unsigned long long)f, fps);
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(255, 255, 255));
@@ -104,7 +104,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_CLOSE:
-        HLOG("gfx", "fenêtre fermée : fin du processus");
+        HLOG("gfx", "window closed: process exiting");
         vkr::save_caches();   // pipelines créés pendant la partie
         fflush(nullptr);
         ExitProcess(0);
@@ -130,8 +130,16 @@ void window_thread() {
     g_hwnd = CreateWindowW(L"recomp_main", L"StarFox Remake [recompiled]", WS_OVERLAPPEDWINDOW,
                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr,
                            nullptr, inst, nullptr);
-    ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
-    if (settings().borderless) set_borderless(g_hwnd, true);
+    // RECOMP_WINDOW_HIDDEN=1 : la fenêtre existe (Vulkan y présente ses images) mais n'est jamais montrée, ni dans la
+    // barre des tâches. Sert au relevé des shaders de la construction (launcher/preparer.py) : voir le jeu s'ouvrir
+    // tout seul pendant la première construction déroutait (demande de l'utilisateur, 2026-11-11).
+    static const bool cachee = getenv("RECOMP_WINDOW_HIDDEN") != nullptr;
+    if (cachee) {
+        HLOG("gfx", "window hidden (RECOMP_WINDOW_HIDDEN)");
+    } else {
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
+        if (settings().borderless) set_borderless(g_hwnd, true);
+    }
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
@@ -148,7 +156,7 @@ void gfx_open_window(int width, int height) {
         g_h = width >= 1920 ? height * 2 / 3 : height;
         g_last = g_fps_t0 = std::chrono::steady_clock::now();
         std::thread(window_thread).detach();
-        HLOG("gfx", "fenêtre hôte %dx%d", g_w, g_h);
+        HLOG("gfx", "host window %dx%d", g_w, g_h);
     });
 }
 
@@ -177,9 +185,9 @@ void gfx_count_frame(uint64_t frame) {
         g_fps_t0 = now;
         g_fps_f0 = frame;
         static int n = 0;
-        if (++n % 10 == 0) HLOG("gfx", "%.1f img/s (image %llu, Vulkan)", g_fps, (unsigned long long)frame);
+        if (++n % 10 == 0) HLOG("gfx", "%.1f fps (frame %llu, Vulkan)", g_fps, (unsigned long long)frame);
         char title[96];
-        snprintf(title, sizeof title, "StarFox Remake [recompiled]  -  %.0f img/s", g_fps);
+        snprintf(title, sizeof title, "StarFox Remake [recompiled]  -  %.0f fps", g_fps);
         if (g_hwnd) SetWindowTextA(g_hwnd, title);
     }
 }
@@ -202,7 +210,7 @@ void gfx_present(const float rgba[4], uint64_t frame) {
             g_fps_t0 = now;
             g_fps_f0 = frame;
             static int n = 0;
-            if (++n % 10 == 0) HLOG("gfx", "%.1f img/s (image %llu)", g_fps, (unsigned long long)frame);
+            if (++n % 10 == 0) HLOG("gfx", "%.1f fps (frame %llu)", g_fps, (unsigned long long)frame);
         }
     }
     if (g_hwnd) InvalidateRect(g_hwnd, nullptr, FALSE);

@@ -88,6 +88,15 @@ struct KProcess : KObject {
     const char* kind() const override { return "Process"; }
 };
 
+std::atomic<bool> g_manque_memoire{false};
+
+// mémoire validable libre du PC (RAM + fichier d'échange), en Go
+double memoire_validable_libre_go() {
+    MEMORYSTATUSEX m{};
+    m.dwLength = sizeof m;
+    return GlobalMemoryStatusEx(&m) ? m.ullAvailPageFile / 1073741824.0 : 0.0;   // Go binaires, comme la RAM
+}
+
 // ------------------------------------------------------------------------------ état
 namespace {
 
@@ -109,6 +118,12 @@ std::unordered_map<uint64_t, std::deque<KThread*>> g_mutex_q, g_cv_q, g_arb_q;
 std::shared_ptr<KProcess> g_process = std::make_shared<KProcess>();
 std::shared_ptr<KResourceLimit> g_reslimit = std::make_shared<KResourceLimit>();
 uint64_t g_heap_size = 0;
+// mémoire refusée par Windows (VirtualAlloc) : journalisée une fois, avec la mémoire libre du PC
+void refus_memoire(const char* quoi, uint64_t taille) {
+    if (!g_manque_memoire.exchange(true))
+        HLOG("mem", "%s of %.0f MB refused by Windows: the PC is low on memory (%.1f GB available commit; close "
+                    "other programs, other games, browser...)", quoi, taille / 1048576.0, memoire_validable_libre_go());
+}
 struct Mapping {
     uint64_t src, size;
 };
@@ -276,11 +291,11 @@ unsigned __stdcall thread_proc(void* p) {
     KThread* t = (KThread*)p;
     t_cur = t;
     rt_set_fpcr(t->ctx, t->ctx->fpcr);
-    HINFO("thread", "démarrage du thread %llu (entrée %s, arg 0x%llx, sp 0x%llx, prio %d)",
+    HINFO("thread", "starting thread %llu (entry %s, arg 0x%llx, sp 0x%llx, prio %d)",
           (unsigned long long)t->id, symbolize(t->entry).c_str(), (unsigned long long)t->arg,
           (unsigned long long)t->stack_top, t->prio);
     call_guest(t->ctx, t->entry);
-    HINFO("thread", "le thread %llu est revenu de sa fonction d'entrée", (unsigned long long)t->id);
+    HINFO("thread", "thread %llu returned from its entry function", (unsigned long long)t->id);
     {
         std::lock_guard<std::mutex> lk(g_k);
         t->exited = true;
@@ -320,7 +335,7 @@ void start_host_thread(KThread* t) {
     t->started = true;
     t->host = (HANDLE)_beginthreadex(nullptr, (unsigned)HOST_STACK, thread_proc, t,
                                      STACK_SIZE_PARAM_IS_A_RESERVATION, nullptr);
-    if (!t->host) panic("création du thread hôte impossible");
+    if (!t->host) panic("cannot create the host thread");
 }
 
 int64_t timeout_of(uint64_t v) { return (int64_t)v; }   // < 0 : infini
@@ -353,7 +368,7 @@ void rename_native(uint64_t addr, const std::string& name) {
 bool override_export(const char* sym, RecompFn fn) {
     uint64_t a = find_export(sym);
     if (!a) {
-        HLOG("hle", "remplacement impossible : symbole %s introuvable", sym);
+        HLOG("hle", "cannot replace: symbol %s not found", sym);
         return false;
     }
     rt_register_functions(&a, &fn, 1);   // inscrit après les modules : l'emporte au dispatch
@@ -368,7 +383,7 @@ std::string native_name(uint64_t addr) {
 
 void call_guest(CPUState* ctx, uint64_t addr) {
     RecompFn fn = rt_lookup(addr);
-    if (!fn) panic("appel de 0x%llx (%s) : aucune fonction recompilée à cette adresse",
+    if (!fn) panic("call to 0x%llx (%s): no recompiled function at this address",
                    (unsigned long long)addr, symbolize(addr).c_str());
     uint64_t lr = ctx->x[30];
     ctx->x[30] = 0;   // `ret` = retour C++ : la valeur n'est pas utilisée
@@ -402,12 +417,12 @@ int run_main_thread(uint64_t entry, uint64_t a0, uint64_t a1, uint64_t a2, uint6
         t->ctx->x[3] = a3;
         t->ctx->x[4] = a4;
         (void)a0;
-        HLOG("kernel", "thread principal : handle 0x%x, pile 0x%llx-0x%llx", th->handle,
+        HLOG("kernel", "main thread: handle 0x%x, stack 0x%llx-0x%llx", th->handle,
              (unsigned long long)bottom, (unsigned long long)top);
         start_host_thread(t);
     }
     WaitForSingleObject(t->host, INFINITE);
-    HLOG("kernel", "le thread principal s'est terminé");
+    HLOG("kernel", "the main thread has finished");
     return 0;
 }
 
@@ -461,7 +476,7 @@ uint64_t info_value(uint32_t id, uint32_t handle, uint64_t sub, uint32_t& res) {
     case 33: return 0x1000;
     default:
         // identifiants récents inconnus : 0 + avertissement (une erreur ferait avorter le SDK)
-        HLOG("svc", "GetInfo id %u (handle 0x%x, sub 0x%llx) inconnu → 0", id, handle,
+        HLOG("svc", "GetInfo id %u (handle 0x%x, sub 0x%llx) unknown → 0", id, handle,
              (unsigned long long)sub);
         return 0;
     }
@@ -521,7 +536,11 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
         if (size > HEAP_SIZE) { RET(kr::OutOfMemory); return; }
         std::lock_guard<std::mutex> lk(g_k);
         if (size > g_heap_size) {
-            if (!mem_commit(HEAP_BASE + g_heap_size, size - g_heap_size)) { RET(kr::OutOfMemory); return; }
+            if (!mem_commit_lazy(HEAP_BASE + g_heap_size, size - g_heap_size)) {
+                refus_memoire("game heap", size - g_heap_size);
+                RET(kr::OutOfMemory);
+                return;
+            }
             mem_set(HEAP_BASE + g_heap_size, size - g_heap_size, MS_NORMAL, MP_RW);
         } else if (size < g_heap_size) {
             mem_decommit(HEAP_BASE + size, g_heap_size - size);
@@ -577,7 +596,7 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
         return;
     }
     case 0x07:  // ExitProcess
-        HLOG("kernel", "ExitProcess demandé par l'invité (%s)", symbolize(pc).c_str());
+        HLOG("kernel", "ExitProcess requested by the guest (%s)", symbolize(pc).c_str());
         fflush(nullptr);
         ExitProcess(0);
     case 0x08: {  // CreateThread(entry x1, arg x2, sp x3, prio w4, core w5) → w1 handle
@@ -740,7 +759,7 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
             if (!o) {
                 static std::set<uint32_t> bad;
                 if (bad.insert(h).second)
-                    HLOG("svc", "WaitSynchronization : handle invalide 0x%x (thread %llu, appelant %s)", h,
+                    HLOG("svc", "WaitSynchronization: invalid handle 0x%x (thread %llu, caller %s)", h,
                          (unsigned long long)(t ? t->id : 0), symbolize(X(30)).c_str());
                 X(1) = (uint64_t)-1;
                 RET(kr::InvalidHandle);
@@ -881,15 +900,15 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
     }
     case 0x26: {  // Break(reason, arg, size)
         uint32_t reason = W(0);
-        HLOG("kernel", "svcBreak(raison 0x%x, arg 0x%llx, taille 0x%llx) depuis %s", reason,
+        HLOG("kernel", "svcBreak(reason 0x%x, arg 0x%llx, size 0x%llx) from %s", reason,
              (unsigned long long)X(1), (unsigned long long)X(2), symbolize(pc).c_str());
         if (reason & 0x80000000u) { RET(0); return; }   // notification seulement
-        panic("svcBreak : l'invité s'est arrêté (raison 0x%x)", reason);
+        panic("svcBreak: the guest stopped (reason 0x%x)", reason);
     }
     case 0x27: {  // OutputDebugString(str, size)
         std::string s((const char*)X(0), (size_t)X(1));
         while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-        HLOG("invité", "%s", s.c_str());
+        HLOG("guest", "%s", s.c_str());
         RET(0);
         return;
     }
@@ -906,7 +925,11 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
         HINFO("mem", "MapPhysicalMemory 0x%llx +0x%llx (thread %llu)", (unsigned long long)X(0),
               (unsigned long long)X(1), (unsigned long long)(t ? t->id : 0));
         std::lock_guard<std::mutex> lk(g_k);
-        if (!mem_commit(X(0), X(1))) { RET(kr::OutOfMemory); return; }
+        if (!mem_commit_lazy(X(0), X(1))) {   // engagée au premier accès : le jeu réserve bien plus qu'il ne remplit
+            refus_memoire("MapPhysicalMemory", X(1));
+            RET(kr::OutOfMemory);
+            return;
+        }
         mem_set(X(0), X(1), MS_NORMAL, MP_RW);
         RET(0);
         return;
@@ -1019,7 +1042,7 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
         return;
     }
     default:
-        panic("svc 0x%x non implémenté (x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx) depuis %s", imm,
+        panic("svc 0x%x not implemented (x0=0x%llx x1=0x%llx x2=0x%llx x3=0x%llx) from %s", imm,
               (unsigned long long)X(0), (unsigned long long)X(1), (unsigned long long)X(2),
               (unsigned long long)X(3), symbolize(pc).c_str());
     }
@@ -1080,16 +1103,16 @@ void kernel_dump_threads() {
     std::vector<std::pair<HANDLE, uint64_t>> running;
     {
     std::lock_guard<std::mutex> lk(g_k);
-    HLOG("dump", "%zu threads invités :", g_threads.size());
+    HLOG("dump", "%zu guest threads:", g_threads.size());
     for (auto& t : g_threads) {
-        const char* st = t->exited ? "terminé" : !t->started ? "non démarré"
+        const char* st = t->exited ? "exited" : !t->started ? "not started"
                          : t->in_sync ? "WaitSynchronization"
                          : t->where == 1 ? "mutex (ArbitrateLock)"
                          : t->where == 2 ? "condvar (WaitProcessWideKey)"
-                         : t->where == 3 ? "WaitForAddress" : "en cours / autre";
+                         : t->where == 3 ? "WaitForAddress" : "running / other";
         std::string objs;
         for (KObject* o : t->wait_objs) objs += std::string(" ") + o->kind();
-        HLOG("dump", "  thread %llu prio %d [%s] clé 0x%llx%s | entrée %s | lr %s | sp 0x%llx | dernier svc 0x%x (%llx %llx %llx) → 0x%x / 0x%llx, %llu svc",
+        HLOG("dump", "  thread %llu prio %d [%s] key 0x%llx%s | entry %s | lr %s | sp 0x%llx | last svc 0x%x (%llx %llx %llx) → 0x%x / 0x%llx, %llu svc",
              (unsigned long long)t->id, t->prio, st, (unsigned long long)t->where_key, objs.c_str(),
              symbolize(t->entry).c_str(), symbolize(t->ctx->x[30]).c_str(), (unsigned long long)t->ctx->sp,
              t->last_svc, (unsigned long long)t->last_args[0], (unsigned long long)t->last_args[1],
@@ -1103,22 +1126,22 @@ void kernel_dump_threads() {
                 chain += " ← " + symbolize(*(uint64_t*)(fp + 8)) + b;
                 fp = *(uint64_t*)fp;
             }
-            HLOG("dump", "      appelants :%s", chain.c_str());
+            HLOG("dump", "      callers:%s", chain.c_str());
         }
         if (t->started && !t->exited)
-            HLOG("dump", "      x19-x24 : %llx %llx %llx %llx %llx %llx", (unsigned long long)t->ctx->x[19],
+            HLOG("dump", "      x19-x24: %llx %llx %llx %llx %llx %llx", (unsigned long long)t->ctx->x[19],
                  (unsigned long long)t->ctx->x[20], (unsigned long long)t->ctx->x[21], (unsigned long long)t->ctx->x[22],
                  (unsigned long long)t->ctx->x[23], (unsigned long long)t->ctx->x[24]);
         if (t->where == 2)
-            HLOG("dump", "      condvar 0x%llx (valeur %u), mutex 0x%llx (valeur 0x%x), étiquette 0x%x",
+            HLOG("dump", "      condvar 0x%llx (value %u), mutex 0x%llx (value 0x%x), tag 0x%x",
                  (unsigned long long)t->cv_key, atomic_load32(t->cv_key), (unsigned long long)t->cv_mutex,
                  atomic_load32(t->cv_mutex), t->tag);
         if (t->where == 1 || t->where == 3)
-            HLOG("dump", "      adresse 0x%llx (valeur 0x%x)", (unsigned long long)t->where_key,
+            HLOG("dump", "      address 0x%llx (value 0x%x)", (unsigned long long)t->where_key,
                  atomic_load32(t->where_key));
         if ((t->where == 1 || t->where == 3) && mem_valid(t->where_key - 0x18, 0x30)) {   // objet englobant
             const uint32_t* w = (const uint32_t*)(t->where_key - 0x18);
-            HLOG("dump", "      objet -0x18 : %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x", w[0], w[1],
+            HLOG("dump", "      object -0x18: %08x %08x %08x %08x %08x %08x | %08x %08x %08x %08x %08x %08x", w[0], w[1],
                  w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11]);
         }
         if (t->started && !t->exited && !t->in_sync && !t->where) running.emplace_back(t->host, t->id);
@@ -1127,8 +1150,8 @@ void kernel_dump_threads() {
                 uint32_t h;
                 memcpy(&h, (void*)(t->last_args[1] + 4 * i), 4);
                 KObject* o = get_any(h);
-                HLOG("dump", "      handle 0x%x : %s %s%s", h, o ? o->kind() : "?", o ? o->tag.c_str() : "",
-                     o && o->is_signaled() ? " (signalé)" : "");
+                HLOG("dump", "      handle 0x%x: %s %s%s", h, o ? o->kind() : "?", o ? o->tag.c_str() : "",
+                     o && o->is_signaled() ? " (signaled)" : "");
             }
         }
     }
@@ -1140,7 +1163,7 @@ void kernel_dump_threads() {
             if (*q == ':') n = strtoull(q + 1, (char**)&q, 0);
             for (uint64_t o = 0; o < n && mem_valid(a + o, 16); o += 16) {
                 const uint32_t* w = (const uint32_t*)(a + o);
-                HLOG("dump", "  mem %llx : %08x %08x %08x %08x", (unsigned long long)(a + o), w[0], w[1], w[2], w[3]);
+                HLOG("dump", "  mem %llx: %08x %08x %08x %08x", (unsigned long long)(a + o), w[0], w[1], w[2], w[3]);
             }
             if (*q == ',') q++;
             else break;

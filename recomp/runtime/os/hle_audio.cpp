@@ -112,10 +112,10 @@ void clock_thread() {
                 float peak;
                 memcpy(&peak, &pb, 4);
                 for (auto& [k, s] : g_streams)
-                    HLOG("audio", "flux 0x%llx : %s, %llu trames écrites, %llu jouées, %llu manques, %u en attente ; crête du mixage %.3f (%s)",
-                         (unsigned long long)k, s.started ? "démarré" : "arrêté", (unsigned long long)s.written,
+                    HLOG("audio", "stream 0x%llx: %s, %llu frames written, %llu played, %llu underruns, %u pending; mix peak %.3f (%s)",
+                         (unsigned long long)k, s.started ? "started" : "stopped", (unsigned long long)s.written,
                          (unsigned long long)s.played, (unsigned long long)s.underruns, s.fill, peak,
-                         audio_out::active() ? "carte son" : "horloge virtuelle");
+                         audio_out::active() ? "audio device" : "virtual clock");
             }
         }
         for (auto& e : sig) kernel_signal(e.get(), true);
@@ -134,7 +134,7 @@ std::shared_ptr<KObject> make_guest_event(CPUState* ctx, uint64_t system_event) 
     uint32_t r = (uint32_t)ctx->x[0];
     std::shared_ptr<KObject> e = kernel_last_created_event();
     *ctx = saved;
-    if (r) HLOG("audio", "CreateSystemEvent a échoué (0x%x)", r);
+    if (r) HLOG("audio", "CreateSystemEvent failed (0x%x)", r);
     return e;
 }
 
@@ -146,10 +146,10 @@ void open_stream(CPUState* ctx, uint64_t s, uint64_t ev, uint64_t fmt) {
         if (f[0] >= 1 && f[0] <= 6) st.fmt = f[0];
         if (f[1] >= 1 && f[1] <= 8) st.channels = f[1];
         if (f[2] >= 8000 && f[2] <= 192000) st.rate = f[2];
-        HLOG("audio", "OpenOutputStream : format %u %u %u %u → échantillons %s, %u canaux, %u Hz", f[0], f[1], f[2], f[3],
-             st.fmt == 5 ? "flottants" : st.fmt == 2 ? "16 bits" : st.fmt == 4 ? "32 bits" : st.fmt == 1 ? "8 bits" : "inconnus",
+        HLOG("audio", "OpenOutputStream: format %u %u %u %u → %s samples, %u channels, %u Hz", f[0], f[1], f[2], f[3],
+             st.fmt == 5 ? "float" : st.fmt == 2 ? "16-bit" : st.fmt == 4 ? "32-bit" : st.fmt == 1 ? "8-bit" : "unknown",
              st.channels, st.rate);
-        if (st.rate != 48000) HLOG("audio", "fréquence %u Hz non rééchantillonnée : lecture à 48 kHz (hauteur faussée)", st.rate);
+        if (st.rate != 48000) HLOG("audio", "rate %u Hz not resampled: playing at 48 kHz (pitch off)", st.rate);
     }
     st.event = make_guest_event(ctx, ev);
     std::lock_guard<std::mutex> lk(g_lk);
@@ -242,7 +242,7 @@ void a_write(CPUState* ctx) {   // (type*, data, frames) → trames acceptées
     static int nlog = 0;
     if (g_log && nlog < 6) {
         nlog++;
-        HLOG("audio", "WriteOutputStream : %d trames demandées, %d acceptées, %u en attente", n, acc, s.fill);
+        HLOG("audio", "WriteOutputStream: %d frames requested, %d accepted, %u pending", n, acc, s.fill);
     }
     ctx->x[0] = (uint32_t)acc;
 }
@@ -313,7 +313,7 @@ void o_init_dec(CPUState* ctx) {   // (dec*, rate, channels, TimeSpan, mgr*)
     g_dec[ctx->x[0]] = d;
     static int nlog = 0;
     if (g_log && nlog++ < 16)
-        HLOG("audio", "décodeur Opus 0x%llx : %d Hz, %d canaux, durée %lld, gestionnaire 0x%llx", (unsigned long long)ctx->x[0],
+        HLOG("audio", "Opus decoder 0x%llx: %d Hz, %d channels, duration %lld, handler 0x%llx", (unsigned long long)ctx->x[0],
              d.rate, d.channels, (long long)ctx->x[3], (unsigned long long)d.manager);
     ctx->x[0] = 0;
 }
@@ -336,7 +336,7 @@ void o_enqueue(CPUState* ctx) {   // (dec*, size_t* consumed, data, size)
         const uint8_t* p = (const uint8_t*)ctx->x[2];
         char hex[3 * 24 + 1] = {};
         for (int i = 0; i < 24 && (uint64_t)i < ctx->x[3]; i++) snprintf(hex + 3 * i, 4, "%02x ", p[i]);
-        HLOG("audio", "paquet Opus n° %llu pour 0x%llx : %llu octets : %s", (unsigned long long)npk, (unsigned long long)ctx->x[0],
+        HLOG("audio", "Opus packet #%llu for 0x%llx: %llu bytes: %s", (unsigned long long)npk, (unsigned long long)ctx->x[0],
              (unsigned long long)ctx->x[3], hex);
     }
     if (ctx->x[1]) *(uint64_t*)ctx->x[1] = ctx->x[3];
@@ -435,7 +435,7 @@ void hle_audio_init() {
     for (auto& o : ov) n += override_export(o.sym, o.fn);
     std::thread(clock_thread).detach();
     audio_out::start(mix);
-    HLOG("hle", "audio : %d fonctions nn::audio / nn::codec remplacées (sortie Windows, Opus → silence)", n);
+    HLOG("hle", "audio: %d nn::audio / nn::codec functions replaced (Windows output, Opus → silence)", n);
 }
 
 }  // namespace hos

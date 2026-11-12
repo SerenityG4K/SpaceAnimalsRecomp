@@ -69,7 +69,11 @@ ID2D1SolidColorBrush* pinceau(uint32_t rgb, float a = 1.f) {
 }
 
 // ---- textes ----
+// Toutes les écritures sont réduites de 10 % (demande de l'utilisateur après l'agrandissement de la fenêtre,
+// 2026-11-11) : la mise en page ne change pas, le texte respire un peu plus.
+constexpr float TAILLE_TEXTE = 0.9f;
 bool format(Fmt f, const wchar_t* famille, float taille, DWRITE_FONT_WEIGHT poids, DWRITE_FONT_STRETCH etirement) {
+    taille *= TAILLE_TEXTE;
     HRESULT hr = g_dw->CreateTextFormat(famille, nullptr, poids, DWRITE_FONT_STYLE_NORMAL, etirement, taille, L"fr-fr", &g_fmt[f]);
     if (FAILED(hr)) hr = g_dw->CreateTextFormat(L"Segoe UI", nullptr, poids, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                                  taille, L"fr-fr", &g_fmt[f]);
@@ -260,6 +264,7 @@ void titre_lueur() {
     g_dc->GetTarget(&avant);
     g_dc->SetTarget(g_bm_titre);
     g_dc->BeginDraw();
+    g_dc->SetTransform(D2D1::IdentityMatrix());
     g_dc->Clear(D2D1::ColorF(0, 0, 0, 0));
     texte(L"STARFOX", F_TITRE, 20, 14, VERT, 1.f, 3.f);
     g_dc->EndDraw();
@@ -428,8 +433,7 @@ void titre(float t) {
 
 double progres_total(Construction& c) {
     static const struct { const char* id; double poids; } P[] = {
-        {"verifier", 1}, {"extraire", 2}, {"images", 2}, {"recompiler", 78}, {"lier", 3}, {"shaders", 9}, {"pipelines", 3},
-        {"extraits", 5}};
+        {"verifier", 1}, {"extraire", 2}, {"images", 2}, {"recompiler", 78}, {"lier", 3}, {"shaders", 9}, {"pipelines", 3}};
     auto poids = [&](const std::string& id) {
         for (auto& p : P)
             if (id == p.id) return p.poids;
@@ -490,7 +494,7 @@ void bouton_principal(float t) {
         g_dc->PushLayer(&lp, nullptr);
         for (float k = -h; k < w; k += 9) ligne(x + k, y + h, x + k + h, y, 0xFFFFFF, 0.05f, 2.f);
         g_dc->PopLayer();
-        const std::wstring s = en_jeu ? T("en_jeu") : g.jeu_pret ? T(g.jeu_obsolete ? "maj_jeu" : "jouer") : T("recompiler");
+        const std::wstring s = en_jeu ? T("en_jeu") : g.jeu_pret ? T("jouer") : T("recompiler");   // jeu à refaire : jouable quand même
         IDWriteTextLayout* l = mise(s, F_BOUTON, 2000.f, 3.f);
         const float tw = largeur_texte(l);
         const float tx = x + 28 + (w - 56 - tw - 26) / 2;
@@ -523,13 +527,14 @@ void bascule_affichage() {
 
 void menu() {
     struct { int id; const char* cle; float y; Page p; } items[] = {
-        {Z_MENU_REGLAGES, "reglages", 296, Page::Reglages},
-        {Z_MENU_CONTROLES, "controles", 330, Page::Controles},
-        {Z_MENU_CONSTRUCTION, "construction", 364, Page::Construction},
-        {Z_MENU_QUITTER, "quitter", 408, Page::Aucune},
+        {Z_MENU_REGLAGES, "reglages", 284, Page::Reglages},
+        {Z_MENU_CONTROLES, "controles", 316, Page::Controles},
+        {Z_MENU_CONSTRUCTION, "construction", 348, Page::Construction},
+        {Z_MENU_RAPPORT, "rapport", 380, Page::Aucune},
+        {Z_MENU_QUITTER, "quitter", 418, Page::Aucune},
     };
     for (auto& it : items) {
-        const bool actif = it.id != Z_MENU_QUITTER && g.page == it.p;
+        const bool actif = it.id != Z_MENU_QUITTER && it.id != Z_MENU_RAPPORT && g.page == it.p;
         const bool sv = survol(it.id);
         IDWriteTextLayout* l = mise(T(it.cle), F_MENU, 2000.f, 3.5f);
         const float w = largeur_texte(l);
@@ -567,9 +572,19 @@ void bloc_copie() {
     }
     texte(!g.jeu_pret ? T("jeu_absent") : g.jeu_obsolete ? T("jeu_obsolete") : T("jeu_pret"), F_CORPS, 44, y + 46, BLANC, 1.f);
     if (shaders) texte(info, F_CORPS, 44, y + 66, VERT_PALE, 1.f, 0.f, 0, 400);
-    else if (!g.statut_jeu.empty()) texte(g.statut_jeu, F_CORPS, 44, y + 66, AMBRE, 1.f, 0.f, 0, 400);
-    else texte(!g.jeu_pret ? T("jeu_absent_aide") : g.jeu_obsolete ? T("jeu_obsolete_aide") : T("jeu_pret_aide"), F_CORPS, 44, y + 66,
-               GRIS, 1.f, 0.f, 0, 400);
+    // message d'état : sur deux lignes au besoin (l'avertissement de mémoire était coupé à « Fermez d'a… » sur une ligne
+    // de 400 px : le joueur ne voyait ni le conseil ni « recliquez pour lancer quand même »)
+    else if (!g.statut_jeu.empty()) texte_lignes(g.statut_jeu, F_CORPS, 44, y + 66, 640, AMBRE);
+    else if (g.jeu_pret && g.jeu_obsolete) {
+        // Reconstruction proposée, jamais imposée : le bouton principal lance le jeu actuel ; ce lien refait les étapes
+        // qui ont changé.
+        const bool libre = !g.cons.active && !g.jeu_lance;
+        const bool sv = libre && survol(Z_MAJ_JEU);
+        const float lw = texte(T("jeu_obsolete_aide"), F_CORPS, 44, y + 66, sv ? BLANC : libre ? VERT : GRIS, 1.f, 0.5f);
+        if (libre) zone(D2D1::RectF(40, y + 62, 44 + lw + 6, y + 86), Z_MAJ_JEU);
+        if (sv) ligne(44, y + 85, 44 + lw, y + 85, BLANC, 0.8f, 1.f);
+        texte(T("jeu_obsolete_detail"), F_CORPS, 44 + lw + 14, y + 66, GRIS, 1.f, 0.f, 0, 330);
+    } else texte(!g.jeu_pret ? T("jeu_absent_aide") : T("jeu_pret_aide"), F_CORPS, 44, y + 66, GRIS, 1.f, 0.f, 0, 400);
 }
 
 void bandeau(float t) {
@@ -670,7 +685,7 @@ void bouton_contour(float x0, float y0, float x1, float y1, const wchar_t* s, in
 void page_reglages() {
     panneau(T("reg_titre"));
     float y = PY0 + 60;
-    const float pas = 36;
+    const float pas = 33;
     // copie
     libelle(y, "reg_copie", nullptr);
     rect(652, y, 846, y + 28, NOIR, 0.65f);
@@ -704,6 +719,11 @@ void page_reglages() {
     swprintf(v, 64, L"%d %%", g.volume);
     selecteur(y, v, Z_VOL_G, Z_VOL_D);
     y += pas;
+    libelle(y, "reg_vib", "reg_vib_aide");
+    if (g.reglages.vibration == 0) wcscpy(v, T("vib_aucune"));
+    else swprintf(v, 64, L"%d %%", g.reglages.vibration);
+    selecteur(y, v, Z_VIB_G, Z_VIB_D);
+    y += pas;
     libelle(y, "reg_fond", "reg_fond_aide");
     selecteur(y, g.fond_video ? T("fond_extraits") : T("fond_sobre"), Z_FOND_G, Z_FOND_D);
     y += pas;
@@ -719,50 +739,84 @@ void page_reglages() {
     selecteur(y, v, Z_FILS_G, Z_FILS_D);
     const bool libre = !g.cons.active && !g.jeu_lance;
     bouton_contour(PX0 + 24, PY1 - 46, PX0 + 262, PY1 - 18, T("reconstruire"), Z_RECONSTRUIRE, libre && g.copie_ok);
-    bouton_contour(PX0 + 274, PY1 - 46, PX1 - 24, PY1 - 18, T("extraits_btn"), Z_EXTRAITS, libre && g.jeu_pret);
 }
 
+// Nom d'une touche d'après son scancode (0xE0xx : touche étendue), sur le clavier réglé dans Windows
 std::wstring nom_touche(UINT sc) {
+    switch (sc) {
+    case 0: return L"—";
+    case 0xE048: return L"↑";
+    case 0xE050: return L"↓";
+    case 0xE04B: return L"←";
+    case 0xE04D: return L"→";
+    }
     wchar_t b[64] = {};
-    if (GetKeyNameTextW((LONG)(sc << 16), b, 64) <= 0) return L"?";
+    if (GetKeyNameTextW((LONG)(((sc & 0xFF) << 16) | ((sc & 0xE000) ? (1 << 24) : 0)), b, 64) <= 0) return L"?";
     return b;
+}
+
+// Case d'une touche : un clic, puis la touche voulue (lanceur.cpp : Z_TOUCHE0 + action, g.capture, WM_KEYDOWN).
+void case_touche(float x0, float x1, float y, int action, const wchar_t* prefixe) {
+    const int id = Z_TOUCHE0 + action;
+    const bool attente = g.capture == action, sv = survol(id);
+    rect(x0, y, x1, y + 20, attente ? VERT : NOIR, attente ? 0.25f : 0.55f);
+    cadre(x0, y, x1, y + 20, VERT, attente ? 1.f : sv ? 0.85f : 0.3f);
+    std::wstring s = attente ? L"…" : nom_touche(g.reglages.touches[action]);
+    if (prefixe && !attente) s = std::wstring(prefixe) + L"  " + s;
+    texte(s, F_PETIT, (x0 + x1) / 2, y + 3, attente || sv ? BLANC : VERT_PALE, 1.f, 0.f, 1, x1 - x0 - 6);
+    zone(D2D1::RectF(x0, y, x1, y + 20), id);
 }
 
 void page_controles() {
     panneau(T("ctl_titre"));
-    const float c0 = PX0 + 24, c1 = PX0 + 170, c2 = PX0 + 360;
-    float y = PY0 + 60;
+    float y = PY0 + 54;
+    // préréglage du clavier : WASD (QWERTY) ou ZQSD (AZERTY) ; « personnalisées » dès qu'une touche a été changée
+    libelle(y, "ctl_disposition", nullptr);
+    const int p = touches_prereglage_courant();
+    selecteur(y, p == 0 ? L"WASD  (QWERTY)" : p == 1 ? L"ZQSD  (AZERTY)" : T("ctl_perso"), Z_PRESET_G, Z_PRESET_D);
+    y += 38;
+    const float c0 = PX0 + 24, c1 = PX0 + 122, c1f = PX0 + 372, c2 = PX0 + 386;
     texte(T("ctl_bouton"), F_PETIT, c0, y, VERT, 0.9f, 2.f);
     texte(T("ctl_clavier"), F_PETIT, c1, y, VERT, 0.9f, 2.f);
     texte(T("ctl_manette"), F_PETIT, c2, y, VERT, 0.9f, 2.f);
-    y += 24;
-    const std::wstring ou = g.langue == Langue::Fr ? L"  ou  " : L"  or  ";
-    struct Ligne { std::wstring bouton, clavier, manette; };
+    y += 20;
+    const std::wstring ou = g.langue == Langue::Fr ? L"ou  " : L"or  ";
+    struct Ligne { std::wstring bouton; std::vector<int> actions; std::wstring manette; unsigned confort; };
     const std::vector<Ligne> L = {
-        {L"A", nom_touche(0x2E) + ou + nom_touche(0x1C), L"B"},
-        {L"B", nom_touche(0x2D) + ou + nom_touche(0x0E), L"A"},
-        {L"X", nom_touche(0x2F), L"Y"},
-        {L"Y", nom_touche(0x2C), L"X"},
-        {L"L", nom_touche(0x10), L"LB"},
-        {L"R", nom_touche(0x12), L"RB"},
-        {L"ZL", nom_touche(0x13), L"LT"},
-        {L"ZR", nom_touche(0x14), L"RT"},
-        {L"+", nom_touche(0x32) + ou + nom_touche(0x01), L"Start"},
-        {L"−", nom_touche(0x31) + ou + nom_touche(0x0F), L"Back"},
-        {T("stick_g"), nom_touche(0x11) + L" " + nom_touche(0x1E) + L" " + nom_touche(0x1F) + L" " + nom_touche(0x20) + L"  (" +
-                           nom_touche(0x21) + L")", T("stick_g")},
-        {T("stick_d"), nom_touche(0x17) + L" " + nom_touche(0x24) + L" " + nom_touche(0x25) + L" " + nom_touche(0x26) + L"  (" +
-                           nom_touche(0x23) + L")", T("stick_d")},
-        {T("croix"), g.langue == Langue::Fr ? L"Flèches" : L"Arrow keys", T("croix")},
+        {L"A", {K_A}, L"B  /  ○", 0x1C},
+        {L"B", {K_B}, L"A  /  ✕", 0x0E},
+        {L"X", {K_X}, L"Y  /  △", 0},
+        {L"Y", {K_Y}, L"X  /  □", 0},
+        {L"L", {K_L}, L"LB  /  L1", 0},
+        {L"R", {K_R}, L"RB  /  R1", 0},
+        {L"ZL", {K_ZL}, L"LT  /  L2", 0},
+        {L"ZR", {K_ZR}, L"RT  /  R2", 0},
+        {L"+", {K_PLUS}, L"Start  /  Options", 0x01},
+        {L"−", {K_MINUS}, L"Back  /  Share", 0x0F},
+        {T("stick_g"), {K_LS_UP, K_LS_LEFT, K_LS_DOWN, K_LS_RIGHT, K_LSTICK}, T("stick_g"), 0},
+        {T("stick_d"), {K_RS_UP, K_RS_LEFT, K_RS_DOWN, K_RS_RIGHT, K_RSTICK}, T("stick_d"), 0},
+        {T("croix"), {K_UP, K_LEFT, K_DOWN, K_RIGHT}, T("croix"), 0},
     };
+    static const wchar_t* const sens[5] = {L"▲", L"◀", L"▼", L"▶", L"●"};
+    const float pas = 23, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
     for (size_t i = 0; i < L.size(); i++) {
-        if (i % 2 == 0) rect(c0 - 8, y - 3, PX1 - 24, y + 21, VERT, 0.035f);
-        texte(L[i].bouton, F_GRAS, c0, y, BLANC, 1.f);
-        texte(L[i].clavier, F_CORPS, c1, y, VERT_PALE, 1.f, 0.f, 0, 180);
-        texte(L[i].manette, F_CORPS, c2, y, TEXTE, 1.f);
-        y += 25;
+        if (i % 2 == 0) rect(c0 - 8, y - 2, PX1 - 24, y + 21, VERT, 0.035f);
+        texte(L[i].bouton, F_GRAS, c0, y + 1, BLANC, 1.f, 0.f, 0, c1 - c0 - 6);
+        if (L[i].actions.size() == 1) {
+            case_touche(c1, c1 + 2 * lc + esp, y, L[i].actions[0], nullptr);
+            // touche de confort des menus (Entrée, Retour arrière, Échap, Tab), tant qu'elle n'est donnée à aucune action
+            bool prise = false;
+            for (unsigned t : g.reglages.touches) prise = prise || t == L[i].confort;
+            if (L[i].confort && !prise)
+                texte(ou + nom_touche(L[i].confort), F_PETIT, c1 + 2 * lc + esp + 10, y + 3, GRIS, 1.f, 0.f, 0, c1f - (c1 + 2 * lc + esp + 10));
+        } else {
+            for (size_t k = 0; k < L[i].actions.size(); k++)
+                case_touche(c1 + k * (lc + esp), c1 + k * (lc + esp) + lc, y, L[i].actions[k], sens[k]);
+        }
+        texte(L[i].manette, F_CORPS, c2, y + 1, TEXTE, 1.f, 0.f, 0, PX1 - 24 - c2);
+        y += pas;
     }
-    texte_lignes(T("ctl_note"), F_PETIT, c0, PY1 - 52, PX1 - PX0 - 48, GRIS);
+    texte_lignes(T(g.capture >= 0 ? "ctl_attente" : "ctl_note"), F_PETIT, c0, PY1 - 52, PX1 - PX0 - 48, g.capture >= 0 ? VERT : GRIS);
 }
 
 std::wstring duree_txt(ULONGLONG ms) {
@@ -829,8 +883,6 @@ void page_construction(float t) {
         if (c.annulee) texte(T("cons_annulee"), F_CORPS, PX0 + 24, ry, AMBRE);
         else if (c.echec) texte_lignes(std::wstring(T("cons_echec")) + c.erreur, F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, AMBRE);
         else texte(T("cons_fini"), F_GRAS, PX0 + 24, ry, VERT);
-    } else if (c.active && c.courante >= 0 && c.courante < (int)c.etapes.size() && c.etapes[c.courante] == "extraits") {
-        texte_lignes(T("cons_info_extraits"), F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, VERT_PALE);
     } else if (c.active && c.courante >= 0 && c.courante < (int)c.etapes.size() && c.etapes[c.courante] == "pipelines" &&
                c.info == L"jeu") {   // relevé des shaders créés par le jeu (preparer.py, releve_shaders)
         texte_lignes(T("cons_info_releve"), F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, VERT_PALE);
@@ -847,6 +899,9 @@ void page_construction(float t) {
     if (c.active) bouton_contour(PX1 - 160, PY1 - 44, PX1 - 24, PY1 - 16, T("annuler"), Z_ANNULER);
     else bouton_contour(PX1 - 160, PY1 - 44, PX1 - 24, PY1 - 16, T("fermer"), Z_FERMER_PAGE);
     if (!c.etapes.empty()) bouton_contour(PX0 + 24, PY1 - 44, PX0 + 160, PY1 - 16, T("journal"), Z_JOURNAL);
+    // paquet installé, rien en cours : tout retirer du PC (desinstaller.py, après deux questions)
+    if (g.paquet && !c.active && !g.jeu_lance)
+        bouton_contour(PX0 + 172, PY1 - 44, PX1 - 172, PY1 - 16, T("desinstaller"), Z_DESINSTALLER);
 }
 
 bool sauver_png(const wchar_t* chemin);
@@ -856,23 +911,37 @@ bool sauver_png(const wchar_t* chemin);
 // ================================================================ interface
 bool dessin_init(HWND hwnd) {
     g_hwnd = hwnd;
+    // Tout échec d'affichage laisse une ligne dans lanceur.log : l'issue GitHub n° 12 (fenêtre noire) est arrivée sans
+    // aucune trace.
+    auto echec = [](const wchar_t* etape, HRESULT hr) {
+        jlog(L"display: %ls failed (0x%08lx)", etape, (unsigned long)hr);
+        return false;
+    };
     const D3D_FEATURE_LEVEL niveaux[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+    D3D_FEATURE_LEVEL niveau = D3D_FEATURE_LEVEL_10_0;
+    bool logiciel = false;
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, niveaux, 4,
-                                   D3D11_SDK_VERSION, &g_d3d, nullptr, &g_d3dctx);
-    if (FAILED(hr))
+                                   D3D11_SDK_VERSION, &g_d3d, &niveau, &g_d3dctx);
+    if (FAILED(hr)) {
+        jlog(L"display: no hardware Direct3D 11 device (0x%08lx), software rendering", (unsigned long)hr);
+        logiciel = true;
         hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, niveaux, 4, D3D11_SDK_VERSION,
-                               &g_d3d, nullptr, &g_d3dctx);
-    if (FAILED(hr)) return false;
+                               &g_d3d, &niveau, &g_d3dctx);
+    }
+    if (FAILED(hr)) return echec(L"D3D11CreateDevice", hr);
     IDXGIDevice* dxdev = nullptr;
-    g_d3d->QueryInterface(IID_PPV_ARGS(&dxdev));
+    if (FAILED(hr = g_d3d->QueryInterface(IID_PPV_ARGS(&dxdev)))) return echec(L"IDXGIDevice", hr);
     D2D1_FACTORY_OPTIONS opt{};
-    if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), &opt, (void**)&g_fab))) return false;
-    if (FAILED(g_fab->CreateDevice(dxdev, &g_dev))) return false;
-    if (FAILED(g_dev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &g_dc))) return false;
+    if (FAILED(hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), &opt, (void**)&g_fab)))
+        return echec(L"D2D1CreateFactory", hr);
+    if (FAILED(hr = g_fab->CreateDevice(dxdev, &g_dev))) return echec(L"ID2D1Factory1::CreateDevice", hr);
+    if (FAILED(hr = g_dev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &g_dc))) return echec(L"CreateDeviceContext", hr);
     IDXGIAdapter* ad = nullptr;
-    dxdev->GetAdapter(&ad);
+    if (FAILED(hr = dxdev->GetAdapter(&ad))) return echec(L"IDXGIDevice::GetAdapter", hr);
+    DXGI_ADAPTER_DESC carte{};
+    ad->GetDesc(&carte);
     IDXGIFactory2* f2 = nullptr;
-    ad->GetParent(IID_PPV_ARGS(&f2));
+    if (FAILED(hr = ad->GetParent(IID_PPV_ARGS(&f2)))) return echec(L"IDXGIFactory2", hr);
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     sd.SampleDesc.Count = 1;
@@ -884,13 +953,22 @@ bool dessin_init(HWND hwnd) {
     hr = f2->CreateSwapChainForHwnd(g_d3d, hwnd, &sd, nullptr, nullptr, &g_chaine);
     if (SUCCEEDED(hr)) f2->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
     rel(f2), rel(ad), rel(dxdev);
-    if (FAILED(hr) || !cible_creer()) return false;
-    // une image sur n balayages de l'écran : environ 60 images par seconde quel que soit l'écran
+    if (FAILED(hr)) return echec(L"CreateSwapChainForHwnd", hr);
+    if (!cible_creer()) return echec(L"swap chain target", E_FAIL);
+    // Une image sur n balayages de l'écran : environ 60 images par seconde quel que soit l'écran. Present n'accepte
+    // que n = 1 à 4 : au-delà (écran de 270 Hz et plus), il échouait à chaque image (DXGI_ERROR_INVALID_CALL) et la
+    // fenêtre restait noire (issue GitHub n° 12, reproduite avec LANCEUR_HZ=300 et 360). D'où la borne : 90 images
+    // par seconde à 360 Hz, 120 à 480 Hz. LANCEUR_HZ : fréquence d'écran simulée (vérification).
     DEVMODEW dm{};
     dm.dmSize = sizeof dm;
-    if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm) && dm.dmDisplayFrequency > 1)
-        g_sync = std::max<UINT>(1, (UINT)lround(dm.dmDisplayFrequency / 60.0));
-    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory1), (IUnknown**)&g_dw))) return false;
+    DWORD hz = 0;
+    if (const wchar_t* e = _wgetenv(L"LANCEUR_HZ")) hz = (DWORD)_wtoi(e);
+    else if (EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm)) hz = dm.dmDisplayFrequency;
+    g_sync = hz > 1 ? std::clamp<UINT>((UINT)lround(hz / 60.0), 1, 4) : 1;
+    jlog(L"display: %ls%ls, Direct3D %u.%u, screen %lu Hz, one frame every %u refresh(es)", carte.Description,
+         logiciel ? L" (software)" : L"", (unsigned)niveau >> 12, ((unsigned)niveau >> 8) & 15, (unsigned long)hz, g_sync);
+    if (FAILED(hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory1), (IUnknown**)&g_dw)))
+        return echec(L"DWriteCreateFactory", hr);
     const wchar_t* B = L"Bahnschrift";
     format(F_TITRE, B, 66, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STRETCH_NORMAL);
     format(F_SOUS, B, 22, DWRITE_FONT_WEIGHT_LIGHT, DWRITE_FONT_STRETCH_NORMAL);
@@ -906,8 +984,8 @@ bool dessin_init(HWND hwnd) {
     format(F_ETAPE, B, 13.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL);
     format(F_GRAS, B, 13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STRETCH_NORMAL);
     g_dc->CreateSolidColorBrush(C(VERT), &g_br);
-    if (FAILED(g_dc->CreateEffect(CLSID_MATRICE, &g_fx_couleur))) return false;
-    if (FAILED(g_dc->CreateEffect(CLSID_FLOU, &g_fx_flou))) return false;
+    if (FAILED(hr = g_dc->CreateEffect(CLSID_MATRICE, &g_fx_couleur))) return echec(L"CreateEffect (color matrix)", hr);
+    if (FAILED(hr = g_dc->CreateEffect(CLSID_FLOU, &g_fx_flou))) return echec(L"CreateEffect (blur)", hr);
     matrice_couleur();
     const float ecart = 9.f;
     g_fx_flou->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, D2D1_PROPERTY_TYPE_FLOAT, (const BYTE*)&ecart, sizeof ecart);
@@ -921,8 +999,10 @@ void dessin_redim() {
     rel(g_cible);
     RECT rc;
     GetClientRect(g_hwnd, &rc);
-    g_chaine->ResizeBuffers(0, (UINT)std::max<LONG>(1, rc.right), (UINT)std::max<LONG>(1, rc.bottom), DXGI_FORMAT_UNKNOWN, 0);
-    cible_creer();
+    const HRESULT hr = g_chaine->ResizeBuffers(0, (UINT)std::max<LONG>(1, rc.right), (UINT)std::max<LONG>(1, rc.bottom),
+                                               DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr)) jlog(L"display: ResizeBuffers failed (0x%08lx)", (unsigned long)hr);
+    if (!cible_creer()) jlog(L"display: swap chain target not recreated, nothing will be drawn");
     trame_creer();
     vider_cache();
 }
@@ -937,6 +1017,7 @@ void dessin_image() {
     if (!g_dc || !g_cible) return;
     const float t = (GetTickCount64() - g.t0) / 1000.f;
     g_zones.clear();
+    titre_lueur();   // avant BeginDraw : il dessine dans sa propre image (imbriqué, il faisait échouer la première image)
     g_dc->BeginDraw();
     g_dc->SetTransform(D2D1::IdentityMatrix());
     g_dc->Clear(C(NOIR));
@@ -963,6 +1044,9 @@ void dessin_image() {
         dessin_redim();
         return;
     }
+    static HRESULT dessin_avant = S_OK;   // un échec de dessin ou de présentation : une ligne dans lanceur.log
+    if (FAILED(hr) && hr != dessin_avant) jlog(L"display: drawing failed (EndDraw 0x%08lx)", (unsigned long)hr);
+    dessin_avant = hr;
     static const wchar_t* capture = _wgetenv(L"LANCEUR_CAPTURE");   // vérification : image PNG après n secondes
     static const float capture_t = _wgetenv(L"LANCEUR_CAPTURE_T") ? (float)_wtof(_wgetenv(L"LANCEUR_CAPTURE_T")) : 3.f;
     static bool capture_faite = false;
@@ -971,7 +1055,14 @@ void dessin_image() {
         sauver_png(capture);
         if (_wgetenv(L"LANCEUR_CAPTURE_QUITTER")) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
     }
-    g_chaine->Present(g_sync, 0);
+    const HRESULT hp = g_chaine->Present(g_sync, 0);
+    static HRESULT present_avant = S_OK;
+    if (FAILED(hp)) {   // rien n'est arrivé à l'écran
+        if (hp != present_avant) jlog(L"display: Present failed (0x%08lx, every %u refreshes)", (unsigned long)hp, g_sync);
+        g_sync = 1;     // l'intervalle que tout écran accepte
+        Sleep(15);      // Present n'a pas attendu l'écran : pas de boucle à vide
+    }
+    present_avant = hp;
 }
 
 void dessin_liberer() {

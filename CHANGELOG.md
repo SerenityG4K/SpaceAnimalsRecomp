@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.3 — less RAM, better AMD support, faster build
+
+Thanks to everyone who opened an issue: most of this comes from your reports.
+
+- **Improved RAM usage**: the game uses much less memory.
+- **Improved AMD card support.**
+- **Faster build**: the game is now compiled with Clang, included in the package.
+
+**About performance**: on Switch 2, the game needs DLSS to run smoothly: it draws at a lower resolution and DLSS
+upscales the picture. SpaceAnimalsRecomp has no DLSS yet and draws everything at native resolution. The picture is
+sharper, but it needs a lot more power from your graphics card. DLSS on PC is on the roadmap.
+
+Also in this version:
+
+- Fixed #1: the build no longer stops when the GPU driver crashes on a shader, or when the folder path has square
+  brackets.
+- Fixed #4: you can move or rename the install folder without rebuilding.
+- Fixed #12: the launcher window no longer stays black on screens at 270 Hz or more.
+- #13: the game should no longer stop by itself after a long black screen at start (seen on an AMD card).
+- Should fix pieces of the Arwing drawn on Slippy's face in a cutscene.
+- #9: might fix **Single Player** not responding in the campaign menu after the tutorial. Please tell us if you still see it.
+- **BUG REPORT** button in the launcher: it makes one zip with your hardware and the logs, ready to attach to an issue.
+- The launcher asks before installing an update.
+- Nothing opens by itself during the build anymore, and the launcher window is bigger.
+- You can change the keyboard keys on the launcher's **CONTROLS** page, with two layouts ready: WASD (QWERTY) and ZQSD
+  (AZERTY). Controllers still follow the button position.
+- **UNINSTALL** button, or `uninstall.bat`. It never touches your copy of the game.
+- Saves are now in `%APPDATA%\SpaceAnimalsRecomp\save`. Your old saves are copied there the first time you play
+  after rebuilding.
+- Updating from 1.0.2: say yes to the update. The launcher then asks if you want to rebuild the game, or you can
+  click **REBUILD NOW ›** later. Some improvements require rebuilding the game: without it, only the launcher changes
+  are active, and the RAM, AMD, save and keyboard key changes are not. Your copy, your saves and your settings stay.
+
 ## 1.0.2 — launcher background included, shorter build
 
 - **Launcher background included**: the clips that play behind the launcher (gameplay recorded by SerenityG4K) now

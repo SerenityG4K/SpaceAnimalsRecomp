@@ -2,6 +2,10 @@
 // relocations (RELA, JMPREL, RELR), résolution globale des symboles dans l'ordre des modules
 // (main d'abord : ses exports — malloc, free… — remplacent ceux du SDK, comme sur console),
 // symbolisation des adresses pour les journaux.
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include "hos.h"
 
 #include <cxxabi.h>
@@ -57,12 +61,12 @@ uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 
 // Import non résolu appelé (via PLT : x17 contient l'adresse cible)
 void unresolved_stub(CPUState* ctx) {
-    panic("appel d'un import non résolu %s (x17=0x%llx, lr=%s)", symbolize(ctx->x[17]).c_str(),
+    panic("call to an unresolved import %s (x17=0x%llx, lr=%s)", symbolize(ctx->x[17]).c_str(),
           (unsigned long long)ctx->x[17], symbolize(ctx->x[30]).c_str());
 }
 
 void tlsdesc_stub(CPUState* ctx) {
-    panic("accès TLS par descripteur (TLSDESC) non géré : argument 0x%llx, appelant %s",
+    panic("unsupported TLS descriptor access (TLSDESC): argument 0x%llx, caller %s",
           (unsigned long long)ctx->x[0], symbolize(ctx->x[30]).c_str());
 }
 
@@ -88,7 +92,7 @@ void relocate(size_t mi) {
         }
         n_unres++;
         g_unresolved_names.push_back(name);
-        HLOG("loader", "%s : symbole non résolu %s", m.name.c_str(), name);
+        HLOG("loader", "%s: unresolved symbol %s", m.name.c_str(), name);
         uint64_t a = register_native((std::string("non résolu:") + name).c_str(), unresolved_stub);
         g_global[name] = a;
         ok = false;
@@ -123,7 +127,7 @@ void relocate(size_t mi) {
                 break;
             }
             default:
-                panic("%s : relocation de type %u non gérée à +0x%llx", m.name.c_str(), type,
+                panic("%s: unsupported relocation type %u at +0x%llx", m.name.c_str(), type,
                       (unsigned long long)r_off);
             }
         }
@@ -148,16 +152,66 @@ void relocate(size_t mi) {
             }
         }
     }
-    HLOG("loader", "%-8s relogé : %zu relatives, %zu symboliques (%zu faibles nulles, %zu non résolues)%s",
+    HLOG("loader", "%-8s relocated: %zu relative, %zu symbolic (%zu null weak, %zu unresolved)%s",
          m.name.c_str(), n_rel, n_sym, n_weak, n_unres,
-         n_tls ? (", " + std::to_string(n_tls) + " TLSDESC non gérés").c_str() : "");
+         n_tls ? (", " + std::to_string(n_tls) + " unsupported TLSDESC").c_str() : "");
+}
+
+// Racine de l'installation : <racine>\recomp\build\full\recomp_main.exe (avec la barre finale)
+std::string racine_installation() {
+    char exe[MAX_PATH];
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    std::string d = exe;
+    for (int k = 0; k < 4; k++) {
+        const size_t p = d.find_last_of("\\/");
+        if (p == std::string::npos) return "";
+        d.resize(p);
+    }
+    return d + "\\";
+}
+
+bool existe(const std::string& p) { return !p.empty() && GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
+
+// Le manifeste (fullbuild.py) contient des chemins absolus : après un déplacement ou un renommage du dossier
+// d'installation (issue GitHub n° 4), on reprend les images dans <racine>\work.
+std::string image_retrouvee(const std::string& chemin) {
+    if (existe(chemin)) return chemin;
+    const size_t p = chemin.find_last_of("\\/");
+    const std::string ici = racine_installation() + "work\\" + (p == std::string::npos ? chemin : chemin.substr(p + 1));
+    if (existe(ici)) {
+        HLOG("loader", "image found: %s (the manifest says %s: folder moved?)", ici.c_str(), chemin.c_str());
+        return ici;
+    }
+    return chemin;
+}
+
+// Copie du joueur : celle du manifeste, sinon celle que passe le launcher (RECOMP_NUP), sinon un .nup à la racine
+void copie_retrouvee() {
+    if (existe(g_nup_path)) return;
+    std::string trouvee;
+    if (const char* e = getenv("RECOMP_NUP"); e && existe(e)) trouvee = e;
+    if (trouvee.empty()) {
+        WIN32_FIND_DATAA fd;
+        const std::string r = racine_installation();
+        HANDLE h = FindFirstFileA((r + "*.nup").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            trouvee = r + fd.cFileName;
+            FindClose(h);
+        }
+    }
+    if (trouvee.empty()) {
+        HLOG("loader", "game copy not found: %s (choose the game copy in the launcher)", g_nup_path.c_str());
+        return;
+    }
+    HLOG("loader", "copy found: %s (the manifest says %s)", trouvee.c_str(), g_nup_path.c_str());
+    g_nup_path = trouvee;
 }
 
 }  // namespace
 
 void load_modules(const std::string& manifest) {
     std::ifstream f(manifest);
-    if (!f) panic("manifeste introuvable : %s", manifest.c_str());
+    if (!f) panic("manifest not found: %s", manifest.c_str());
     std::string line;
     while (std::getline(f, line)) {
         if (line.empty() || line[0] == '#') continue;
@@ -189,25 +243,26 @@ void load_modules(const std::string& manifest) {
         m.text_size = strtoull(ts.c_str(), nullptr, 0);
         m.ro_off = strtoull(ro.c_str(), nullptr, 0);
         m.data_off = strtoull(data.c_str(), nullptr, 0);
+        path = image_retrouvee(path);
         FILE* fp = fopen(path.c_str(), "rb");
-        if (!fp) panic("image introuvable : %s", path.c_str());
+        if (!fp) panic("image not found: %s", path.c_str());
         _fseeki64(fp, 0, SEEK_END);
         m.size = (uint64_t)_ftelli64(fp);
         _fseeki64(fp, 0, SEEK_SET);
         uint64_t msize = align_up(m.size, 0x1000);
-        if (m.base < CODE_BASE || m.base + msize > CODE_END) panic("%s : base hors de la zone de code", m.name.c_str());
-        if (!mem_commit(m.base, msize)) panic("%s : mapping impossible", m.name.c_str());
-        if (fread((void*)m.base, 1, m.size, fp) != m.size) panic("%s : lecture incomplète", m.name.c_str());
+        if (m.base < CODE_BASE || m.base + msize > CODE_END) panic("%s: base outside the code area", m.name.c_str());
+        if (!mem_commit(m.base, msize)) panic("%s: cannot map", m.name.c_str());
+        if (fread((void*)m.base, 1, m.size, fp) != m.size) panic("%s: incomplete read", m.name.c_str());
         fclose(fp);
         // MOD0
         uint32_t mod0 = rd<uint32_t>(m.base + 4);
-        if (memcmp((void*)(m.base + mod0), "MOD0", 4)) panic("%s : MOD0 absent", m.name.c_str());
+        if (memcmp((void*)(m.base + mod0), "MOD0", 4)) panic("%s: MOD0 missing", m.name.c_str());
         int32_t dyn = rd<int32_t>(m.base + mod0 + 4), bs = rd<int32_t>(m.base + mod0 + 8),
                 be = rd<int32_t>(m.base + mod0 + 12);
         m.dynamic = mod0 + dyn;
         m.bss_off = mod0 + bs;
         m.bss_end = mod0 + be;
-        if (m.bss_end > m.size) panic("%s : .bss hors image", m.name.c_str());
+        if (m.bss_end > m.size) panic("%s: .bss outside the image", m.name.c_str());
         memset((void*)(m.base + m.bss_off), 0, m.bss_end - m.bss_off);
         // carte mémoire : text RX, ro R, data+bss RW (états Code / CodeData)
         mem_set(m.base, align_up(m.text_size, 0x1000), MS_CODE, MP_RX);
@@ -246,11 +301,12 @@ void load_modules(const std::string& manifest) {
             }
             m.exports.emplace_back(name, m.base + s.value);
         }
-        HLOG("loader", "%-8s 0x%llx  %6.1f Mo  %zu exports", m.name.c_str(), (unsigned long long)m.base,
+        HLOG("loader", "%-8s 0x%llx  %6.1f MB  %zu exports", m.name.c_str(), (unsigned long long)m.base,
              m.size / 1048576.0, m.exports.size());
         g_modules.push_back(std::move(m));
         g_dyn.push_back(d);
     }
+    copie_retrouvee();
     // portée globale : 1re définition dans l'ordre des modules (main, subsdk*, sdk)
     for (auto& m : g_modules)
         for (auto& [n, a] : m.exports) g_global.emplace(n, a);

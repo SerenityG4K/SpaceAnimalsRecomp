@@ -9,6 +9,7 @@ Modèle d'exécution :
 """
 import bisect
 import os
+import types
 
 import capstone
 
@@ -19,6 +20,13 @@ from .translate import translate
 MAX_FUNC_GAP = 0x100000  # garde-fou : longueur max d'une fonction sans FDE
 
 
+# Valeurs vides partagées d'une fonction pas encore analysée (ou oubliée) : 249 000 fonctions dans main, et quatre
+# conteneurs par fonction coûtaient ≈ 140 Mo à chaque processus de fullbuild.py. _analyze_function les remplace.
+_SANS_INSNS = ()
+_SANS_ADRESSES = frozenset()
+_SANS_TABLES = types.MappingProxyType({})
+
+
 class Function:
     __slots__ = ("start", "end", "origin", "insns", "labels", "jumptables", "calls")
 
@@ -26,10 +34,14 @@ class Function:
         self.start = start
         self.end = end
         self.origin = origin       # eh_frame, bl, b, ptr, export, entry
-        self.insns = []
-        self.labels = set()
-        self.jumptables = {}       # pc du br → liste des cibles
-        self.calls = set()         # fonctions référencées (déclarations extern)
+        self.oublier()
+
+    def oublier(self):
+        """Rend la mémoire de l'analyse (instructions, étiquettes, tables de sauts, appels) : elle sera refaite au besoin."""
+        self.insns = _SANS_INSNS
+        self.labels = _SANS_ADRESSES
+        self.jumptables = _SANS_TABLES   # pc du br → liste des cibles
+        self.calls = _SANS_ADRESSES      # fonctions référencées (déclarations extern)
 
 
 class Recompiler:
@@ -155,6 +167,7 @@ class Recompiler:
     def _analyze_function(self, f):
         f.insns = []
         f.labels = set()
+        f.jumptables = {}
         f.calls = set()
         pc = f.start
         while pc < f.end:

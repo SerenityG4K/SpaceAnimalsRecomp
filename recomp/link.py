@@ -35,9 +35,19 @@ def main():
     for m in a.modules.split(","):
         lst = os.path.join(FULL, m, "objs.txt")
         if not os.path.exists(lst):
-            print(f"module {m} non construit (pas de {lst}) : ignoré")
+            print(f"module {m} not built (no {lst}): ignored")
             continue
-        objs += [l.strip() for l in open(lst) if l.strip()]
+        # chemins absolus (fullbuild.py) : après un déplacement du dossier d'installation (issue GitHub n° 4), les
+        # objets sont repris à côté de leur liste
+        for l in open(lst):
+            o = l.strip()
+            if not o:
+                continue
+            if not os.path.exists(o):
+                ici = os.path.join(FULL, m, os.path.basename(o.replace("\\", "/")))
+                if os.path.exists(ici):
+                    o = ici
+            objs.append(o)
     rt = [os.path.join(build.RUNTIME, "runtime.cpp"), os.path.join(build.RUNTIME, "fp.cpp")]
     osdir = os.path.join(build.RUNTIME, "os")
     rt += sorted(os.path.join(osdir, f) for f in os.listdir(osdir) if f.endswith(".cpp"))
@@ -63,21 +73,42 @@ def main():
         for s, e in errs:
             print(f"--- {s}\n{e[:6000]}")
         sys.exit(1)
-    # icône du jeu (build/full/icone.ico, tirée de la copie du joueur par launcher/preparer.py) : ressource 1
-    # (windres lancé dans rt/ avec des chemins relatifs : rien ne dépend des espaces du dossier du jeu)
+    # Ressources de l'exécutable (windres lancé dans rt/ avec des chemins relatifs : rien ne dépend des espaces du
+    # dossier du jeu) :
+    #  - icône du jeu (build/full/icone.ico, tirée de la copie du joueur par launcher/preparer.py) : ressource 1 ;
+    #  - informations de version : Windows (gestionnaire des tâches, mélangeur de volume, propriétés du fichier) montre
+    #    la description du fichier au lieu de « recomp_main » (demande de l'utilisateur, 2026-11-11). Constantes écrites
+    #    en chiffres : aucun en-tête de Windows n'est nécessaire.
+    try:
+        version = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "VERSION"), encoding="utf-8").read().strip()
+    except OSError:
+        version = "0.0.0"
+    chiffres = ([int(x) for x in version.split(".") if x.isdigit()] + [0, 0, 0, 0])[:4]
+    rc = ""
     if os.path.exists(os.path.join(FULL, "icone.ico")):
+        rc += '1 ICON "../icone.ico"\n'
+    rc += ("1 VERSIONINFO\nFILEVERSION {v}\nPRODUCTVERSION {v}\nFILEOS 0x40004\nFILETYPE 0x1\nBEGIN\n"
+           '    BLOCK "StringFileInfo"\n    BEGIN\n        BLOCK "040904B0"\n        BEGIN\n'
+           '            VALUE "FileDescription", "StarFox Remake"\n'
+           '            VALUE "ProductName", "StarFox Remake [recompiled]"\n'
+           '            VALUE "FileVersion", "{t}"\n            VALUE "ProductVersion", "{t}"\n'
+           '            VALUE "InternalName", "recomp_main"\n            VALUE "OriginalFilename", "recomp_main.exe"\n'
+           '        END\n    END\n'
+           '    BLOCK "VarFileInfo"\n    BEGIN\n        VALUE "Translation", 0x0409, 1200\n    END\nEND\n'
+           ).format(v=",".join(str(c) for c in chiffres), t=version)
+    if rc:
         with open(os.path.join(rtobj, "icone.rc"), "w", encoding="utf-8") as fp:
-            fp.write('1 ICON "../icone.ico"\n')
+            fp.write(rc)
         try:
             r = subprocess.run(["windres", "icone.rc", "-O", "coff", "-o", "icone_res.o"], cwd=rtobj, capture_output=True,
                                text=True)
             erreur = (r.stdout + r.stderr).strip() if r.returncode else None
-        except OSError as e:   # windres absent : exécutable sans icône
+        except OSError as e:   # windres absent : exécutable sans icône ni description
             erreur = str(e)
         if erreur is None:
             objs.append(os.path.join(rtobj, "icone_res.o"))
         else:
-            print("icône ignorée (windres) : " + erreur[:300])
+            print("icon and file description ignored (windres): " + erreur[:300])
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     rsp = os.path.join(FULL, "link.rsp")
     with open(rsp, "w", encoding="utf-8") as fp:
@@ -85,19 +116,28 @@ def main():
             fp.write('"' + o.replace("\\", "/") + '"\n')
     # pas d'ASLR « haute entropie » : sinon Windows peut placer tas/piles dans la zone invitée
     # fixe (0x70_0000_0000-0x80_0000_0000) que le code recompilé suppose libre
-    cmd = ["g++", "-o", a.out, "@" + rsp, "-static", "-static-libgcc", "-static-libstdc++",
+    # L'exécutable est écrit à côté, puis mis en place d'un seul coup : une reconstruction annulée ou en échec pendant
+    # l'édition de liens laisse le jeu précédent intact. Depuis la 1.0.3 la reconstruction après une mise à jour est un
+    # choix du joueur et le bouton JOUER reste actif : il ne doit jamais tomber sur un exécutable à moitié écrit.
+    part = (a.out[:-4] + ".part.exe") if a.out.lower().endswith(".exe") else a.out + ".part"
+    if os.path.exists(part):   # reste d'une édition de liens interrompue
+        os.remove(part)
+    cmd = ["g++", "-o", part, "@" + rsp, "-static", "-static-libgcc", "-static-libstdc++",
            "-latomic", "-lwinmm", "-lgdi32", "-luser32", "-lole32",
            "-lmfplat", "-lmfreadwrite", "-lmfuuid",   # extraits vidéo (record.cpp)
            "-Wl,--disable-high-entropy-va"]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode:
         print(r.stderr[:8000])
+        if os.path.exists(part):
+            os.remove(part)
         sys.exit(1)
+    os.replace(part, a.out)
     # le manifeste accompagne l'exécutable
     import shutil
     if os.path.dirname(os.path.abspath(a.out)) != FULL:
         shutil.copy(os.path.join(FULL, "manifest.txt"), os.path.dirname(os.path.abspath(a.out)))
-    print(f"OK {a.out} ({os.path.getsize(a.out) / 1e6:.0f} Mo, {len(objs)} objets) [{time.time() - t0:.1f} s]")
+    print(f"OK {a.out} ({os.path.getsize(a.out) / 1e6:.0f} MB, {len(objs)} objects) [{time.time() - t0:.1f} s]")
 
 
 if __name__ == "__main__":

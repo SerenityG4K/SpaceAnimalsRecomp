@@ -39,7 +39,7 @@ class DataZip:
         ci = next(i for i in range(len(self.N.contents)) if self.N.label(i).startswith(content))
         fi = next(f for p, f in self.N.walk(ci) if p.endswith("romfs/data.zip"))
         if fi["compressed"]:
-            raise IOError("data.zip compressé dans le .nup : cas non prévu")
+            raise IOError("data.zip compressed in the .nup: unexpected case")
         self.base, self.size = fi["offset"], fi["size"]
         self.entries = self._central_directory()
 
@@ -69,7 +69,7 @@ class DataZip:
             ents.append((name, lho, csz, usz))
             p += 46 + nl + xl + cl
         if len(ents) != n_tot:
-            raise IOError(f"répertoire central : {len(ents)} entrées lues sur {n_tot}")
+            raise IOError(f"central directory: {len(ents)} entries read out of {n_tot}")
         ents.sort(key=lambda e: e[1])
         return ents
 
@@ -151,8 +151,8 @@ def main():
         c0, c1 = struct.unpack_from("<II", ctl, 0x40)
         if c1 > c0 >= size and c1 <= len(code) and c1 - c0 <= 0x10000:
             open(os.path.join(a.out, f"h{h}_r.cb1"), "wb").write(code[c0:c1])
-    print(f"{len(dz.entries)} entrées dans data.zip ({n_err} illisibles en LZ4), {n_pkg} paquets de shaders, "
-          f"{n_new} étages nouveaux {kinds}")
+    print(f"{len(dz.entries)} entries in data.zip ({n_err} unreadable in LZ4), {n_pkg} shader packages, "
+          f"{n_new} new stages {kinds}")
 
 
 if __name__ == "__main__":

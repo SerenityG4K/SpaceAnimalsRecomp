@@ -26,7 +26,11 @@
 namespace lz {
 
 constexpr float LARGEUR = 1000.f, HAUTEUR = 600.f;   // taille logique de la fenêtre (DIP)
-constexpr const wchar_t* VERSION = L"1.0.2";            // si recomp/VERSION est absent
+// Agrandissement de la fenêtre (demande de l'utilisateur, 2026-11-11) : 1200 × 720 sur un écran à 100 %. Le dessin et
+// les clics restent dans le repère logique de 1000 × 600 : c'est l'échelle d'affichage (g.dpi) qui est multipliée
+// (lanceur.cpp, dpi_fenetre). Réduit de lui-même sur un écran trop petit.
+constexpr float ECHELLE = 1.2f;
+constexpr const wchar_t* VERSION = L"1.0.3";            // si recomp/VERSION est absent
 constexpr const wchar_t* NOM = L"StarFox Remake [recompiled]";
 constexpr const wchar_t* DEPOT = L"SerenityG4K/SpaceAnimalsRecomp";   // releases GitHub (mises à jour)
 
@@ -34,12 +38,20 @@ enum class Page { Aucune, Reglages, Controles, Construction };
 enum class Langue { Fr, En };
 
 // zones cliquables, déclarées par le dessin à chaque image
+// Touches du clavier : une par action de la manette (page Contrôles). Même ordre que Settings::keys du jeu
+// (runtime/os/settings.h) et que TOUCHES_CLES (lanceur.cpp).
+constexpr int NB_TOUCHES = 24;
+enum Touche { K_A, K_B, K_X, K_Y, K_L, K_R, K_ZL, K_ZR, K_PLUS, K_MINUS, K_LSTICK, K_RSTICK, K_UP, K_DOWN, K_LEFT, K_RIGHT,
+              K_LS_UP, K_LS_DOWN, K_LS_LEFT, K_LS_RIGHT, K_RS_UP, K_RS_DOWN, K_RS_LEFT, K_RS_RIGHT };
+
 enum Zone : int {
     Z_AUCUNE = 0, Z_PRINCIPAL, Z_MENU_REGLAGES, Z_MENU_CONTROLES, Z_MENU_CONSTRUCTION, Z_MENU_QUITTER, Z_COPIE,
     Z_FR, Z_EN, Z_REDUIRE, Z_FERMER, Z_PARCOURIR, Z_FERMER_PAGE,
     Z_RES_G, Z_RES_D, Z_HZ_G, Z_HZ_D, Z_NATIF_G, Z_NATIF_D, Z_AFF_G, Z_AFF_D, Z_VOL_G, Z_VOL_D, Z_FOND_G, Z_FOND_D,
-    Z_FILS_G, Z_FILS_D, Z_RECONSTRUIRE, Z_EXTRAITS, Z_ANNULER, Z_JOURNAL, Z_LANGUE_G, Z_LANGUE_D,
-    Z_AFF_PLEIN, Z_AFF_FEN, Z_MAJ, Z_MAJ_AUTO_G, Z_MAJ_AUTO_D,
+    Z_FILS_G, Z_FILS_D, Z_RECONSTRUIRE, Z_ANNULER, Z_JOURNAL, Z_LANGUE_G, Z_LANGUE_D,
+    Z_AFF_PLEIN, Z_AFF_FEN, Z_MAJ, Z_MAJ_AUTO_G, Z_MAJ_AUTO_D, Z_VIB_G, Z_VIB_D, Z_MENU_RAPPORT, Z_DESINSTALLER, Z_MAJ_JEU,
+    Z_PRESET_G, Z_PRESET_D,                                   // page Contrôles : préréglage du clavier
+    Z_TOUCHE0, Z_TOUCHE_FIN = Z_TOUCHE0 + NB_TOUCHES - 1,     // page Contrôles : une case par touche
 };
 
 // tâche en cours, lancée par le launcher (même protocole de lignes « @… »)
@@ -51,6 +63,11 @@ struct ReglagesJeu {   // recomp.ini du jeu
     bool natif = true;          // rendu interne à la résolution de sortie
     bool sans_bordure = true;   // plein écran sans bordure, sinon fenêtré
     std::string langue = "auto";   // langue du jeu (code de la console), auto = celle de Windows
+    int vibration = 100;        // vibrations de la manette, en % (0 : aucune)
+    // touches du clavier par action (scancodes, 0xE0xx : touche étendue ; 0 : aucune) ; par défaut les positions du jeu
+    unsigned touches[NB_TOUCHES] = {0x2E, 0x2D, 0x2F, 0x2C, 0x10, 0x12, 0x13, 0x14, 0x32, 0x31, 0x21, 0x23,
+                                    0xE048, 0xE050, 0xE04B, 0xE04D, 0x11, 0x1F, 0x1E, 0x20, 0x17, 0x25, 0x24, 0x26};
+    bool touches_ecrites = false;   // recomp.ini contient des clés key_… (ou le joueur vient de changer une touche)
 };
 
 struct Construction {
@@ -73,12 +90,13 @@ struct App {
     float dpi = 96.f;
     Langue langue = Langue::Fr;
     Page page = Page::Aucune;
+    int capture = -1;   // page Contrôles : action dont on attend la nouvelle touche ; -1 : aucune
     // chemins
     std::wstring dossier_exe, recomp, jeu, extraits, ini, copie;
     bool copie_ok = false;
     std::wstring copie_message;
     bool jeu_pret = false, jeu_lance = false;
-    bool jeu_obsolete = false;   // construit par une autre version : à mettre à jour (seules les étapes changées)
+    bool jeu_obsolete = false;   // des étapes sont à refaire après une mise à jour : reconstruction proposée, jamais imposée
     std::wstring version;        // version installée (recomp/VERSION)
     // mises à jour (releases GitHub) : seulement pour un paquet installé (lanceur.exe à côté de recomp/)
     bool paquet = false, maj_auto = true;
@@ -96,6 +114,7 @@ struct App {
     bool bouton_bas = false;
     int zone_survol = Z_AUCUNE, zone_appui = Z_AUCUNE;
     std::wstring statut_jeu;     // message après une partie (code de sortie…)
+    bool rapport_en_cours = false;   // RAPPORT DE BUG : rapport.py tourne
     Construction cons;
     ULONGLONG t0 = 0;
 };
@@ -127,5 +146,7 @@ int zone_sous(float x, float y);   // zone cliquable sous le point (DIP), d'apr�
 std::string utf8(const std::wstring& w);
 std::wstring wide(const std::string& s);
 int fils_effectifs();
+int touches_prereglage_courant();   // 0 : WASD (QWERTY), 1 : ZQSD (AZERTY), -1 : touches personnalisées
+void jlog(const wchar_t* fmt, ...);   // une ligne horodatée dans lanceur.log (en anglais)
 
 }  // namespace lz

@@ -148,9 +148,9 @@ void gpu_thread() {
         run_item(it);
         g_t_busy += now_us() - t0;
         if (it.k == Item::Present && getenv("RECOMP_PERF") && it.b % 120 == 0) {
-            HLOG("perf", "nvn_execute : %.2f ms/image", g_exec_ns.exchange(0) / 120e6);
+            HLOG("perf", "nvn_execute: %.2f ms/frame", g_exec_ns.exchange(0) / 120e6);
             perf_report_ops();
-            HLOG("perf", "thread GPU : occupé %.2f ms/image (dont vidages %.2f, %llu), syncs attendus %.2f ms/image (%llu), acquisition %.2f ms/image",
+            HLOG("perf", "GPU thread: busy %.2f ms/frame (including flushes %.2f, %llu), syncs awaited %.2f ms/frame (%llu), acquire %.2f ms/frame",
                  g_t_busy.exchange(0) / 120e3, g_t_flush.exchange(0) / 120e3, (unsigned long long)g_n_flush.exchange(0),
                  g_t_sync.exchange(0) / 120e3, (unsigned long long)g_n_sync.exchange(0), g_t_acq.exchange(0) / 120e3);
         }
@@ -166,7 +166,7 @@ void gpu_thread() {
 void push(Item&& it) {
     std::call_once(g_started, [] {
         std::thread(gpu_thread).detach();
-        HLOG("nvn", "thread GPU démarré (%d images en vol au plus)", max_in_flight());
+        HLOG("nvn", "GPU thread started (%d frames in flight at most)", max_in_flight());
     });
     std::lock_guard<std::mutex> lk(g_q_lk);
     if (it.k == Item::Present) g_presents++;

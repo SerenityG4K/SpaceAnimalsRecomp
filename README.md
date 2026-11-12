@@ -37,13 +37,16 @@ options, keyboard and controller, and the game's text and voices in any of its l
 - Use the latest release: the launcher tells you when there is a new one.
 - Search the [existing issues](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues) first.
 - Say which CPU and GPU you use (and your GPU driver version): only one configuration has been tested so far.
-- Attach the logs, all in `recomp\build\full\` next to `lanceur.exe`:
+- Click **BUG REPORT** in the launcher and attach the `SpaceAnimalsRecomp-bug-report.zip` it makes: it has your
+  hardware and all the logs, without your Windows user name and without anything from the game.
+- No launcher window (or no button)? Attach the logs by hand, all in `recomp\build\full\` next to `lanceur.exe`:
   - `recomp_run.log` for a game bug (the game writes a new one at each start, so take it right after the bug;
     the launcher keeps the previous one as `recomp_run_precedent.log`);
   - `preparation.log` for a build problem;
-  - `precompile.log` for a shader compilation problem.
+  - `precompile.log` for a shader compilation problem;
+  - `lanceur.log`, next to `lanceur.exe`, for a launcher problem.
 - Crash or graphics bug? Tell us where in the game it happens, and attach your save if you can (close the game and
-  zip `recomp\build\full\save\`).
+  zip `%APPDATA%\SpaceAnimalsRecomp\save`).
 
 ## Getting started (1.0)
 
@@ -51,44 +54,48 @@ You need:
 
 - Windows 10 or 11, 64-bit;
 - a CPU with AVX2 (2013 or newer);
-- a GPU with a Vulkan 1.3 driver (tested on NVIDIA; AMD and Intel are untested so far);
+- a GPU with a Vulkan 1.3 driver (tested on NVIDIA; AMD support improved in 1.0.3; Intel is untested);
 - about 6 GB of free disk space during the build;
-- **memory: 32 GB of RAM.** The game needs a lot of free memory (RAM and page file) for now, so 16 GB of RAM is not
-  enough yet ([#5](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues/5)). Close other programs (another
-  game, the browser…) before playing.
+- **memory: 32 GB of RAM recommended.** Since 1.0.3 the game uses much less memory; with 16 GB, close other programs
+  (another game, the browser…) before playing. The launcher warns you when less than 10 GB is free. 16 GB players:
+  please tell us how it goes in [#5](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues/5).
 
 The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDIA GeForce RTX 5070 Ti. The project is
 experimental and not optimized yet, so a less powerful PC may not reach a steady 60 fps.
+
+**About performance**: on Switch 2, the game needs DLSS to run smoothly: it draws at a lower resolution and DLSS
+upscales the picture. SpaceAnimalsRecomp has no DLSS yet and draws everything at native resolution. The picture is
+sharper, but it needs a lot more power from your graphics card. DLSS on PC is on the roadmap.
 
 **Handheld PCs:** not tested yet on handhelds such as the Steam Deck, Lenovo Legion Go or ASUS ROG Ally. On the Steam
 Deck (SteamOS), the Windows build would have to run through Proton. Feedback is welcome in the
 [Issues](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues).
 
-1. Download `SpaceAnimalsRecomp-1.0.2-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
-   It bundles everything the build needs (Python, GCC, glslang): nothing else to install.
+1. Download `SpaceAnimalsRecomp-1.0.3-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
+   It bundles everything the build needs (Python, Clang, GCC, glslang): nothing else to install.
 2. Extract it to a folder you can write to, **not** Program Files, whose path has only Latin characters, for example
    `C:\Games\StarFox`. Spaces are fine: the compiler is then copied once to `C:\ProgramData\StarFoxRecomp` (about 400 MB).
 3. Run `lanceur.exe`. Choose your copy (**COPY › choose**: your `.nup` file), then click **BUILD THE GAME**.
    - The launcher checks that it is Star Fox 2.0.0 by the SHA-256 hashes in the file's index, without reading all 30 GB.
-   - It extracts the executables, recompiles the whole game code (35 to 50 minutes, the launcher stays usable),
+   - It extracts the executables, recompiles the whole game code (about 20 to 30 minutes, the launcher stays usable),
      links `recomp_main.exe` and translates the game's shaders.
    - It then compiles every shader for your GPU, like recent PC games do on their first launch (about a minute), so
-     there is no shader compilation stutter in game. The game also opens for a few seconds, muted, to collect the
-     shaders it creates when it starts: let it run.
+     there is no shader compilation stutter in game. Nothing opens by itself during the build.
 4. Click **PLAY**. Under the button, choose **FULL SCREEN** or **WINDOWED** (Alt+Enter or F11 also switch in game).
    **SETTINGS** has the game language (15 choices), resolution (up to 4K), frame rate, native or console-like 3D
    rendering, volume and update checks.
 
 Your copy is never modified (read-only). The game's own icon is taken from your copy at build time and shown on
-`recomp_main.exe` and in the launcher's window; it is never distributed. The launcher's background clips, gameplay
+`recomp_main.exe` (named "StarFox Remake" in the Task Manager); it is never distributed. The launcher's background clips, gameplay
 recorded by SerenityG4K, come with the package.
 
 ### Updates
 
 The launcher checks this repository's releases when it starts (you can turn it off in **SETTINGS**). When a new version
-is out, click **UPDATE … AVAILABLE** at the top: the launcher downloads it, checks its SHA-256 hash, installs it and
-restarts. **UPDATE GAME** then rebuilds only the parts whose code changed, often in a minute or two. Your copy, your
-build, your saves and your settings stay.
+is out, it asks you first; if you say yes, it downloads it, checks its SHA-256 hash, installs it and restarts. It then
+asks if you want to rebuild the game: some improvements require rebuilding the game. It only redoes the parts whose
+code changed. You can say no and keep playing; **REBUILD NOW ›** on the launcher's home page does it later. Your copy,
+your saves and your settings stay.
 
 ### Shader precompilation
 
@@ -100,20 +107,27 @@ launch. On a GPU without pipeline libraries, shaders are compiled the first time
 cache.
 
 2,308 of them come from the shader archive of your copy. The other 80 (72 of them compute shaders) are created by the
-game when it starts, from elsewhere in your copy: the build runs the game for a few seconds to collect them, then
+game when it starts, from elsewhere in your copy: the build runs the game for a few seconds in the background, without a window, to collect them, then
 translates and compiles them too.
 
 ## Where are my saves?
 
-In `recomp\build\full\save\`, inside the folder where you extracted SpaceAnimalsRecomp. To back up your progress,
-close the game and copy the whole `save` folder.
+In `%APPDATA%\SpaceAnimalsRecomp\save` (since 1.0.3; saves from an older version are copied there the first time).
+They stay if you reinstall or move SpaceAnimalsRecomp. A backup is made before every build and update; to make your
+own, close the game and copy the whole `save` folder.
+
+## Uninstalling
+
+Click **UNINSTALL** on the launcher's build page, or run `uninstall.bat`. It removes everything SpaceAnimalsRecomp put on
+your PC (the build, the compiler copy in `C:\ProgramData\StarFoxRecomp`, temporary files and logs). It never touches
+your copy of the game, and keeps your saves unless you ask it to remove them. Then delete the folder.
 
 ## What you need
 
 - Your own Star Fox for Nintendo Switch 2 (cartridge or digital) with its **2.0.0 update** (v131072), dumped from your own
   console as a single `.nup` file (title ID `0400E88025B1A000`). The launcher tells you if the file isn't the right
   game or version.
-- Windows 10 or 11 on x86-64 with AVX2, a GPU with Vulkan 1.3, and 32 GB of RAM.
+- Windows 10 or 11 on x86-64 with AVX2, a GPU with Vulkan 1.3, and 32 GB of RAM (recommended).
 
 ## Status
 
@@ -129,26 +143,29 @@ SpaceAnimalsRecomp so far.
 | ✅ | Text and voice languages | 100% | Any of the game's 15 languages (Automatic follows Windows) |
 | ✅ | Sound | 100% | The game's audio, mixed by its own audio engine |
 | ✅ | Display | 100% | Full screen (borderless) or windowed, from the launcher or in game (Alt+Enter, F11); resolution up to 4K |
-| ✅ | Updates | 100% | One click in the launcher; only the parts that changed are rebuilt |
+| ✅ | Updates | 100% | The launcher asks before installing; only the parts that changed are rebuilt |
 | 🔧 | Frame rate | 90% | A steady 60 fps; 90 and 120 fps are not stable yet (55 to 118 fps in Corneria at 120 for now) |
 | 🔧 | Horizon OS services | 90% | Threads, files, controllers, applets, time and audio: everything the game has used so far |
-| 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD and Intel are untested |
-| 🔧 | Controls | 70% | Keyboard and one XInput controller (Xbox layout), by button position; no mouse or remapping yet |
+| 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD support improved in 1.0.3; Intel is untested |
+| 🔧 | Controls | 75% | Keyboard (keys changeable in the launcher) and one XInput controller (Xbox layout), by button position; no mouse yet |
 | 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
 | 🗺️ | NVIDIA DLSS | 0% | Planned: DLSS on PC, with free output resolution |
 | 🗺️ | Frame generation | 0% | Planned: generated frames between the ones the game draws, for a higher frame rate on screen |
 | 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
 | 🗺️ | Online play | 0% | Planned: the game's online modes |
 | 🗺️ | Mouse controls | 0% | Planned: the game's mouse mode, with the PC mouse |
-| 🗺️ | Key remapping and several controllers | 0% | Planned |
+| 🗺️ | Controller remapping and several controllers | 0% | Planned |
+| 🗺️ | PlayStation and Switch Pro controllers, rumble | 0% | Planned (asked for in #3) |
 | 🗺️ | Linux | 0% | Planned |
 
 ✅ done · 🔧 in progress · 🗺️ roadmap
 
 ## Controls
 
-Controller buttons follow the position on the pad (the Switch's A is the Xbox B, and so on). Keyboard keys follow their
-physical position, so the layout is the same on AZERTY and QWERTY keyboards (names below are QWERTY).
+Controller buttons follow the position on the pad (the Switch's A is the Xbox B, and so on). The keyboard keys below are
+the default ones. You can change them on the launcher's **CONTROLS** page: pick **WASD (QWERTY)** or **ZQSD (AZERTY)**,
+or click a key's box and press the key you want. Changes apply the next time you start the game (since 1.0.3, after
+rebuilding the game).
 
 | Switch | Keyboard | Xbox controller |
 |---|---|---|

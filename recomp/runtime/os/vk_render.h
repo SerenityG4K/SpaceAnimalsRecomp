@@ -33,6 +33,10 @@ void save_caches();   // écrit pipelines.cache (fermeture du jeu)
 // Le jeu a libéré la mémoire [addr, addr+size) (nvnMemoryPoolFinalize) : les imports Vulkan qui la couvrent
 // sont retirés, et réimportés au prochain usage de cette plage (la mémoire peut être remappée ailleurs)
 void pools_released(uint64_t addr, uint64_t size);
+// nvnMemoryPoolFlushMappedRange : le jeu a écrit [addr, addr+size). Appelable de n'importe quel fil. Les textures
+// packagées dont la source touche cette plage sont comparées à leur dernier envoi au prochain usage, et renvoyées
+// au GPU si elles ont changé.
+void pool_flushed(uint64_t addr, uint64_t size);
 // nvnTextureFinalize : l'image de cet objet texture perd une référence (détruite plus tard si plus personne ne
 // l'utilise, au-delà d'un cache de réemploi plafonné)
 void texture_released(uint64_t texkey);

@@ -7,6 +7,7 @@ l'appelant : le code généré contient des adresses absolues, donc la base doit
 identique à la génération et à l'exécution.
 """
 import os
+import mmap
 import struct
 import sys
 
@@ -62,7 +63,9 @@ def _sleb(b, off):
 class Module:
     def __init__(self, name, image, base=None, text_size=None, ro_off=None, data_off=None):
         self.name = name
-        self.img = bytearray(image)
+        # image projetée en lecture seule (from_work) : partagée entre les processus de fullbuild.py et hors de leur
+        # mémoire privée (252 Mo pour main) ; sinon copie modifiable, comme avant
+        self.img = image if isinstance(image, mmap.mmap) else bytearray(image)
         self.base = DEFAULT_BASES.get(name, 0x0000007150000000) if base is None else base
         self.size = len(self.img)
         mod0 = struct.unpack_from("<I", self.img, 4)[0]
@@ -90,7 +93,8 @@ class Module:
         n = nso.parse(nso_path)
         segs = n["segs"]
         img_path = os.path.join(PROJECT, "work", f"{name}.bin")
-        img = open(img_path, "rb").read()
+        with open(img_path, "rb") as fp:
+            img = mmap.mmap(fp.fileno(), 0, access=mmap.ACCESS_READ)
         return cls(name, img, base, text_size=segs[0]["size"], ro_off=segs[1]["mem_off"],
                    data_off=segs[2]["mem_off"])
 
@@ -118,7 +122,7 @@ class Module:
         for i in range(nsym):
             name_off, info, other, shndx, value, size = struct.unpack_from(
                 "<IBBHQQ", self.img, symtab + i * syment)
-            end = self.img.index(0, strtab + name_off)
+            end = self.img.find(b"\0", strtab + name_off)
             name = self.img[strtab + name_off:end].decode("utf-8", "replace")
             self.symbols.append(dict(name=name, info=info, shndx=shndx, value=value, size=size,
                                      type=info & 0xf, bind=info >> 4))
@@ -232,7 +236,7 @@ class Module:
             p += 8
         p += 4  # CIE id
         version = self.img[p]; p += 1
-        end = self.img.index(0, p)
+        end = self.img.find(b"\0", p)
         aug = self.img[p:end].decode(); p = end + 1
         _, p = _uleb(self.img, p)       # code align
         _, p = _sleb(self.img, p)       # data align

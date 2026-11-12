@@ -48,7 +48,7 @@ void ensure_thread_fiber(CPUState* ctx) {
     if (t_thread_fiber) return;
     auto* f = new HFiber;
     f->host = IsThreadAFiber() ? GetCurrentFiber() : ConvertThreadToFiberEx(nullptr, FIBER_FLAG_FLOAT_SWITCH);
-    if (!f->host) panic("ConvertThreadToFiber impossible (erreur %lu)", GetLastError());
+    if (!f->host) panic("ConvertThreadToFiber failed (error %lu)", GetLastError());
     f->ctx = ctx;
     t_thread_fiber = t_current = f;
 }
@@ -76,10 +76,10 @@ void WINAPI fiber_entry(void* p) {
     uint64_t next = c->x[0];
     f->finished = true;
     HFiber* n = next ? lookup(next) : t_thread_fiber;
-    if (!n) panic("fibre 0x%llx terminée vers une fibre inconnue 0x%llx", (unsigned long long)f->guest,
+    if (!n) panic("fiber 0x%llx finished into an unknown fiber 0x%llx", (unsigned long long)f->guest,
                   (unsigned long long)next);
     switch_to(c, n);
-    panic("fibre terminée reprise");
+    panic("finished fiber resumed");
 }
 
 // nn::os::InitializeFiber(FiberType*, FiberFunction, void* arg, void* stack, size_t size, int flags)
@@ -93,7 +93,7 @@ void init_fiber(CPUState* ctx) {
     f->ctx = (CPUState*)_aligned_malloc(sizeof(CPUState), 64);
     memset(f->ctx, 0, sizeof(CPUState));
     f->host = CreateFiberEx(64 << 10, HOST_FIBER_STACK, FIBER_FLAG_FLOAT_SWITCH, fiber_entry, f);
-    if (!f->host) panic("CreateFiberEx impossible (erreur %lu)", GetLastError());
+    if (!f->host) panic("CreateFiberEx failed (error %lu)", GetLastError());
     HFiber* old = nullptr;
     {
         std::lock_guard<std::mutex> lk(g_lk);
@@ -106,7 +106,7 @@ void init_fiber(CPUState* ctx) {
         _aligned_free(old->ctx);
         delete old;
     }
-    HDBG("fiber", "InitializeFiber 0x%llx : %s, pile 0x%llx+0x%llx", (unsigned long long)f->guest,
+    HDBG("fiber", "InitializeFiber 0x%llx: %s, stack 0x%llx+0x%llx", (unsigned long long)f->guest,
          symbolize(f->func).c_str(), (unsigned long long)f->stack, (unsigned long long)f->stack_size);
 }
 
@@ -121,7 +121,7 @@ void finalize_fiber(CPUState* ctx) {
         g_fibers.erase(it);
     }
     if (f == t_current) {   // ne devrait pas arriver : on ne détruit pas la fibre qui tourne
-        HLOG("fiber", "FinalizeFiber sur la fibre courante 0x%llx : ignoré", (unsigned long long)g);
+        HLOG("fiber", "FinalizeFiber on the current fiber 0x%llx: skipped", (unsigned long long)g);
         return;
     }
     DeleteFiber(f->host);
@@ -132,10 +132,10 @@ void finalize_fiber(CPUState* ctx) {
 void switch_fiber(CPUState* ctx) {
     ensure_thread_fiber(ctx);
     HFiber* t = lookup(ctx->x[0]);
-    if (!t) panic("SwitchToFiber vers une fibre inconnue 0x%llx (appelant %s)",
+    if (!t) panic("SwitchToFiber to an unknown fiber 0x%llx (caller %s)",
                   (unsigned long long)ctx->x[0], symbolize(ctx->x[30]).c_str());
     if (t == t_current) return;
-    if (t->finished) panic("SwitchToFiber vers une fibre terminée 0x%llx", (unsigned long long)ctx->x[0]);
+    if (t->finished) panic("SwitchToFiber to a finished fiber 0x%llx", (unsigned long long)ctx->x[0]);
     switch_to(ctx, t);
 }
 
@@ -173,7 +173,7 @@ void WINAPI eng_entry(void* p) {
     CPUState* c = f->ctx;
     // nouveau contexte préparé par le moteur : « retour » à x30 (trampoline : x0 = x19, br x20)
     call_guest(c, c->x[30]);
-    panic("coroutine du moteur terminée (entrée %s)", symbolize(f->func).c_str());
+    panic("engine coroutine finished (entry %s)", symbolize(f->func).c_str());
 }
 
 void eng_jump(CPUState* ctx) {
@@ -201,8 +201,8 @@ void eng_jump(CPUState* ctx) {
         read_frame(t->ctx, th);
         t->func = t->ctx->x[30];
         t->host = CreateFiberEx(64 << 10, HOST_FIBER_STACK, FIBER_FLAG_FLOAT_SWITCH, eng_entry, t);
-        if (!t->host) panic("CreateFiberEx impossible (erreur %lu)", GetLastError());
-        HDBG("fiber", "nouvelle coroutine : pile 0x%llx, reprise %s", (unsigned long long)th,
+        if (!t->host) panic("CreateFiberEx failed (error %lu)", GetLastError());
+        HDBG("fiber", "new coroutine: stack 0x%llx, resume %s", (unsigned long long)th,
              symbolize(t->func).c_str());
     }
     if (t == cur) {   // retour sur soi-même
@@ -223,7 +223,7 @@ ApiStub g_api[NAPI];
 int g_napi = 0;
 void api_stub_call(int i, CPUState* ctx) {
     if (g_api[i].calls++ == 0)
-        HLOG("hle", "[neutralisé] %s (appelant %s)", g_api[i].name.c_str(), symbolize(ctx->x[30]).c_str());
+        HLOG("hle", "[stubbed out] %s (caller %s)", g_api[i].name.c_str(), symbolize(ctx->x[30]).c_str());
     ctx->x[0] = 0;
 }
 template <int I>
@@ -242,13 +242,13 @@ int stub_namespace(const char* prefix, const char* why) {
         if (m.name != "main") continue;
         for (auto& imp : m.imports) {
             if (imp.compare(0, strlen(prefix), prefix)) continue;
-            if (g_napi >= NAPI) panic("réserve de bouchons d'API épuisée");
+            if (g_napi >= NAPI) panic("API stub pool exhausted");
             int i = g_napi++;
             g_api[i].name = demangle(imp.c_str());
             if (override_export(imp.c_str(), stubs[i])) n++;
         }
     }
-    HLOG("hle", "%s neutralisé (%d fonctions) : %s", prefix, n, why);
+    HLOG("hle", "%s stubbed out (%d functions): %s", prefix, n, why);
     return n;
 }
 
@@ -265,8 +265,8 @@ void hle_os_init() {
             rt_register_functions(&a, &fn, 1);
             n++;
         }
-    HLOG("hle", "fibres nn::os et coroutines du moteur → fibres Windows (%d fonctions remplacées)", n);
-    stub_namespace("_ZN2nn4chat", "GameChat repose sur le système graphique gsv, court-circuité");
+    HLOG("hle", "nn::os fibers and engine coroutines → Windows fibers (%d functions replaced)", n);
+    stub_namespace("_ZN2nn4chat", "GameChat relies on the gsv graphics system, which is bypassed");
 }
 
 }  // namespace hos

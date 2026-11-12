@@ -22,6 +22,7 @@ SOURCES = {   # dossier (relatif à recomp/) → extensions
     "shaders": (".py",),
     "bench": (".py",),
     "licences": (".txt",),   # avis et licences des outils fournis dans le paquet (THIRD_PARTY_NOTICES.txt)
+    "verif": (".py", ".txt"),   # vérifications avant chaque version (pas les rapports, privés)
 }
 LANCEUR_FICHIERS = (".cpp", ".h", ".rc", ".manifest", ".py")
 INTERDITS = (".nup", ".bin", ".o", ".spv", ".mp4", ".log", ".save", ".ini", ".cache", ".png", ".jpg", ".jpeg", ".exe", ".dll",
@@ -48,8 +49,11 @@ def main():
         copier(os.path.join(DEPOT, f), os.path.join(out, f))
     copier(os.path.join(DEPOT, "gitignore.txt"), os.path.join(out, ".gitignore"))
     copier(os.path.join(RECOMP, "README.md"), os.path.join(out, "docs", "DEV-NOTES-fr.md"))
+    # notes de développement en anglais (recomp/DEV-NOTES.md) : traduction des précédentes, à mettre à jour avec elles
+    if os.path.exists(os.path.join(RECOMP, "DEV-NOTES.md")):
+        copier(os.path.join(RECOMP, "DEV-NOTES.md"), os.path.join(out, "docs", "DEV-NOTES.md"))
     r = os.path.join(out, "recomp")
-    for f in ("recomp.py", "build.py", "fullbuild.py", "link.py", "hooks.txt", "VERSION"):
+    for f in ("recomp.py", "build.py", "fullbuild.py", "link.py", "hooks.txt", "lots.txt", "VERSION"):
         copier(os.path.join(RECOMP, f), os.path.join(r, f))
     for d, ext in SOURCES.items():
         for racine, dossiers, fichiers in os.walk(os.path.join(RECOMP, d)):

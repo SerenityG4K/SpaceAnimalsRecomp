@@ -44,11 +44,19 @@ OUTILS = [
             "capstone-5.0.7-py3-none-win_amd64.whl",
      "sha256": "4ab8bcb7da8f221ff45926ca168ca33e76f7237d06fbf3c10780002faa2670e1", "dest": "python/Lib/site-packages",
      "racine": False, "licence": "BSD-3-Clause"},
-    {"nom": "gcc", "version": "16.2.0 (WinLibs, MinGW-w64 14.0.0 UCRT, r3)",
+    # Même version de WinLibs que jusqu'à la 1.0.2, dans sa variante avec LLVM : GCC 16.2.0 inchangé, plus Clang 23.1.3,
+    # qui compile le code généré (≈ 180 Mo de mémoire par lot au lieu de ≈ 1,3 Go avec g++ : voir build.py).
+    {"nom": "gcc", "version": "16.2.0 + Clang 23.1.3 (WinLibs, MinGW-w64 14.0.0 UCRT, r3)",
      "url": "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.2.0posix-23.1.3-14.0.0-ucrt-r3/"
-            "winlibs-x86_64-posix-seh-gcc-16.2.0-mingw-w64ucrt-14.0.0-r3.zip",
-     "sha256": "3c69305081e4a647144339a936244fcf7d3d9e558319e1ad7be2cd2886d4b6a1", "dest": "gcc", "racine": True,
-     "licence": "GPL v3 avec exception de bibliothèque d'exécution GCC ; MinGW-w64 : licences libres (ZPL, MIT…)"},
+            "winlibs-x86_64-posix-seh-gcc-16.2.0-llvm-23.1.3-mingw-w64ucrt-14.0.0-r3.zip",
+     "sha256": "1f04e482797dc5f71fe2875cf2b743bfb9f5fd1de0955fdd3118438c0432ba5f", "dest": "gcc", "racine": True,
+     # Archive des versions 1.0.0 à 1.0.2 (g++ seul) : gardée telle quelle chez un joueur qui met à jour. Ses objets
+     # compilés par g++ restent valables (build.py : mêmes drapeaux, mêmes empreintes) ; la remplacer ferait passer le
+     # code généré à clang, donc tout recompiler. preparer.py installe l'archive actuelle (--niveau) seulement quand
+     # il n'y a pas d'objets à garder.
+     "acceptes": ("3c69305081e4a647144339a936244fcf7d3d9e558319e1ad7be2cd2886d4b6a1",),
+     "licence": "GPL v3 avec exception de bibliothèque d'exécution GCC ; LLVM : Apache 2.0 avec exceptions LLVM ; "
+                "MinGW-w64 : licences libres (ZPL, MIT…) ; Z3 : MIT"},
     {"nom": "glslang", "version": "16.6.0",
      "url": "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip",
      "sha256": "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b", "dest": "glslang", "racine": False,
@@ -90,10 +98,54 @@ GARDER_GCC = {
         "lib/libstdc++.modules.json", "lib/libatomic.a", "lib/libatomic.dll.a", "lib/libatomic_asneeded.a",
         "lib/libgcc_s.a", "lib/libssp.a", "lib/libssp.dll.a", "lib/libssp_nonshared.a", "lib/libquadmath.a",
         "lib/libquadmath.dll.a", "lib/libgomp.a", "lib/libgomp.dll.a", "lib/libgomp.spec", "lib/libmangle.a",
+        # Clang (code généré) : clang++.exe et la fermeture de ses DLL importées (relevé du 2026-11-11, objdump -p)
+        "bin/clang++.exe", "bin/libLLVMAArch64AsmParser.dll", "bin/libLLVMAArch64CodeGen.dll",
+        "bin/libLLVMAArch64Desc.dll", "bin/libLLVMAArch64Info.dll", "bin/libLLVMAArch64Utils.dll",
+        "bin/libLLVMABI.dll", "bin/libLLVMAMDGPUAsmParser.dll", "bin/libLLVMAMDGPUCodeGen.dll",
+        "bin/libLLVMAMDGPUDesc.dll", "bin/libLLVMAMDGPUInfo.dll", "bin/libLLVMAMDGPUUtils.dll",
+        "bin/libLLVMARMAsmParser.dll", "bin/libLLVMARMCodeGen.dll", "bin/libLLVMARMDesc.dll",
+        "bin/libLLVMARMInfo.dll", "bin/libLLVMARMUtils.dll", "bin/libLLVMAggressiveInstCombine.dll",
+        "bin/libLLVMAnalysis.dll", "bin/libLLVMAsmParser.dll", "bin/libLLVMAsmPrinter.dll",
+        "bin/libLLVMBinaryFormat.dll", "bin/libLLVMBitReader.dll", "bin/libLLVMBitWriter.dll",
+        "bin/libLLVMBitstreamReader.dll", "bin/libLLVMCFGuard.dll", "bin/libLLVMCGData.dll",
+        "bin/libLLVMCodeGen.dll", "bin/libLLVMCodeGenTypes.dll", "bin/libLLVMCore.dll", "bin/libLLVMCoroutines.dll",
+        "bin/libLLVMCoverage.dll", "bin/libLLVMDebugInfoBTF.dll", "bin/libLLVMDebugInfoCodeView.dll",
+        "bin/libLLVMDebugInfoDWARF.dll", "bin/libLLVMDebugInfoDWARFLowLevel.dll", "bin/libLLVMDebugInfoGSYM.dll",
+        "bin/libLLVMDebugInfoMSF.dll", "bin/libLLVMDebugInfoPDB.dll", "bin/libLLVMDemangle.dll",
+        "bin/libLLVMFrontendAtomic.dll", "bin/libLLVMFrontendDirective.dll", "bin/libLLVMFrontendDriver.dll",
+        "bin/libLLVMFrontendHLSL.dll", "bin/libLLVMFrontendOffloading.dll", "bin/libLLVMFrontendOpenMP.dll",
+        "bin/libLLVMGlobalISel.dll", "bin/libLLVMHipStdPar.dll", "bin/libLLVMIRPrinter.dll",
+        "bin/libLLVMIRReader.dll", "bin/libLLVMInstCombine.dll", "bin/libLLVMInstrumentation.dll",
+        "bin/libLLVMLTO.dll", "bin/libLLVMLinker.dll", "bin/libLLVMMC.dll", "bin/libLLVMMCDisassembler.dll",
+        "bin/libLLVMMCParser.dll", "bin/libLLVMMIRParser.dll", "bin/libLLVMNVPTXCodeGen.dll",
+        "bin/libLLVMNVPTXDesc.dll", "bin/libLLVMNVPTXInfo.dll", "bin/libLLVMObjCARCOpts.dll",
+        "bin/libLLVMObject.dll", "bin/libLLVMOption.dll", "bin/libLLVMPasses.dll", "bin/libLLVMPlugins.dll",
+        "bin/libLLVMProfileData.dll", "bin/libLLVMRemarks.dll", "bin/libLLVMSandboxIR.dll",
+        "bin/libLLVMScalarOpts.dll", "bin/libLLVMSelectionDAG.dll", "bin/libLLVMSupport.dll",
+        "bin/libLLVMSymbolize.dll", "bin/libLLVMTarget.dll", "bin/libLLVMTargetParser.dll", "bin/libLLVMTextAPI.dll",
+        "bin/libLLVMTextAPIBinaryReader.dll", "bin/libLLVMTransformUtils.dll", "bin/libLLVMVectorize.dll",
+        "bin/libLLVMWebAssemblyAsmParser.dll", "bin/libLLVMWebAssemblyCodeGen.dll", "bin/libLLVMWebAssemblyDesc.dll",
+        "bin/libLLVMWebAssemblyInfo.dll", "bin/libLLVMWebAssemblyUtils.dll", "bin/libLLVMWindowsDriver.dll",
+        "bin/libLLVMX86AsmParser.dll", "bin/libLLVMX86CodeGen.dll", "bin/libLLVMX86Desc.dll",
+        "bin/libLLVMX86Info.dll", "bin/libLLVMipo.dll", "bin/libclangAPINotes.dll", "bin/libclangAST.dll",
+        "bin/libclangASTMatchers.dll", "bin/libclangAnalysis.dll", "bin/libclangAnalysisLifetimeSafety.dll",
+        "bin/libclangBasic.dll", "bin/libclangCodeGen.dll", "bin/libclangCrossTU.dll",
+        "bin/libclangDependencyScanning.dll", "bin/libclangDriver.dll", "bin/libclangEdit.dll",
+        "bin/libclangExtractAPI.dll", "bin/libclangFrontend.dll", "bin/libclangFrontendTool.dll",
+        "bin/libclangInstallAPI.dll", "bin/libclangLex.dll", "bin/libclangOptions.dll", "bin/libclangParse.dll",
+        "bin/libclangRewrite.dll", "bin/libclangRewriteFrontend.dll",
+        "bin/libclangScalableStaticAnalysisAnalyses.dll", "bin/libclangScalableStaticAnalysisCore.dll",
+        "bin/libclangScalableStaticAnalysisFrontend.dll",
+        "bin/libclangScalableStaticAnalysisSourceTransformation.dll", "bin/libclangSema.dll",
+        "bin/libclangSerialization.dll", "bin/libclangStaticAnalyzerCheckers.dll",
+        "bin/libclangStaticAnalyzerCore.dll", "bin/libclangStaticAnalyzerFrontend.dll", "bin/libclangSupport.dll",
+        "bin/libclangToolingCore.dll", "bin/libclangUnifiedSymbolResolution.dll", "bin/libgcc_s_seh-1.dll",
+        "bin/libgmp-10.dll", "bin/libstdc++-6.dll", "bin/libwinpthread-1.dll", "bin/libz3.dll", "bin/libzstd.dll",
+        "bin/zlib1.dll",
     },
     # dossiers gardés en entier : en-têtes C/C++, CRT et bibliothèques d'import de MinGW-w64
     "dossiers": ("include/c++/", "x86_64-w64-mingw32/include/", "x86_64-w64-mingw32/lib/", _LIBGCC + "include/",
-                 _LIBGCC + "include-fixed/"),
+                 _LIBGCC + "include-fixed/", "lib/clang/23/include/"),   # en-têtes propres à Clang
 }
 GARDER_GLSLANG = {"fichiers": {"bin/glslang.exe"}, "dossiers": ()}
 
@@ -123,6 +175,8 @@ def alleger(dossier, outil):
 
 
 def telecharger(url, chemin):
+    if os.environ.get("RECOMP_OUTILS_SANS_RESEAU"):   # vérifications : une mise à jour ne doit rien télécharger
+        sys.exit(f"  download refused (RECOMP_OUTILS_SANS_RESEAU): {url}")
     req = urllib.request.Request(url, headers={"User-Agent": "starfox-recomp-outils/1.0"})
     with urllib.request.urlopen(req, timeout=120) as r, open(chemin + ".part", "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
@@ -136,7 +190,7 @@ def telecharger(url, chemin):
             pct = lu * 100 // total if total else 0
             if pct // 10 != dernier:
                 dernier = pct // 10
-                print(f"    {lu / 1e6:6.1f} Mo" + (f" / {total / 1e6:.1f} Mo" if total else ""), flush=True)
+                print(f"    {lu / 1e6:6.1f} MB" + (f" / {total / 1e6:.1f} MB" if total else ""), flush=True)
     os.replace(chemin + ".part", chemin)
 
 
@@ -160,7 +214,7 @@ def extraire(archive, dest, sans_racine):
                 continue
             cible = os.path.abspath(os.path.join(dest, nom))
             if not cible.startswith(dest + os.sep) or os.path.isabs(nom) or ".." in nom.split("/"):
-                raise RuntimeError(f"chemin refusé dans {os.path.basename(archive)} : {m.filename}")
+                raise RuntimeError(f"path refused in {os.path.basename(archive)}: {m.filename}")
             if nom.endswith("/"):
                 os.makedirs(cible, exist_ok=True)
                 continue
@@ -192,29 +246,37 @@ def main():
     ap.add_argument("--dest", default=os.path.join(RECOMP, "outils"))
     ap.add_argument("--garder-archives", action="store_true")
     ap.add_argument("--complet", action="store_true", help="garder tout GCC et glslang (gdb… : développement)")
+    ap.add_argument("--niveau", action="store_true",
+                    help="remplacer aussi une archive précédente encore acceptée (compilateur sans Clang de la 1.0.2)")
     a = ap.parse_args()
     dest = os.path.abspath(a.dest)
     archives = os.path.join(dest, "_archives")
     os.makedirs(archives, exist_ok=True)
     marques = os.path.join(dest, ".installe")
     os.makedirs(marques, exist_ok=True)
+    gardes = {}   # outil → empreinte de l'archive précédente laissée en place
     for i, o in enumerate(OUTILS):
         fichier = os.path.join(archives, o["url"].rsplit("/", 1)[1])
         print(f"{o['nom']} {o['version']}", flush=True)
         marque = os.path.join(marques, o["nom"])
-        deja = os.path.exists(marque) and open(marque, encoding="utf-8").read().strip() == o["sha256"]
+        vue = open(marque, encoding="utf-8").read().strip() if os.path.exists(marque) else ""
+        deja = vue == o["sha256"]
+        if vue in o.get("acceptes", ()) and not a.niveau and os.path.isdir(os.path.join(dest, o["dest"])):
+            gardes[o["nom"]] = vue
+            print(f"  previous version kept (archive {vue[:12]}…); --niveau installs this one", flush=True)
+            continue
         # Python réinstallé : ses modules aussi (ils sont dans son dossier)
         if deja and not any(p["dest"] == "python" and not os.path.exists(os.path.join(marques, p["nom"])) for p in OUTILS):
-            print("  déjà installé", flush=True)
+            print("  already installed", flush=True)
             continue
         if not (os.path.exists(fichier) and empreinte(fichier) == o["sha256"]):
-            print(f"  téléchargement : {o['url']}", flush=True)
+            print(f"  download: {o['url']}", flush=True)
             telecharger(o["url"], fichier)
         h = empreinte(fichier)
         if h != o["sha256"]:
             os.remove(fichier)
-            sys.exit(f"  EMPREINTE DIFFÉRENTE pour {o['nom']} : {h} (attendu {o['sha256']}) : archive supprimée")
-        print(f"  SHA-256 vérifiée : {h}", flush=True)
+            sys.exit(f"  HASH DIFFERS for {o['nom']}: {h} (expected {o['sha256']}): archive deleted")
+        print(f"  SHA-256 hash verified: {h}", flush=True)
         cible = os.path.join(dest, o["dest"])
         if o["nom"] in ("python", "gcc", "glslang") and os.path.isdir(cible):
             shutil.rmtree(cible)
@@ -222,7 +284,7 @@ def main():
         extraire(fichier, cible, o["racine"])
         if o["nom"] in ("gcc", "glslang") and not a.complet:
             n, taille = alleger(cible, o["nom"])
-            print(f"  allégé : {n} fichiers inutiles à la construction retirés ({taille / 1e6:.0f} Mo)", flush=True)
+            print(f"  slimmed down: {n} files not needed for the build removed ({taille / 1e6:.0f} MB)", flush=True)
         if o["nom"] == "python":
             regler_python(cible)
             for p in OUTILS:   # les modules seront réinstallés dans ce nouveau Python
@@ -230,7 +292,7 @@ def main():
                     os.remove(os.path.join(marques, p["nom"]))
         with open(marque, "w", encoding="utf-8") as f:
             f.write(o["sha256"] + "\n")
-        print(f"  installé dans {cible}", flush=True)
+        print(f"  installed in {cible}", flush=True)
     with open(os.path.join(dest, "LISEZMOI.txt"), "w", encoding="utf-8-sig", newline="\r\n") as f:
         f.write("Outils de construction fournis avec le launcher (téléchargés depuis leurs sources officielles,\n"
                 "empreintes SHA-256 vérifiées par recomp/launcher/outils.py). GCC et glslang sont réduits aux fichiers\n"
@@ -238,10 +300,13 @@ def main():
                 "Licences et liens vers le code source de chaque outil : THIRD_PARTY_NOTICES.txt et le dossier\n"
                 "LICENCES, à la racine du paquet.\n\n")
         for o in OUTILS:
+            if o["nom"] in gardes:
+                f.write(f"{o['nom']} : archive précédente gardée (SHA-256 {gardes[o['nom']]}), même source, sans Clang ;\n"
+                        f"  licence : {o['licence']}\n  version actuelle, installée par « outils.py --niveau » :\n")
             f.write(f"{o['nom']} {o['version']}\n  source : {o['url']}\n  SHA-256 : {o['sha256']}\n  licence : {o['licence']}\n\n")
     if not a.garder_archives:
         shutil.rmtree(archives, ignore_errors=True)
-    print("outils prêts", flush=True)
+    print("tools ready", flush=True)
 
 
 if __name__ == "__main__":

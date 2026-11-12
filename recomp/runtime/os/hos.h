@@ -90,6 +90,51 @@ static_assert(sizeof(MemInfo) == 0x28, "MemInfo");
 
 void mem_init();
 bool mem_commit(uint64_t addr, uint64_t size);          // engage (RW, mis à zéro)
+// Engagement à la demande (memory.cpp) : la plage reste réservée, ses pages sont engagées au premier accès.
+bool mem_commit_lazy(uint64_t addr, uint64_t size);
+// gestionnaire d'exceptions : 0 pas une page à engager, 1 bloc engagé ; données de texture rendues : 2 restaurées pour
+// une lecture, 3 restaurées pour une écriture (texture encore utilisée), 4 oubliées (le jeu réemploie la mémoire)
+int mem_fault(uint64_t addr, bool ecriture);
+// Données de textures déjà envoyées au GPU, rendues à Windows (memory.cpp ; recomp.ini : texture_release)
+void mem_release_init();
+bool mem_release_actif();                                           // le fichier temporaire est ouvert et accepte des données
+uint64_t mem_release(uint64_t addr, uint64_t size, uint64_t* id);   // pages entières de la plage ; octets rendus (tout ou rien)
+bool mem_released_intact(uint64_t addr, uint64_t size, uint64_t id);   // ce rendu n'a jamais été retouché
+void mem_restore(uint64_t addr, uint64_t size);                     // restaure la partie rendue (avant une lecture en nombre)
+// l'image qui a fait le rendu `id` a encore, ou n'a plus, d'objet texture du jeu (voir mem_fault)
+void mem_release_vivant(uint64_t addr, uint64_t size, uint64_t id, bool vivant);
+struct RelStats {
+    uint64_t rendus, cumul, fichier;   // octets rendus en ce moment, depuis le début ; taille du fichier temporaire
+    // restaurations : 0 lecture fautive, 1 écriture fautive dans une texture encore utilisée, 2 runtime, 3 avant un
+    // appel système, 4 écriture fautive dans une texture sans objet (RECOMP_TEX_DROP : plages oubliées) ; 5 parmi
+    // 0, 2 et 3, données relues après une réécriture partielle de la même plage sans objet
+    uint64_t n[6], octets[6];
+    uint64_t ns_ecrit, ns_lu;
+};
+void mem_release_stats(RelStats* s);
+bool mem_ensure(uint64_t addr, uint64_t size);          // engage d'avance (noyau de Windows, import Vulkan)
+void mem_lazy_stats(uint64_t* blocs, uint64_t* octets, uint64_t* reserves);
+void mem_marge_init();                                  // marge engagée d'avance, rendue au premier refus de Windows
+int mem_pression();                                     // nombre de refus de mémoire : le rendu vide ses caches quand il change
+void mem_veille_init();                                 // veille de la mémoire du PC : réagit avant le premier refus
+void mem_census_init();                                 // RECOMP_MEM_CENSUS=s : recensement de la mémoire du jeu (diagnostic)
+void mem_vides_init();                                  // recomp.ini, zero_page_release : pages vides rendues à Windows
+// Garde du noyau : tant qu'elle est tenue, aucune page vide de la mémoire du jeu n'est rendue à Windows (memory.cpp).
+// À tenir de l'engagement d'une plage (mem_ensure) jusqu'à la fin de l'appel qui y écrit sans passer par le processeur
+// du jeu : ReadFile dans la mémoire du jeu (svc_fs.cpp), import d'une fenêtre dans Vulkan (vk_render.cpp).
+void mem_noyau_debut();
+void mem_noyau_fin();
+struct MemNoyau {
+    MemNoyau() { mem_noyau_debut(); }
+    ~MemNoyau() { mem_noyau_fin(); }
+    MemNoyau(const MemNoyau&) = delete;
+    MemNoyau& operator=(const MemNoyau&) = delete;
+};
+// fenêtre importée dans Vulkan (le GPU y lit et écrit) : jamais rendue, de l'import jusqu'à la libération de la mémoire
+void mem_epingler(uint64_t addr, uint64_t size);
+void mem_desepingler(uint64_t addr, uint64_t size);
+void dump_thread_stacks(const char* why);   // host_main.cpp : piles des fils passés par le tas (diagnostic)
+void cpp_heap_stats(int64_t* vivants, uint64_t nombre[40], uint64_t octets[40]);   // host_main.cpp, RECOMP_MEM_MAP
 void mem_decommit(uint64_t addr, uint64_t size);
 void mem_set(uint64_t addr, uint64_t size, uint32_t state, uint32_t perm, uint32_t attr = 0);
 void mem_set_perm(uint64_t addr, uint64_t size, uint32_t perm);
@@ -115,6 +160,10 @@ struct RomfsFile {   // fichier de la romfs, stocké brut dans le .nup (lu en pl
     uint64_t nup_offset = 0, size = 0;
 };
 extern std::string g_nup_path;
+// Windows a refusé de la mémoire au jeu (tas, mémoire physique) : le PC manque de mémoire libre (autres programmes
+// ouverts). Le jeu s'arrête alors avec le code 4, que le launcher explique au joueur.
+extern std::atomic<bool> g_manque_memoire;
+double memoire_validable_libre_go();
 extern std::vector<RomfsFile> g_romfs;
 void load_modules(const std::string& manifest);
 const Module* module_at(uint64_t addr);
@@ -154,8 +203,10 @@ void rename_native(uint64_t addr, const std::string& name);
 // remplace une fonction exportée (appels via PLT / pointeurs) par une fonction native
 bool override_export(const char* sym, RecompFn fn);
 void gfx_init();      // hle_gfx.cpp : remplacements graphiques (avant rt_dispatch_finalize)
+std::string save_dir_path();   // svc_fs.cpp : dossier des sauvegardes du joueur (%APPDATA%\SpaceAnimalsRecomp\save)
 void hle_os_init();   // hle_os.cpp : fibres nn::os
 void hle_audio_init();
+void hle_hid_init();     // svc_hid.cpp : vibrations (nn::hid::SendVibrationValue)
 // crée un nn::os::SystemEventType invité (vrai événement noyau) et renvoie son objet noyau
 std::shared_ptr<KObject> hle_make_system_event(CPUState* ctx, uint64_t system_event);   // hle_audio.cpp : flux audio nn::audio
 // neutralise toutes les fonctions qu'importe main dans un espace de noms (préfixe mangled) :

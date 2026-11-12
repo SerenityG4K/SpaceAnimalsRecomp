@@ -202,7 +202,7 @@ std::shared_ptr<Service> make_application_proxy() {
         // nouvelles sous-interfaces (Switch 2) : objet générique, dont
         // GraphicsScalingParametersFunctions (commande 10 → {échelle 10/20/30, 0, 0}, lue par
         // nn::oe::GetCurrentGraphicsScale ; 10 = échelle 0)
-        HLOG("ipc", "am:IApplicationProxy : commande %u inconnue → objet générique", r.cmd);
+        HLOG("ipc", "am:IApplicationProxy: unknown command %u → generic object", r.cmd);
         r.out_objects.push_back(svc("am:IApplicationProxy?", [](Request& q) {
             if (q.cmd == 10) {
                 static const uint32_t scale = getenv("RECOMP_GFX_SCALE") ? (uint32_t)atoi(getenv("RECOMP_GFX_SCALE")) : 10;

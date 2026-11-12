@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <thread>
 
@@ -38,9 +39,38 @@ std::wstring wide(const std::string& s) {
     return w;
 }
 
+// lanceur.log, à côté de lanceur.exe : ce que fait le launcher (démarrage, affichage, copie, construction, mise à
+// jour, lancement et code de sortie du jeu, rapport de bug), horodaté. Au-delà de 1 Mo, il devient
+// lanceur_precedent.log. Joint au rapport de bug (rapport.py). Appelé aussi par dessin.cpp (échecs d'affichage).
+static std::mutex g_jl_lk;
+void jlog(const wchar_t* fmt, ...) {
+    wchar_t b[2048];
+    va_list a;
+    va_start(a, fmt);
+    _vsnwprintf(b, 2047, fmt, a);
+    va_end(a);
+    b[2047] = 0;
+    std::lock_guard<std::mutex> l(g_jl_lk);
+    if (g.dossier_exe.empty()) return;
+    const std::wstring p = g.dossier_exe + L"\\lanceur.log";
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fa) && fa.nFileSizeLow > (1u << 20))
+        MoveFileExW(p.c_str(), (g.dossier_exe + L"\\lanceur_precedent.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    FILE* f = _wfopen(p.c_str(), L"ab");
+    if (!f) return;
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    fprintf(f, "%04u-%02u-%02u %02u:%02u:%02u  %s\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
+            utf8(b).c_str());
+    fclose(f);
+}
+
 namespace {
 
-constexpr UINT WM_JEU_FINI = WM_APP + 1, WM_CONS_FINIE = WM_APP + 2;
+constexpr UINT WM_JEU_FINI = WM_APP + 1, WM_CONS_FINIE = WM_APP + 2, WM_RAPPORT_FINI = WM_APP + 3, WM_REFAIRE = WM_APP + 4,
+               WM_MAJ_DISPO = WM_APP + 5;
+constexpr UINT_PTR MINUTEUR_MAJ = 1;
+
 const wchar_t* CLASSE = L"LanceurStarFoxRecompile";
 
 bool existe(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
@@ -111,19 +141,10 @@ void detecter_jeu() {
     g.jeu_obsolete = g.jeu_pret && wide(v) != g.version;
 }
 
-// icône du jeu (build/full/icone.ico, tirée de la copie du joueur par preparer.py) : fenêtre et barre des tâches.
-// Le fichier lanceur.exe garde la sienne : il est distribué, il ne contient rien du jeu.
-void icone_jeu() {
-    const std::wstring ico = g.jeu + L"\\icone.ico";
-    if (!g.hwnd || !existe(ico)) return;
-    const UINT dpi = GetDpiForWindow(g.hwnd);
-    const struct { WPARAM genre; int cx, cy; } tailles[] = {
-        {ICON_BIG, GetSystemMetricsForDpi(SM_CXICON, dpi), GetSystemMetricsForDpi(SM_CYICON, dpi)},
-        {ICON_SMALL, GetSystemMetricsForDpi(SM_CXSMICON, dpi), GetSystemMetricsForDpi(SM_CYSMICON, dpi)}};
-    for (const auto& t : tailles)
-        if (HICON i = (HICON)LoadImageW(nullptr, ico.c_str(), IMAGE_ICON, t.cx, t.cy, LR_LOADFROMFILE))
-            if (HICON avant = (HICON)SendMessageW(g.hwnd, WM_SETICON, t.genre, (LPARAM)i)) DestroyIcon(avant);
-}
+// Icône : celle du launcher (ressource 1 de lanceur.exe, launcher/icone.ico), dans la fenêtre, la barre des tâches et
+// le gestionnaire des tâches. Jusqu'au 2026-11-11, la fenêtre prenait l'icône du jeu (build/full/icone.ico) une fois
+// le jeu construit : le launcher se confondait avec le jeu (demande de l'utilisateur). L'icône du jeu reste sur
+// l'exécutable du jeu.
 
 // vérification rapide de la copie : en-tête et index du conteneur .nup (la vérification complète, par
 // empreintes, est faite par preparer.py)
@@ -257,6 +278,59 @@ std::vector<std::string> lignes_fichier(const std::wstring& p) {
     return v;
 }
 
+// ---------------------------------------------------------------- touches du clavier (page Contrôles)
+// Une touche par action de la manette, par scancode : la position physique de la touche, que le jeu lit telle quelle
+// (runtime/os/input.cpp). Écrites dans recomp.ini (« key_a = 0x2E »…) dès que le joueur en change une.
+const char* const TOUCHES_CLES[NB_TOUCHES] = {
+    "key_a", "key_b", "key_x", "key_y", "key_l", "key_r", "key_zl", "key_zr", "key_plus", "key_minus", "key_lstick", "key_rstick",
+    "key_up", "key_down", "key_left", "key_right", "key_ls_up", "key_ls_down", "key_ls_left", "key_ls_right",
+    "key_rs_up", "key_rs_down", "key_rs_left", "key_rs_right"};
+// Deux préréglages, définis par la lettre gravée sur la touche et résolus sur le clavier réglé dans Windows :
+//   WASD (QWERTY) : stick gauche W A S D, Y sur Z, L sur Q, + sur M ;
+//   ZQSD (AZERTY) : stick gauche Z Q S D, Y sur W, L sur A, + sur la virgule.
+// Le reste est commun (A : C, B : X, X : V, R : E, ZL : R, ZR : T, - : N, clics F et H, stick droit I J K L, croix :
+// flèches). Sur un clavier QWERTY le premier, sur un clavier AZERTY le second donnent exactement les positions par
+// défaut du jeu : c'est le préréglage affiché tant que le joueur n'a rien changé.
+struct Lettre { UINT vk; unsigned fixe; };
+const Lettre PRESETS[2][NB_TOUCHES] = {
+    {{'C', 0}, {'X', 0}, {'V', 0}, {'Z', 0}, {'Q', 0}, {'E', 0}, {'R', 0}, {'T', 0}, {'M', 0}, {'N', 0}, {'F', 0}, {'H', 0},
+     {0, 0xE048}, {0, 0xE050}, {0, 0xE04B}, {0, 0xE04D}, {'W', 0}, {'S', 0}, {'A', 0}, {'D', 0}, {'I', 0}, {'K', 0}, {'J', 0}, {'L', 0}},
+    {{'C', 0}, {'X', 0}, {'V', 0}, {'W', 0}, {'A', 0}, {'E', 0}, {'R', 0}, {'T', 0}, {VK_OEM_COMMA, 0}, {'N', 0}, {'F', 0}, {'H', 0},
+     {0, 0xE048}, {0, 0xE050}, {0, 0xE04B}, {0, 0xE04D}, {'Z', 0}, {'S', 0}, {'Q', 0}, {'D', 0}, {'I', 0}, {'K', 0}, {'J', 0}, {'L', 0}}};
+void touches_prereglage(int p, unsigned* t) {
+    const ReglagesJeu defaut;
+    for (int i = 0; i < NB_TOUCHES; i++) {
+        const Lettre& l = PRESETS[p][i];
+        const unsigned sc = l.fixe ? l.fixe : MapVirtualKeyW(l.vk, MAPVK_VK_TO_VSC);
+        t[i] = sc ? sc : defaut.touches[i];   // lettre absente de ce clavier : position par défaut
+    }
+}
+int prereglage_courant() {
+    for (int p = 0; p < 2; p++) {
+        unsigned t[NB_TOUCHES];
+        touches_prereglage(p, t);
+        if (!memcmp(t, g.reglages.touches, sizeof t)) return p;
+    }
+    return -1;
+}
+void reglages_ecrire();
+// Donne la touche `sc` à l'action ; si une autre action l'avait, elle reçoit l'ancienne touche de celle-ci (échange).
+void touche_affecter(int action, unsigned sc) {
+    unsigned* t = g.reglages.touches;
+    for (int i = 0; i < NB_TOUCHES; i++)
+        if (i != action && t[i] == sc) t[i] = t[action];
+    t[action] = sc;
+    g.reglages.touches_ecrites = true;
+    reglages_ecrire();
+    jlog(L"controls: %hs = 0x%X", TOUCHES_CLES[action], sc);
+}
+void touches_choisir_prereglage(int p) {
+    touches_prereglage(p, g.reglages.touches);
+    g.reglages.touches_ecrites = true;
+    reglages_ecrire();
+    jlog(L"controls: preset %ls", p ? L"ZQSD (AZERTY)" : L"WASD (QWERTY)");
+}
+
 void reglages_lire() {
     for (const std::string& l0 : lignes_fichier(recomp_ini())) {
         const std::string l = trim(l0);
@@ -269,6 +343,15 @@ void reglages_lire() {
         else if (k == "native_resolution") g.reglages.natif = !(v == "false" || v == "0" || v == "non" || v == "off");
         else if (k == "window_mode") g.reglages.sans_bordure = !(v == "windowed" || v == "window" || v == "fenetre");
         else if (k == "language") g.reglages.langue = v.empty() ? "auto" : v;
+        else if (k == "vibration") g.reglages.vibration = std::clamp(atoi(v.c_str()), 0, 100);
+        else if (k.rfind("key_", 0) == 0) {
+            for (int i = 0; i < NB_TOUCHES; i++)
+                if (k == TOUCHES_CLES[i]) {
+                    const unsigned long sc = strtoul(v.c_str(), nullptr, 0);
+                    if (sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF)) g.reglages.touches[i] = (unsigned)sc;
+                    g.reglages.touches_ecrites = true;
+                }
+        }
     }
 }
 
@@ -277,13 +360,22 @@ void reglages_ecrire() {
     if (v.empty())
         v = {"; Réglages de recomp_main.exe, écrits par le launcher (ils peuvent aussi être modifiés à la main).", "",
              "[display]"};
-    const std::pair<std::string, std::string> cles[] = {
+    std::vector<std::pair<std::string, std::string>> cles = {
         {"refresh_rate", std::to_string(g.reglages.hz)},
         {"resolution", g.reglages.resolution ? std::to_string(g.reglages.resolution) : "auto"},
         {"native_resolution", g.reglages.natif ? "true" : "false"},
         {"window_mode", g.reglages.sans_bordure ? "borderless" : "windowed"},
         {"language", g.reglages.langue},
+        {"vibration", std::to_string(g.reglages.vibration)},
     };
+    if (g.reglages.touches_ecrites)   // touches du clavier : seulement une fois que le joueur en a changé une
+        for (int i = 0; i < NB_TOUCHES; i++) {
+            char b[16];
+            snprintf(b, sizeof b, "0x%X", g.reglages.touches[i]);
+            cles.push_back({TOUCHES_CLES[i], b});
+        }
+    bool section_clavier = false;
+    for (const std::string& l : v) section_clavier = section_clavier || trim(l) == "[keyboard]";
     for (auto& [k, val] : cles) {
         bool fait = false;
         for (std::string& l : v) {
@@ -292,6 +384,15 @@ void reglages_ecrire() {
                 l = k + " = " + val;
                 fait = true;
             }
+        }
+        if (!fait && k.rfind("key_", 0) == 0 && !section_clavier) {
+            section_clavier = true;
+            v.push_back("");
+            v.push_back("[keyboard]");
+            v.push_back("; Touches du clavier, une par bouton de la manette : réglées depuis la page Contrôles du launcher.");
+            v.push_back("; Valeur : position de la touche (scancode ; 0xE0.. : touche étendue ; 0 : aucune touche).");
+            v.push_back("; Keyboard keys, one per controller button: set from the launcher's Controls page.");
+            v.push_back("; Value: position of the key (scancode; 0xE0..: extended key; 0: no key).");
         }
         if (!fait) v.push_back(k + " = " + val);
     }
@@ -494,7 +595,7 @@ std::wstring commande_python(const std::wstring& script) {
     return L"\"" + python + L"\"" + (py ? L" -3" : L"") + L" -u -X utf8 \"" + script + L"\"";
 }
 
-void lancer_construction(bool forcer, bool extraits_seuls) {
+void lancer_construction(bool forcer) {
     if (g.cons.active) return;
     g.page = Page::Construction;
     auto echec = [](const std::wstring& m) {
@@ -512,9 +613,9 @@ void lancer_construction(bool forcer, bool extraits_seuls) {
     if (cmd.empty()) return echec(T("pas_de_python"));
     cmd += L" --copie \"" + g.copie + L"\" --fils " + std::to_wstring(fils_effectifs());
     if (forcer) cmd += L" --forcer";
-    if (extraits_seuls) cmd += L" --etapes verifier,extraits";
     SHCreateDirectoryExW(nullptr, g.jeu.c_str(), nullptr);
     // compilation en priorité basse : le PC reste utilisable
+    jlog(L"build: %ls", cmd.c_str());
     lancer_tache(Tache::Construction, cmd, g.recomp, g.jeu + L"\\preparation.log", BELOW_NORMAL_PRIORITY_CLASS);
 }
 
@@ -553,13 +654,90 @@ void verifier_mises_a_jour() {
         v = v.substr(0, v.find_first_of(" \r\n"));
         std::lock_guard<std::mutex> l(g.maj_lk);
         g.maj = wide(v);
+        jlog(L"update available: %ls", g.maj.c_str());
+        PostMessageW(g.hwnd, WM_MAJ_DISPO, 0, 0);   // la question est posée par le fil de la fenêtre
     }).detach();
+}
+
+// Le jeu construit est-il encore celui de ces sources et de cette copie ? preparer.py --a-refaire compare les
+// signatures des étapes (≈ 0,3 s, rien n'est construit). S'il reste des étapes à refaire, le jeu est « à mettre à
+// jour » (WM_REFAIRE) : le bouton principal lance alors la reconstruction, jamais le jeu. Une mise à jour qui exige une
+// reconstruction l'impose donc toujours, même sans changement de numéro de version.
+void verifier_reconstruction() {
+    if (!g.jeu_pret || !g.copie_ok || g.copie.empty()) return;
+    const std::wstring cmd0 = commande_python(g.recomp + L"\\launcher\\preparer.py");
+    if (cmd0.empty()) return;
+    std::thread([cmd = cmd0 + L" --copie \"" + g.copie + L"\" --a-refaire"]() mutable {
+        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+        HANDLE lecture = nullptr, ecriture = nullptr;
+        if (!CreatePipe(&lecture, &ecriture, &sa, 0)) return;
+        SetHandleInformation(lecture, HANDLE_FLAG_INHERIT, 0);
+        STARTUPINFOW si{};
+        si.cb = sizeof si;
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = si.hStdError = ecriture;
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g.dossier_exe.c_str(), &si, &pi)) {
+            CloseHandle(lecture), CloseHandle(ecriture);
+            return;
+        }
+        CloseHandle(ecriture);
+        CloseHandle(pi.hThread);
+        std::string sortie;
+        char b[4096];
+        DWORD n = 0;
+        while (ReadFile(lecture, b, sizeof b, &n, nullptr) && n) sortie.append(b, n);
+        CloseHandle(lecture);
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        const size_t k = sortie.find("@a_refaire");
+        if (k == std::string::npos) return;
+        std::string v = sortie.substr(k + 10);
+        v = v.substr(0, v.find_first_of("\r\n"));
+        while (!v.empty() && v.front() == ' ') v.erase(v.begin());
+        if (!v.empty()) PostMessageW(g.hwnd, WM_REFAIRE, 0, (LPARAM) new std::wstring(wide(v)));
+    }).detach();
+}
+
+// DÉSINSTALLER (page Construction, paquet installé seulement) : deux questions, puis desinstaller.py attend la
+// fermeture du launcher et retire tout ce que le paquet a écrit sur le PC. La copie du jeu du joueur n'est jamais
+// supprimée ; ses sauvegardes seulement s'il le demande. Lancé depuis le dossier temporaire, pour ne pas tenir le
+// dossier d'installation.
+void desinstaller() {
+    if (!g.paquet || g.cons.active || g.jeu_lance) return;
+    if (MessageBoxW(g.hwnd, T("desinst_question"), NOM, MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) return;
+    const bool sauvegardes =
+        MessageBoxW(g.hwnd, T("desinst_sauvegardes"), NOM, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES;
+    std::wstring cmd = commande_python(g.recomp + L"\\launcher\\desinstaller.py");
+    if (cmd.empty()) {
+        g.statut_jeu = T("pas_de_python");
+        return;
+    }
+    cmd += L" --desinstaller --oui --pid " + std::to_wstring(GetCurrentProcessId()) + L" --racine \"" + g.dossier_exe + L"\"" +
+           (sauvegardes ? L" --sauvegardes" : L"");
+    jlog(L"uninstall requested (saves %ls)", sauvegardes ? L"deleted too" : L"kept");
+    wchar_t temp[MAX_PATH + 1] = L"";
+    GetTempPathW(MAX_PATH, temp);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    const DWORD drapeaux = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, drapeaux | CREATE_BREAKAWAY_FROM_JOB, nullptr, temp, &si, &pi) &&
+        !CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, drapeaux, nullptr, temp, &si, &pi)) {
+        jlog(L"uninstall: desinstaller.py not started (error %lu)", GetLastError());
+        return;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    g.quitter_sans_question = true;
+    PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
 }
 
 void lancer_mise_a_jour() {
     if (g.cons.active || g.jeu_lance) return;
     const std::wstring cmd = commande_python(g.recomp + L"\\launcher\\maj.py");
     if (cmd.empty()) return;
+    jlog(L"update: installing %ls", g.maj.c_str());
     lancer_tache(Tache::MiseAJour, cmd + L" --installer --racine \"" + g.dossier_exe + L"\"", g.dossier_exe,
                  g.dossier_exe + L"\\mise_a_jour.log", NORMAL_PRIORITY_CLASS);
 }
@@ -600,6 +778,27 @@ void lancer_jeu();
 // JOUER : d'abord les shaders compilés pour ce GPU (au premier lancement, après une mise à jour ou un nouveau pilote ;
 // sinon fini en une fraction de seconde), puis le jeu
 void jouer() {
+    // Le jeu engage environ 12 Go de mémoire validable (RAM + fichier d'échange ; 12,06 Go mesurés après 3 min 30 de
+    // partie le 2026-11-11). S'il en reste moins de 13, il s'arrêterait
+    // au bout de quelques secondes (vu le 2026-11-11 : 8,6 Go libres juste après une construction) : on le dit avant
+    // de lancer. Un second clic dans les 30 s lance quand même.
+    // Depuis le 2026-11-12, le jeu rend ses pages vides et range ses pages oubliées (memory.cpp) : 6,4 Go engagés en
+    // moyenne et 7,4 Go au plus pendant 19 minutes de partie de l'utilisateur, lancée avec 9,6 Go libres sans aucun
+    // problème. Seuil de l'alerte demandé par l'utilisateur : 10 Go.
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    GlobalMemoryStatusEx(&ms);
+    const double libre = ms.ullAvailPageFile / 1073741824.0;
+    static ULONGLONG averti = 0;
+    if (libre < 10.0 && (!averti || GetTickCount64() - averti > 30000)) {
+        averti = GetTickCount64();
+        wchar_t b[400];
+        swprintf(b, 400, T("memoire_faible"), libre);
+        g.statut_jeu = b;
+        jlog(L"game: low available commit (%.1f GB), start to be confirmed", libre);
+        return;
+    }
+    averti = 0;
     const std::wstring exe = g.jeu + L"\\recomp_main.exe";
     if (!lancer_tache(Tache::Shaders, L"\"" + exe + L"\" --precompile", g.jeu, L"", NORMAL_PRIORITY_CLASS)) lancer_jeu();
 }
@@ -610,6 +809,8 @@ void lancer_jeu() {
     // le jeu réécrit recomp_run.log : le journal de la partie précédente est gardé à côté
     const std::wstring journal = g.jeu + L"\\recomp_run.log";
     if (existe(journal)) MoveFileExW(journal.c_str(), (g.jeu + L"\\recomp_run_precedent.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    // la copie choisie : le jeu la reprend si le manifeste pointe vers un ancien emplacement (dossier déplacé, issue n° 4)
+    if (!g.copie.empty() && existe(g.copie)) SetEnvironmentVariableW(L"RECOMP_NUP", g.copie.c_str());
     // environnement : celui du launcher, plus le volume choisi
     std::vector<wchar_t> env;
     if (g.volume != 100) {
@@ -629,8 +830,11 @@ void lancer_jeu() {
     if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT, env.empty() ? nullptr : env.data(),
                         g.jeu.c_str(), &si, &pi)) {
         g.statut_jeu = L"recomp_main.exe : erreur " + std::to_wstring(GetLastError());
+        jlog(L"game: cannot start (error %lu)", GetLastError());
         return;
     }
+    jlog(L"game started (pid %lu, volume %d %%, %dp, %d Hz, %ls, rumble %d %%)", pi.dwProcessId, g.volume,
+            g.reglages.resolution, g.reglages.hz, g.reglages.sans_bordure ? L"fullscreen" : L"windowed", g.reglages.vibration);
     CloseHandle(pi.hThread);
     g.jeu_lance = true;
     g.statut_jeu.clear();
@@ -659,19 +863,83 @@ template <class T> void cycler(T& v, std::initializer_list<T> valeurs, int sens)
     v = l[i];
 }
 
+// RAPPORT DE BUG : rapport.py rassemble version, matériel, réglages et journaux (chemins anonymisés) dans
+// <racine>\SpaceAnimalsRecomp-bug-report.zip ; l'Explorateur s'ouvre ensuite sur ce fichier.
+void rapport_de_bug() {
+    if (g.rapport_en_cours) return;
+    std::wstring cmd = commande_python(g.recomp + L"\\launcher\\rapport.py");
+    if (cmd.empty()) {
+        g.statut_jeu = T("pas_de_python");
+        return;
+    }
+    g.rapport_en_cours = true;
+    g.statut_jeu = T("rapport_en_cours");
+    jlog(L"bug report requested");
+    std::thread([cmd]() mutable {
+        SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+        HANDLE lecture = nullptr, ecriture = nullptr;
+        std::string sortie;
+        if (CreatePipe(&lecture, &ecriture, &sa, 0)) {
+            SetHandleInformation(lecture, HANDLE_FLAG_INHERIT, 0);
+            STARTUPINFOW si{};
+            si.cb = sizeof si;
+            si.dwFlags = STARTF_USESTDHANDLES;
+            si.hStdOutput = si.hStdError = ecriture;
+            PROCESS_INFORMATION pi{};
+            if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g.dossier_exe.c_str(), &si, &pi)) {
+                CloseHandle(ecriture);
+                CloseHandle(pi.hThread);
+                char b[4096];
+                DWORD n = 0;
+                while (ReadFile(lecture, b, sizeof b, &n, nullptr) && n) sortie.append(b, n);
+                WaitForSingleObject(pi.hProcess, 60000);
+                CloseHandle(pi.hProcess);
+            } else {
+                CloseHandle(ecriture);
+            }
+            CloseHandle(lecture);
+        }
+        auto* chemin = new std::wstring;
+        const size_t k = sortie.find("@rapport ");
+        if (k != std::string::npos) {
+            std::string v = sortie.substr(k + 9);
+            *chemin = wide(v.substr(0, v.find_first_of("\r\n")));
+        }
+        PostMessageW(g.hwnd, WM_RAPPORT_FINI, 0, (LPARAM)chemin);
+    }).detach();
+}
+
 void basculer(Page p) { g.page = g.page == p ? Page::Aucune : p; }
 
 void action(int z) {
+    if (z >= Z_TOUCHE0 && z <= Z_TOUCHE_FIN) {   // page Contrôles : cette case attend la prochaine touche pressée
+        g.capture = z - Z_TOUCHE0;
+        return;
+    }
     switch (z) {
+    case Z_PRESET_G:
+    case Z_PRESET_D: {   // deux préréglages : l'un puis l'autre ; depuis des touches personnalisées, ‹ WASD, › ZQSD
+        const int p = prereglage_courant();
+        touches_choisir_prereglage(p < 0 ? (z == Z_PRESET_D ? 1 : 0) : 1 - p);
+        return;
+    }
     case Z_PRINCIPAL:
         if (g.jeu_lance) return;
         if (g.cons.active) {
             if (g.cons.tache == Tache::Construction) basculer(Page::Construction);
             return;
         }
-        if (g.jeu_pret && !g.jeu_obsolete) return jouer();
+        if (g.jeu_pret) return jouer();   // même s'il reste des étapes à refaire : la reconstruction est un choix
         if (!g.copie_ok) choisir_copie();
-        if (g.copie_ok) lancer_construction(false, false);   // après une mise à jour : seules les étapes changées
+        if (g.copie_ok) lancer_construction(false);
+        return;
+    case Z_MAJ_JEU:   // lien « RECONSTRUIRE MAINTENANT » de l'accueil : seules les étapes changées
+        if (g.cons.active || g.jeu_lance) return;
+        if (!g.copie_ok) choisir_copie();
+        if (g.copie_ok) {
+            jlog(L"game rebuild started by the player");
+            lancer_construction(false);
+        }
         return;
     case Z_AFF_PLEIN:
     case Z_AFF_FEN: g.reglages.sans_bordure = z == Z_AFF_PLEIN; reglages_ecrire(); return;
@@ -717,15 +985,36 @@ void action(int z) {
     case Z_FOND_D: g.fond_video = !g.fond_video; config_ecrire(); fond_relancer(); return;
     case Z_FILS_G:
     case Z_FILS_D: g.fils = (g.fils + (z == Z_FILS_D ? 1 : -1) + g.fils_max + 1) % (g.fils_max + 1); config_ecrire(); return;
-    case Z_RECONSTRUIRE: lancer_construction(true, false); return;
-    case Z_EXTRAITS: video_arreter(); lancer_construction(true, true); return;
+    case Z_RECONSTRUIRE: lancer_construction(true); return;
     case Z_ANNULER: annuler_construction(); return;
     case Z_JOURNAL: ShellExecuteW(g.hwnd, L"open", (g.jeu + L"\\preparation.log").c_str(), nullptr, nullptr, SW_SHOWNORMAL); return;
+    case Z_VIB_G:
+    case Z_VIB_D: cycler(g.reglages.vibration, {0, 25, 50, 75, 100}, z == Z_VIB_D ? 1 : -1); reglages_ecrire(); return;
+    case Z_MENU_RAPPORT: rapport_de_bug(); return;
+    case Z_DESINSTALLER: desinstaller(); return;
     }
 }
 
 // ---------------------------------------------------------------- fenêtre
 float dip(int px) { return px * 96.f / g.dpi; }
+
+// Échelle d'affichage de la fenêtre : celle de l'écran, multipliée par ECHELLE. Tout passe par g.dpi (taille de la
+// fenêtre, dessin Direct2D, position de la souris) : la fenêtre grandit sans toucher à la mise en page. Si la zone de
+// travail de l'écran est trop petite pour la fenêtre agrandie, l'échelle est réduite pour qu'elle tienne (jusqu'à
+// 0,75 : avant, la fenêtre de 1000 × 600 dépassait d'un écran de 1366 × 768 réglé à 125 %).
+float dpi_fenetre(float dpi_ecran, const RECT& zone) {
+    const float lw = LARGEUR * dpi_ecran / 96, lh = HAUTEUR * dpi_ecran / 96;
+    float e = std::min({ECHELLE, (zone.right - zone.left) / lw, (zone.bottom - zone.top) / lh});
+    return dpi_ecran * std::max(e, 0.75f);
+}
+RECT zone_de_travail(HWND h) {
+    MONITORINFO mi{};
+    mi.cbSize = sizeof mi;
+    if (h && GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi)) return mi.rcWork;
+    RECT zt{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &zt, 0);
+    return zt;
+}
 
 LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     static bool suivi = false;
@@ -768,17 +1057,34 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         const int z = zone_sous(dip(GET_X_LPARAM(l)), dip(GET_Y_LPARAM(l)));
         const int a = g.zone_appui;
         g.zone_appui = Z_AUCUNE;
-        if (z != Z_AUCUNE && z == a) action(z);
+        const int attente = g.capture;   // un clic met fin à l'attente d'une touche (page Contrôles)
+        g.capture = -1;
+        if (z != Z_AUCUNE && z == a && !(attente >= 0 && z == Z_TOUCHE0 + attente)) action(z);
         return 0;
     }
+    case WM_SYSKEYDOWN:
     case WM_KEYDOWN:
+        if (g.capture >= 0) {   // page Contrôles : la touche pressée est donnée à l'action choisie (Échap : annuler)
+            if (w == VK_ESCAPE) {
+                g.capture = -1;
+            } else if (!(l & (1 << 30))) {   // pas une répétition
+                const unsigned sc = (unsigned)((l >> 16) & 0xFF) | ((l & (1 << 24)) ? 0xE000u : 0u);
+                if (sc & 0xFF) {
+                    touche_affecter(g.capture, sc);
+                    g.capture = -1;
+                }
+            }
+            return 0;
+        }
+        if (m == WM_SYSKEYDOWN) break;
         if (w == VK_RETURN) action(Z_PRINCIPAL);
         else if (w == VK_ESCAPE) g.page = Page::Aucune;
         return 0;
     case WM_DPICHANGED: {
-        g.dpi = (float)HIWORD(w);
-        const RECT* r = (const RECT*)l;
-        SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        g.dpi = dpi_fenetre((float)HIWORD(w), zone_de_travail(h));
+        const RECT* r = (const RECT*)l;   // position proposée par Windows ; la taille suit notre échelle
+        SetWindowPos(h, nullptr, r->left, r->top, (int)lround(LARGEUR * g.dpi / 96), (int)lround(HAUTEUR * g.dpi / 96),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
         dessin_redim();
         return 0;
     }
@@ -787,7 +1093,10 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_JEU_FINI:
         g.jeu_lance = false;
-        if ((int)w != 0) {
+        jlog(L"game exited: code %d%ls", (int)w, (int)w == 4 ? L" (out of memory)" : (int)w ? L" (see recomp_run.log)" : L"");
+        if ((int)w == 4) {   // le jeu manquait de mémoire (Windows a refusé ses réservations) : autres programmes ouverts
+            g.statut_jeu = T("jeu_memoire");
+        } else if ((int)w != 0) {
             wchar_t b[256];
             swprintf(b, 256, T("jeu_arrete"), (int)w);
             g.statut_jeu = b;
@@ -804,6 +1113,8 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             t = g.cons.tache;
             ok = !g.cons.echec && !g.cons.annulee;
         }
+        jlog(L"%ls: %ls%ls", t == Tache::Shaders ? L"shaders" : t == Tache::MiseAJour ? L"update" : L"build",
+                ok ? L"finished" : g.cons.annulee ? L"canceled" : L"failed: ", ok || g.cons.annulee ? L"" : g.cons.erreur.c_str());
         if (t == Tache::Shaders) {   // même en cas d'échec : le jeu compile alors ses shaders au besoin
             if (!g.cons.annulee && !g.sans_jeu) lancer_jeu();
             return 0;
@@ -818,9 +1129,64 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         detecter_jeu();
-        icone_jeu();
         reglages_lire();
         fond_relancer();
+        return 0;
+    }
+    case WM_MAJ_DISPO: {
+        // Une nouvelle version est disponible : jamais installée d'office (demande de l'utilisateur, 2026-11-11). Le
+        // joueur choisit ; « non » est retenu pour cette version (maj_refusee dans lanceur.ini) et le bandeau
+        // « MISE À JOUR … DISPONIBLE » reste là pour plus tard.
+        std::wstring maj;
+        {
+            std::lock_guard<std::mutex> lk(g.maj_lk);
+            maj = g.maj;
+        }
+        const bool essai = _wgetenv(L"LANCEUR_ACTION") || _wgetenv(L"LANCEUR_CAPTURE") || _wgetenv(L"LANCEUR_HZ");
+        if (maj.empty() || essai || g.cons.active || g.jeu_lance || ini_lire(L"maj_refusee", L"") == maj) return 0;
+        if (!IsWindowEnabled(h)) {   // une autre question est à l'écran : celle-ci attend son tour, jamais deux à la fois
+            SetTimer(h, MINUTEUR_MAJ, 1500, nullptr);
+            return 0;
+        }
+        wchar_t q[640];
+        swprintf(q, 640, T("maj_question"), maj.c_str());
+        if (MessageBoxW(h, q, NOM, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            lancer_mise_a_jour();
+        } else {
+            ini_ecrire(L"maj_refusee", maj);
+            jlog(L"update %ls declined for now by the player", maj.c_str());
+        }
+        return 0;
+    }
+    case WM_TIMER:
+        if (w == MINUTEUR_MAJ) {   // la question de mise à jour, remise à plus tard parce qu'une autre était à l'écran
+            KillTimer(h, MINUTEUR_MAJ);
+            PostMessageW(h, WM_MAJ_DISPO, 0, 0);
+            return 0;
+        }
+        break;
+    case WM_REFAIRE: {   // preparer.py --a-refaire : des étapes de la construction sont à refaire
+        std::wstring* v = (std::wstring*)l;
+        if (g.jeu_pret && !g.cons.active && !g.jeu_lance) {
+            if (!g.jeu_obsolete) jlog(L"game rebuild offered (not required), steps to redo: %ls", v->c_str());
+            g.jeu_obsolete = true;
+        }
+        delete v;
+        return 0;
+    }
+    case WM_RAPPORT_FINI: {
+        std::wstring* chemin = (std::wstring*)l;
+        if (chemin && !chemin->empty()) {
+            jlog(L"bug report created");
+            g.statut_jeu = std::wstring(T("rapport_ok"));
+            // l'Explorateur s'ouvre sur le fichier, sélectionné : il n'y a plus qu'à le glisser dans l'issue
+            ShellExecuteW(h, nullptr, L"explorer.exe", (L"/select,\"" + *chemin + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+        } else {
+            g.statut_jeu = std::wstring(T("rapport_echec"));
+            jlog(L"bug report: failed");
+        }
+        g.rapport_en_cours = false;
+        delete chemin;
         return 0;
     }
     case WM_CLOSE:
@@ -842,6 +1208,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }  // namespace
 
 int fils_effectifs() { return g.fils ? g.fils : std::max(1, g.fils_max - 1); }
+int touches_prereglage_courant() { return prereglage_courant(); }   // pour dessin.cpp (page Contrôles)
 
 }  // namespace lz
 
@@ -863,6 +1230,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     copie_trouver();
     detecter_jeu();
     reglages_lire();
+    jlog(L"--- launcher %ls started (%ls): game copy %ls, game %ls", g.version.c_str(), g.paquet ? L"package" : L"sources",
+            g.copie.empty() ? L"missing" : g.copie_ok ? L"recognized" : L"not recognized",
+            g.jeu_pret ? (g.jeu_obsolete ? L"ready, rebuild offered" : L"ready") : L"not built");
+    if (const wchar_t* k = _wgetenv(L"LANCEUR_STATUT")) {   // vérification : afficher un message d'état (capture)
+        char cle[64] = "";
+        WideCharToMultiByte(CP_UTF8, 0, k, -1, cle, sizeof cle, nullptr, nullptr);
+        wchar_t b[400];
+        swprintf(b, 400, T(cle), 9.9);
+        g.statut_jeu = b;
+    }
     if (const wchar_t* p = _wgetenv(L"LANCEUR_PAGE")) {   // vérification : ouvrir une page au démarrage
         if (!wcscmp(p, L"reglages")) g.page = Page::Reglages;
         else if (!wcscmp(p, L"controles")) g.page = Page::Controles;
@@ -879,36 +1256,60 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.lpszClassName = CLASSE;
     RegisterClassExW(&wc);
-    g.dpi = (float)GetDpiForSystem();
-    const int w = (int)lround(LARGEUR * g.dpi / 96), hh = (int)lround(HAUTEUR * g.dpi / 96);
     RECT zt;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &zt, 0);
+    g.dpi = dpi_fenetre((float)GetDpiForSystem(), zt);
+    const int w = (int)lround(LARGEUR * g.dpi / 96), hh = (int)lround(HAUTEUR * g.dpi / 96);
     g.hwnd = CreateWindowExW(WS_EX_APPWINDOW, CLASSE, NOM, WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU,
                              zt.left + (zt.right - zt.left - w) / 2, zt.top + (zt.bottom - zt.top - hh) / 2, w, hh, nullptr, nullptr,
                              inst, nullptr);
     if (!g.hwnd) return 1;
-    const float d = (float)GetDpiForWindow(g.hwnd);
-    if (d != g.dpi) {
+    const RECT zf = zone_de_travail(g.hwnd);
+    const float d = dpi_fenetre((float)GetDpiForWindow(g.hwnd), zf);
+    if (d != g.dpi) {   // écran de la fenêtre à une autre échelle que l'écran principal : taille refaite, recentrée
         g.dpi = d;
-        SetWindowPos(g.hwnd, nullptr, 0, 0, (int)lround(LARGEUR * d / 96), (int)lround(HAUTEUR * d / 96), SWP_NOMOVE | SWP_NOZORDER);
+        const int w2 = (int)lround(LARGEUR * d / 96), h2 = (int)lround(HAUTEUR * d / 96);
+        SetWindowPos(g.hwnd, nullptr, zf.left + (zf.right - zf.left - w2) / 2, zf.top + (zf.bottom - zf.top - h2) / 2, w2, h2,
+                     SWP_NOZORDER);
     }
-    icone_jeu();
     verifier_mises_a_jour();
     const DWORD coins = 1;   // DWMWCP_DONOTROUND : angles droits, comme le cadre dessiné
     DwmSetWindowAttribute(g.hwnd, 33, &coins, sizeof coins);
     const MARGINS ombre{0, 0, 0, 1};   // ombre de fenêtre (DWM) malgré WS_POPUP
     DwmExtendFrameIntoClientArea(g.hwnd, &ombre);
     if (!dessin_init(g.hwnd)) {
-        MessageBoxW(nullptr, L"Direct2D / Direct3D 11 indisponible.", NOM, MB_ICONERROR);
+        MessageBoxW(nullptr, T("affichage_indisponible"), NOM, MB_ICONERROR);   // l'étape en échec est dans lanceur.log
         return 1;
     }
     ShowWindow(g.hwnd, SW_SHOW);
     UpdateWindow(g.hwnd);
     fond_relancer();
+    // Reconstruction proposée après une mise à jour, jamais imposée (demande de l'utilisateur du 2026-11-11 au soir :
+    // « laisse le choix au joueur de reconstruire le jeu ou pas […] avec une mention : certaines améliorations
+    // nécessitent la reconstruction du jeu »). À la première ouverture d'une nouvelle version du launcher, si le jeu a
+    // été construit par une autre version, le launcher pose la question ; rien ne démarre sans un « oui ». Tant qu'il
+    // reste des étapes à refaire (detecter_jeu, verifier_reconstruction), l'accueil garde la mention et le lien
+    // « RECONSTRUIRE MAINTENANT », et le bouton principal lance le jeu actuel.
+    {
+        const bool essai = _wgetenv(L"LANCEUR_ACTION") || _wgetenv(L"LANCEUR_CAPTURE") || _wgetenv(L"LANCEUR_HZ");
+        const bool nouvelle_version = g.paquet && ini_lire(L"version_vue", L"") != g.version;
+        if (nouvelle_version && !essai) ini_ecrire(L"version_vue", g.version);
+        if (nouvelle_version && !essai && g.jeu_pret && g.jeu_obsolete && g.copie_ok) {
+            // le joueur choisit : reconstruire maintenant, ou garder le jeu actuel et le faire plus tard, ou jamais
+            if (MessageBoxW(g.hwnd, T("maj_jeu_question"), NOM, MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                jlog(L"new launcher version: game update accepted by the player");
+                lancer_construction(false);
+            } else {
+                jlog(L"new launcher version: game update postponed by the player");
+            }
+        } else {
+            verifier_reconstruction();
+        }
+    }
     // vérification de l'interface : lance une construction (jamais le jeu), avec un autre pilote (LANCEUR_PREPARER)
     if (const wchar_t* a = _wgetenv(L"LANCEUR_ACTION")) {
         if (!wcscmp(a, L"construire") && _wgetenv(L"LANCEUR_PREPARER")) {
-            lancer_construction(false, false);
+            lancer_construction(false);
         } else if (!wcscmp(a, L"shaders")) {   // compilation des shaders seule, sans le jeu
             g.sans_jeu = true;
             jouer();

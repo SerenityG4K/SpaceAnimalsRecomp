@@ -206,7 +206,7 @@ ProgramInfo read_stages(uint64_t count, uint64_t stages) {
             std::lock_guard<std::mutex> lk(dlk);
             if (dumped.insert(st.hash).second && (dump_all || !stage_known(st.hash, i))) {
                 if (!dump_all)
-                    HLOG("nvn", "shader inconnu %s enregistré dans shaders/ (à traduire : python shaders/shaderc.py)",
+                    HLOG("nvn", "unknown shader %s saved to shaders/ (to translate: python shaders/shaderc.py)",
                          st.hash.c_str());
                 _mkdir("shaders");
                 seq++;
@@ -509,14 +509,14 @@ NVN(nvnCommandBufferPushComputeConstants) {
     static int nlog = 0;
     const char* form = "?";
     if (a3 && a2 && a2 <= 0x400 && a1 < 0x400 && mem_valid(a3, a2)) {
-        o.a[6] = a1, form = "décalage, taille, données";
+        o.a[6] = a1, form = "offset, size, data";
         blob(o, a3, a2);
     } else if (a1 && a2 && a2 <= 0x400 && mem_valid(a1, a2)) {
-        o.a[6] = 0, form = "données, taille";
+        o.a[6] = 0, form = "data, size";
         blob(o, a1, a2);
     }
     if (nlog++ < 6)
-        HLOG("nvn", "PushComputeConstants(0x%llx, 0x%llx, 0x%llx) : forme « %s », %zu o", (unsigned long long)a1,
+        HLOG("nvn", "PushComputeConstants(0x%llx, 0x%llx, 0x%llx): form '%s', %zu bytes", (unsigned long long)a1,
              (unsigned long long)a2, (unsigned long long)a3, form, o.blob.size());
 }
 // dessins et calculs
@@ -601,7 +601,7 @@ NVN(nvnDlssNetworkBuilderGetOptimalSettings) {    // (builder, u32* w, u32* h, �
     DlssBuilder b = g_dlssb[A(0)];
     if (A(1)) *P<uint32_t>(A(1)) = b.out_w;
     if (A(2)) *P<uint32_t>(A(2)) = b.out_h;
-    HLOG("nvn", "DLSS : rendu %ux%u (= sortie, pas de mise à l'échelle)", b.out_w, b.out_h);
+    HLOG("nvn", "DLSS: rendering %ux%u (= output, no scaling)", b.out_w, b.out_h);
 }
 NVN(nvnDlssNetworkBuilderGetStorageSize) { R(ctx, 0x10000); }
 NVN(nvnDlssNetworkInitialize) { R(ctx, 1); }

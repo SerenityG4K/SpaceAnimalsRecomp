@@ -30,7 +30,7 @@ using namespace nvn;
 
 // ================================================================ nn::gs
 void gs_boot(CPUState* ctx) {
-    HLOG("gfx", "nn::gs::sdk::BootGraphicsSystem(mémoire 0x%llx, 0x%llx) : court-circuité (NVN en HLE)",
+    HLOG("gfx", "nn::gs::sdk::BootGraphicsSystem(memory 0x%llx, 0x%llx): bypassed (NVN in HLE)",
          (unsigned long long)A(0), (unsigned long long)A(1));
 }
 void gs_nop(CPUState*) {}
@@ -41,7 +41,7 @@ constexpr uint32_t CAM_NO_DEVICE = 0x7c4;
 void camera_ok(CPUState* ctx) { R(ctx, 0); }
 void camera_no_device(CPUState* ctx) { R(ctx, CAM_NO_DEVICE); }
 void camera_init(CPUState* ctx) {
-    HLOG("gfx", "nn::camera::Initialize : aucune caméra branchée");
+    HLOG("gfx", "nn::camera::Initialize: no camera connected");
     R(ctx, 0);
 }
 void camera_conn_event(CPUState* ctx) {   // (SystemEventType*) : jamais signalé
@@ -80,7 +80,7 @@ int display_mode() {
             v = sw >= 3840 && sh >= 2160 ? 2160 : sw >= 2560 && sh >= 1440 ? 1440 : sw >= 1920 && sh >= 1080 ? 1080 : 720;
         }
         int mode = v >= 2160 ? 3 : v >= 1440 ? 2 : v >= 1080 ? 1 : 0;
-        HLOG("gfx", "écran virtuel : %ux%u à %d Hz", kDisplayW[mode], kDisplayH[mode], settings().refresh_rate);
+        HLOG("gfx", "virtual display: %ux%u at %d Hz", kDisplayW[mode], kDisplayH[mode], settings().refresh_rate);
         return mode;
     }();
     return m;
@@ -146,7 +146,7 @@ void vi_frame_history(CPUState* ctx) {   // (FrameInfo* out, int count, Layer co
     R(ctx, written);
 }
 void vi_120hz(CPUState* ctx) {   // (Display*, bool) : option 120 Hz du jeu
-    HLOG("gfx", "nn::vi::SetDisplay120HzRefreshRateCapability(%d) (écran virtuel : %u Hz, RECOMP_REFRESH)",
+    HLOG("gfx", "nn::vi::SetDisplay120HzRefreshRateCapability(%d) (virtual display: %u Hz, RECOMP_REFRESH)",
          (int)(A(1) & 1), refresh_hz());
     R(ctx, 0);
 }
@@ -188,7 +188,7 @@ uint64_t g_stub_addr[NSTUB];
 int g_nstub = 0;
 
 void nvn_trace_impl(const char* name, CPUState* ctx, bool stub) {
-    HLOG("nvn", "%s%s(0x%llx, 0x%llx, 0x%llx, 0x%llx) depuis %s [thread %u]", stub ? "[bouchon] " : "", name,
+    HLOG("nvn", "%s%s(0x%llx, 0x%llx, 0x%llx, 0x%llx) from %s [thread %u]", stub ? "[stub] " : "", name,
          (unsigned long long)A(0), (unsigned long long)A(1), (unsigned long long)A(2), (unsigned long long)A(3),
          symbolize(ctx->x[30]).c_str(), current_thread_id());
 }
@@ -198,7 +198,7 @@ void stub_call(int i, CPUState* ctx) {
     if (g_trace_nvn) {
         nvn_trace_impl(g_stub[i].name.c_str(), ctx, true);
     } else if (n == 0 || g_verbose >= 2)
-        HLOG("nvn", "[bouchon] %s(0x%llx, 0x%llx, 0x%llx, 0x%llx)", g_stub[i].name.c_str(),
+        HLOG("nvn", "[stub] %s(0x%llx, 0x%llx, 0x%llx, 0x%llx)", g_stub[i].name.c_str(),
              (unsigned long long)A(0), (unsigned long long)A(1), (unsigned long long)A(2),
              (unsigned long long)A(3));
     R(ctx, 0);
@@ -216,7 +216,7 @@ uint64_t nvn_resolve(const char* name) {
     auto it = g_nvn_addr.find(name);
     if (it != g_nvn_addr.end()) return it->second;
     if (g_nstub >= NSTUB) {
-        HLOG("nvn", "réserve de bouchons épuisée (%s)", name);
+        HLOG("nvn", "stub pool exhausted (%s)", name);
         return 0;
     }
     int i = g_nstub++;
@@ -229,7 +229,7 @@ uint64_t nvn_resolve(const char* name) {
 void nvn_bootstrap_loader(CPUState* ctx) {
     const char* n = S(A(0));
     uint64_t a = nvn_resolve(n);
-    HLOG("nvn", "nvnBootstrapLoader(%s) → %s", n, a ? "natif" : "absent");
+    HLOG("nvn", "nvnBootstrapLoader(%s) → %s", n, a ? "native" : "missing");
     R(ctx, a);
 }
 void nvn_get_proc_address(CPUState* ctx) { R(ctx, nvn_resolve(S(A(1)))); }
@@ -258,7 +258,7 @@ NVN(nvnDeviceGetInteger) {   // (device, pname, int*)
     int32_t v = 0x100;   // défaut prudent (alignements, nombres de liaisons…)
     {
         std::lock_guard<std::mutex> lk(m);
-        if (!seen.count(pname)) HLOG("nvn", "nvnDeviceGetInteger(%d) → %d (valeur par défaut)", pname, v);
+        if (!seen.count(pname)) HLOG("nvn", "nvnDeviceGetInteger(%d) → %d (default value)", pname, v);
         seen[pname]++;
     }
     if (A(2)) *P<int32_t>(A(2)) = v;
@@ -270,18 +270,18 @@ NVN(nvnDeviceGetTimestampInNanoseconds) {   // (device, const NVNcounterData*)
     uint64_t v = A(1) ? *P<uint64_t>(A(1) + 8) : 0;
     static const long tl = getenv("RECOMP_TS_LOG") ? atol(getenv("RECOMP_TS_LOG")) : 0;
     if (tl && g_frame.load() >= (uint64_t)tl && g_frame.load() < (uint64_t)tl + 4)
-        HLOG("ts", "image %llu : compteur %llx = %.3f ms (maintenant %.3f ms)", (unsigned long long)g_frame.load(),
+        HLOG("ts", "frame %llu: counter %llx = %.3f ms (now %.3f ms)", (unsigned long long)g_frame.load(),
              (unsigned long long)A(1), v / 1e6, rt_cntvct() * 1e3 / rt_cntfrq());
     R(ctx, v);
 }
 NVN(nvnDeviceInstallDebugCallback) { (void)ctx; }
 NVN(nvnDeviceSetWindowOriginMode) {   // 0 bas-gauche (convention GL), 1 haut-gauche
     g_origin_upper_left = A(1) == 1;
-    HLOG("nvn", "origine de fenêtre : %s", g_origin_upper_left ? "haut-gauche" : "bas-gauche");
+    HLOG("nvn", "window origin: %s", g_origin_upper_left ? "top-left" : "bottom-left");
 }
 NVN(nvnDeviceSetDepthMode) {   // 0 [-w, w] (GL), 1 [0, w]
     g_depth_zero_one = A(1) == 1;
-    HLOG("nvn", "profondeur : %s", g_depth_zero_one ? "[0, 1]" : "[-1, 1]");
+    HLOG("nvn", "depth: %s", g_depth_zero_one ? "[0, 1]" : "[-1, 1]");
 }
 
 // ---------------------------------------------------------------- queue / sync
@@ -314,7 +314,7 @@ NVN(nvnQueuePresentTexture) {   // (queue, window, index)
             g_svc_timing = f == (uint64_t)ft;
         }
         if (ft && f >= (uint64_t)ft && f <= (uint64_t)ft + 3)
-            HLOG("ftrace", "--- présentation image %llu (thread %llu)", (unsigned long long)f,
+            HLOG("ftrace", "--- presenting frame %llu (thread %llu)", (unsigned long long)f,
                  (unsigned long long)current_thread_id());
     }
     Win& w = g_win[A(1)];
@@ -325,11 +325,11 @@ NVN(nvnQueuePresentTexture) {   // (queue, window, index)
     {
         static const long tl = getenv("RECOMP_TS_LOG") ? atol(getenv("RECOMP_TS_LOG")) : 0;
         if (tl && f >= (uint64_t)tl && f < (uint64_t)tl + 4)
-            HLOG("ts", "présentation image %llu à %.3f ms", (unsigned long long)f, rt_cntvct() * 1e3 / rt_cntfrq());
+            HLOG("ts", "presenting frame %llu at %.3f ms", (unsigned long long)f, rt_cntvct() * 1e3 / rt_cntfrq());
     }
     gpu_present(t ? obj_key(t) : 0, f, w.crop, c);   // exécutée par le thread GPU, dans l'ordre
     if (f == 1 || f == 2 || f == 10 || f % 600 == 0)
-        HLOG("nvn", "image %llu présentée (texture %d/%zu, couleur %.2f %.2f %.2f)",
+        HLOG("nvn", "frame %llu presented (texture %d/%zu, color %.2f %.2f %.2f)",
              (unsigned long long)f, idx, w.tex.size(), c[0], c[1], c[2]);
 }
 
@@ -350,7 +350,7 @@ NVN(nvnMemoryPoolInitialize) {   // (pool, builder)
     g_pool.create(A(0), Pool{b.storage, b.size, b.flags});
     static const bool plog = getenv("RECOMP_POOL_LOG") != nullptr;
     if (plog)
-        HLOG("nvn", "pool 0x%llx créé : mémoire 0x%llx, 0x%llx o, drapeaux 0x%x", (unsigned long long)A(0),
+        HLOG("nvn", "pool 0x%llx created: memory 0x%llx, 0x%llx bytes, flags 0x%x", (unsigned long long)A(0),
              (unsigned long long)b.storage, (unsigned long long)b.size, b.flags);
     R(ctx, 1);
 }
@@ -359,7 +359,7 @@ NVN(nvnMemoryPoolFinalize) {
     Pool p;
     const bool known = g_pool.find(A(0), &p);
     if (plog && known)
-        HLOG("nvn", "pool 0x%llx détruit : mémoire 0x%llx, 0x%llx o, drapeaux 0x%x", (unsigned long long)A(0),
+        HLOG("nvn", "pool 0x%llx destroyed: memory 0x%llx, 0x%llx bytes, flags 0x%x", (unsigned long long)A(0),
              (unsigned long long)p.storage, (unsigned long long)p.size, p.flags);
     g_pool.erase(A(0));
     // Imports Vulkan de cette mémoire retirés : un pool créé plus tard aux mêmes adresses (mémoire démappée puis
@@ -368,7 +368,12 @@ NVN(nvnMemoryPoolFinalize) {
 }
 NVN(nvnMemoryPoolSetDebugLabel) { (void)ctx; }
 NVN(nvnMemoryPoolMap) { R(ctx, g_pool[A(0)].storage); }
-NVN(nvnMemoryPoolFlushMappedRange) { (void)ctx; }
+// (pool, décalage, taille) : le jeu annonce qu'il a écrit cette plage du pool. Sur la console le GPU lit la mémoire
+// du jeu ; ici les textures sont copiées en mémoire vidéo : celles que la plage touche sont revérifiées (vk_render.cpp).
+NVN(nvnMemoryPoolFlushMappedRange) {
+    Pool p;
+    if (g_pool.find(A(0), &p) && p.storage && A(2)) vkr::pool_flushed(p.storage + A(1), A(2));
+}
 NVN(nvnMemoryPoolInvalidateMappedRange) { (void)ctx; }
 NVN(nvnMemoryPoolGetBufferAddress) { R(ctx, g_pool[A(0)].storage); }   // adresse GPU = adresse CPU
 NVN(nvnMemoryPoolGetSize) { R(ctx, g_pool[A(0)].size); }
@@ -389,9 +394,9 @@ NVN(nvnBufferInitialize) {   // (buffer, builder)
     if (!addr) {
         Pool pl;
         bool known = g_pool.find(b.pool, &pl);
-        HLOG("nvn", "nvnBufferInitialize(0x%llx) : pool 0x%llx %s (mémoire 0x%llx, drapeaux 0x%x), "
-             "décalage 0x%llx, taille 0x%llx → adresse nulle", (unsigned long long)A(0),
-             (unsigned long long)b.pool, known ? "connu" : "INCONNU", (unsigned long long)pl.storage, pl.flags,
+        HLOG("nvn", "nvnBufferInitialize(0x%llx): pool 0x%llx %s (memory 0x%llx, flags 0x%x), "
+             "offset 0x%llx, size 0x%llx → null address", (unsigned long long)A(0),
+             (unsigned long long)b.pool, known ? "known" : "UNKNOWN", (unsigned long long)pl.storage, pl.flags,
              (unsigned long long)b.offset, (unsigned long long)b.size);
     }
     R(ctx, 1);
@@ -470,14 +475,14 @@ NVN(nvnTextureInitialize) {   // (texture, builder)
     Tex& t = g_tex.create(A(0));
     t.b = b;
     t.addr = pool_ptr(b.pool, b.offset);
-    HDBG("nvn", "texture 0x%llx : %dx%dx%d, format %u, cible %u", (unsigned long long)A(0), b.w, b.h,
+    HDBG("nvn", "texture 0x%llx: %dx%dx%d, format %u, target %u", (unsigned long long)A(0), b.w, b.h,
          b.d, b.format, b.target);
     static const bool texlog = getenv("RECOMP_TEX_LOG") != nullptr;
     if (texlog)
-        HLOG("tex", "init %llx @%llx %dx%dx%d niv %u fmt %u cible %u flags 0x%x pas %lld swz %u%u%u%u %s %02x%02x%02x%02x%02x%02x%02x%02x",
+        HLOG("tex", "init %llx @%llx %dx%dx%d lvl %u fmt %u target %u flags 0x%x stride %lld swz %u%u%u%u %s %02x%02x%02x%02x%02x%02x%02x%02x",
              (unsigned long long)obj_key(A(0)), (unsigned long long)t.addr, b.w, b.h, b.d, b.levels, b.format, b.target,
              b.flags, (long long)b.stride, b.swizzle[0], b.swizzle[1], b.swizzle[2], b.swizzle[3],
-             b.packaged ? "packagée" : "-", b.layout[0], b.layout[1], b.layout[2], b.layout[3], b.layout[4],
+             b.packaged ? "packaged" : "-", b.layout[0], b.layout[1], b.layout[2], b.layout[3], b.layout[4],
              b.layout[5], b.layout[6], b.layout[7]);
     R(ctx, 1);
 }
@@ -516,7 +521,7 @@ NVN(nvnWindowInitialize) {   // (window, builder)
     if (!b.tex.empty()) {
         Tex& t = g_tex[b.tex[0]];
         gfx_open_window(t.b.w > 1 ? t.b.w : 1280, t.b.h > 1 ? t.b.h : 720);
-        HLOG("nvn", "nvnWindowInitialize : %zu textures %dx%d (format %u)", b.tex.size(), t.b.w, t.b.h, t.b.format);
+        HLOG("nvn", "nvnWindowInitialize: %zu textures %dx%d (format %u)", b.tex.size(), t.b.w, t.b.h, t.b.format);
     }
     R(ctx, 1);
 }
@@ -539,7 +544,7 @@ NVN(nvnWindowSetPresentInterval) { g_win[A(0)].interval = (int32_t)A(1); }
 NVN(nvnWindowSetCrop) {   // (window, x, y, w, h) : zone de la texture présentée
     Win& w = g_win[A(0)];
     w.crop[0] = (int32_t)A(1), w.crop[1] = (int32_t)A(2), w.crop[2] = (int32_t)A(3), w.crop[3] = (int32_t)A(4);
-    HLOG("nvn", "fenêtre : recadrage %d,%d %dx%d", w.crop[0], w.crop[1], w.crop[2], w.crop[3]);
+    HLOG("nvn", "window: crop %d,%d %dx%d", w.crop[0], w.crop[1], w.crop[2], w.crop[3]);
 }
 
 }  // namespace
@@ -576,7 +581,7 @@ void gfx_init() {
     static const auto stubs = make_stubs(std::make_integer_sequence<int, NSTUB>{});
     for (int i = 0; i < NSTUB; i++) g_stub_addr[i] = register_native("nvn:bouchon libre", stubs[i]);
     for (auto& [n, f] : nvn_impls()) g_nvn_addr[n] = register_native(("nvn:" + n).c_str(), f);
-    HLOG("gfx", "NVN : %zu fonctions natives, %d bouchons en réserve", nvn_impls().size(), NSTUB);
+    HLOG("gfx", "NVN: %zu native functions, %d stubs in reserve", nvn_impls().size(), NSTUB);
 
     struct O { const char* sym; RecompFn fn; };
     const O ov[] = {
@@ -615,7 +620,7 @@ void gfx_init() {
     };
     int n = 0;
     for (auto& o : ov) n += override_export(o.sym, o.fn);
-    HLOG("gfx", "%d fonctions gs/vi/nvn remplacées", n);
+    HLOG("gfx", "%d gs/vi/nvn functions replaced", n);
 }
 
 }  // namespace hos

@@ -2,8 +2,9 @@
 
 Principes :
   * registres R0..Rn, UR0..UR63 : variables `uint` ; prédicats P0..P6, UP0..UP6 : `bool` ;
-  * flot de contrôle quelconque sans structuration : une boucle `while (true) switch (pc)` dont
-    chaque cible de branchement est un `case` (les cas s'enchaînent en séquence) ;
+  * flot de contrôle quelconque sans structuration : chaque cible de branchement ouvre un bloc gardé
+    `if (pc == N) do { … } while (false);`, les blocs s'enchaînent dans l'ordre des adresses (en_chaine) ; un
+    shader sans saut arrière ni saut calculé s'exécute en une passe, sans boucle ni aiguillage ;
   * constantes `c[banque][octet]` : un tampon de stockage par (étage, banque), set 0,
     binding = étage × 32 + banque ; poignées de textures lues dans ces tampons (comme le matériel),
     puis indexation de tableaux de descripteurs (set 1) : id texture = bits 0-19, échantillonneur =
@@ -14,6 +15,7 @@ Principes :
 Contrat de liaisons avec le runtime : voir README (Phase 4).
 """
 import os
+import re
 import struct
 
 from sass import Reg, Imm, CBuf, Pred, RZ, URZ, PT, decode
@@ -36,6 +38,39 @@ def flit(v):
 def flit_f(x):
     """Littéral GLSL d'un flottant exact (puissances de 2 courtes : 0.5, 2.0…)."""
     return repr(float(x))
+
+
+# Carré de 2×2 pixels. Les shaders de fragments du jeu calculent leurs dérivées d'écran (lissage du texte, niveau de
+# détail) en échangeant une valeur avec le pixel voisin du même carré (SHFL.BFLY 1 : voisin horizontal, 2 : vertical),
+# puis en la soustrayant selon la voie du pixel dans le carré (FSWZADD). Jusqu'au 2026-11-11, ces échanges étaient
+# écrits avec les sous-groupes de Vulkan (subgroupShuffleXor, gl_SubgroupInvocationID & 3). C'est juste sur NVIDIA, où
+# le sous-groupe d'un shader de fragments suit les carrés, pixels auxiliaires compris. Sur AMD, un pixel auxiliaire
+# (hors du triangle, présent seulement pour les dérivées) n'est pas une voie active : au bord de chaque triangle la
+# valeur échangée était indéfinie, et le contour et la diagonale de chaque rectangle ressortaient (« maillage » sur
+# le texte et les textures). Écriture portable, mesurée identique sur NVIDIA (sondes du 2026-11-11 : le voisin « 1 »
+# est en x ± 1, le voisin « 2 » en y ± 1, la voie vaut parité(x) | parité(y) << 1 en coordonnées de la cible) :
+#   voisin horizontal = v ± dFdxFine(v), voisin vertical = v ± dFdyFine(v), signe selon la parité du pixel ;
+#   voie = (x & 1) | (y & 1) << 1.
+# Les dérivées fines sont définies sur tous les GPU, pixels auxiliaires compris.
+# RECOMP_SHADER_QUAD_SUBGROUP=1 : ancienne écriture, pour comparer.
+QUAD_PORTABLE = not os.environ.get("RECOMP_SHADER_QUAD_SUBGROUP")
+# Votes. 251 shaders de fragments font voter les pixels (VOTE.ALL → subgroupAll) avant de sauter un bloc : sur la
+# console, si un seul pixel du groupe a besoin du bloc, tous l'exécutent, pixels auxiliaires compris, pour que les
+# dérivées (niveau de détail des textures lues dans le bloc) restent justes. Sur AMD un pixel auxiliaire ne vote pas et
+# suit son propre chemin : au bord des triangles, les coordonnées de ses voisins n'étaient pas calculées et les arêtes
+# ressortaient en pointillés sur les objets 3D. GL_EXT_shader_quad_control (VK_KHR_shader_quad_control) : full_quads
+# fait participer les pixels auxiliaires aux opérations de sous-groupe, quad_derivatives définit les dérivées par carré
+# même dans du code conditionnel. Le moteur active l'extension quand le pilote l'offre (pas sur NVIDIA, qui se comporte
+# déjà ainsi) et retire ces marques du SPIR-V sinon (vk_render.cpp, spirv_sans_quad_control).
+# RECOMP_SHADER_NO_QUAD_CONTROL=1 : traduction sans ces marques.
+QUAD_CONTROL = not os.environ.get("RECOMP_SHADER_NO_QUAD_CONTROL")
+QUAD_AIDES = [
+    "#define QLANE ((uint(gl_FragCoord.x) & 1u) | ((uint(gl_FragCoord.y) & 1u) << 1))",
+    "uint quad_x(uint r) { float v = uintBitsToFloat(r); float d = dFdxFine(v);"
+    " return floatBitsToUint((uint(gl_FragCoord.x) & 1u) == 0u ? v + d : v - d); }",
+    "uint quad_y(uint r) { float v = uintBitsToFloat(r); float d = dFdyFine(v);"
+    " return floatBitsToUint((uint(gl_FragCoord.y) & 1u) == 0u ? v + d : v - d); }",
+]
 
 
 class Emitter:
@@ -78,7 +113,7 @@ class Emitter:
 
     def cbw(self, c: CBuf, extra=0):
         if c.ubank is not None:
-            raise Unsupported("constante à banque indirecte (UR)")
+            raise Unsupported("constant with indirect bank (UR)")
         return self.cb(c.bank, f"{(c.off + extra) // 4}u")
 
     def u(self, o):
@@ -90,7 +125,7 @@ class Emitter:
         elif isinstance(o, CBuf):
             v = self.cbw(o)
         else:
-            raise Unsupported(f"opérande {o!r}")
+            raise Unsupported(f"operand {o!r}")
         return v
 
     def ui(self, o):
@@ -189,7 +224,7 @@ class Emitter:
             # source : 1 f16 (moitié choisie par sub), 2 f32 ; destination : 0 8 bits, 1 16 bits, 2 32 bits
             # (résultat saturé dans la plage du type, étendu à 32 bits selon le signe)
             if m["st"] not in (1, 2) or m["dt"] not in (0, 1, 2):
-                raise Unsupported(f"f2i tailles {m['st']}/{m['dt']}")
+                raise Unsupported(f"f2i sizes {m['st']}/{m['dt']}")
             if m["st"] == 1:
                 x = f"unpackHalf2x16({self.u(s[0])}).{'y' if m.get('sub', 0) & 1 else 'x'}"
                 if getattr(s[0], "abs", False):
@@ -357,7 +392,7 @@ class Emitter:
             return self.emit_sr(i)
         if n == "pixld":   # informations du pixel ; nos cibles ont un seul échantillon
             if self.kind != "frag":
-                raise Unsupported("pixld hors fragment")
+                raise Unsupported("pixld outside fragment")
             v = m["val"]
             if v == 0:      # MS_COUNT : nombre d'échantillons
                 return self.setr(i.dst, "1u")
@@ -383,7 +418,7 @@ class Emitter:
             return self.emit_mem(i)
         if n == "kill":
             if self.kind != "frag":
-                raise Unsupported("kill hors fragment")
+                raise Unsupported("kill outside fragment")
             return "discard;" if i.psrc[0].true else f"if ({self.p(i.psrc[0])}) discard;"
         if n == "bar":
             return "barrier();"
@@ -391,12 +426,16 @@ class Emitter:
             self.uses.add("membar")
             return "memoryBarrier();"
         if n == "shfl":
-            self.uses.add("subgroup")
             a = self.u(s[0])
             lane = self.u(s[1])
-            fn = {"idx": "subgroupShuffle", "up": "subgroupShuffleUp", "down": "subgroupShuffleDown",
-                  "bfly": "subgroupShuffleXor"}[m["op"]]
-            out = self.setr(i.dst, f"{fn}({a}, {lane})")
+            if QUAD_PORTABLE and self.kind == "frag" and m["op"] == "bfly" and lane in ("0x00000001u", "0x00000002u"):
+                self.uses.add("quadp")   # voisin du carré 2×2, par les dérivées fines (voir QUAD_AIDES)
+                out = self.setr(i.dst, f"{'quad_x' if lane == '0x00000001u' else 'quad_y'}({a})")
+            else:
+                self.uses.add("subgroup")
+                fn = {"idx": "subgroupShuffle", "up": "subgroupShuffleUp", "down": "subgroupShuffleDown",
+                      "bfly": "subgroupShuffleXor"}[m["op"]]
+                out = self.setr(i.dst, f"{fn}({a}, {lane})")
             if i.pdst and i.pdst[0].n != PT:
                 out += " " + self.setp(i.pdst[0], "true")
             return out
@@ -420,13 +459,14 @@ class Emitter:
             return self.setr(i.dst, e)
         if n == "atoms.popcinc":   # + nombre de fils actifs (chaque fil ajoute 1) ; valeur rendue non gérée
             if not i.dst.zero:
-                raise Unsupported("atoms.popc.inc avec retour")
+                raise Unsupported("atoms.popc.inc with a result")
             self.uses.add("shared")
             base, off = s[0], s[1].v
             addr = f"(({self.u(base)} + {off & 0xffffffff}u) >> 2)" if not base.zero else f"{(off & 0xffffff) >> 2}u"
             return f"atomicAdd(SMEM[{addr}], 1u);"
         if n == "fswzadd":
-            self.uses.add("quad")
+            portable = QUAD_PORTABLE and self.kind == "frag"
+            self.uses.add("quadp" if portable else "quad")
             a, b = self.f(s[0]), self.f(s[1])
             sub = m["sub"]
             ops = [(sub >> (2 * (3 - k))) & 3 for k in range(4)]   # lane 0..3
@@ -434,7 +474,7 @@ class Emitter:
             for k, o in enumerate(ops):
                 e = {0: f"({a} + {b})", 1: f"({b} - {a})", 2: f"({a} - {b})", 3: f"{b}"}[o]
                 terms.append(e)
-            sel = f"(gl_SubgroupInvocationID & 3u)"
+            sel = "QLANE" if portable else "(gl_SubgroupInvocationID & 3u)"
             expr = f"({sel} == 0u ? {terms[0]} : {sel} == 1u ? {terms[1]} : {sel} == 2u ? {terms[2]} : {terms[3]})"
             return self.setf(i.dst, expr)
         raise Unsupported(f"instruction {n} (0x{i.opc:03x})")
@@ -636,7 +676,7 @@ class Emitter:
             return out
         if sr in self.SR:
             if self.kind != "comp":
-                raise Unsupported(f"registre spécial {sr:#x} hors calcul")
+                raise Unsupported(f"special register {sr:#x} outside compute")
             return self.setr(i.dst, f"{self.SR[sr]}")
         if sr == 0x00:
             self.uses.add("subgroup")
@@ -649,7 +689,7 @@ class Emitter:
             return self.setr(i.dst, "0u")
         if sr == 0x12:   # SR_Y_DIRECTION (signe de l'axe Y)
             return self.setf(i.dst, "1.0")
-        self.warn.append(f"registre spécial 0x{sr:x} → 0")
+        self.warn.append(f"special register 0x{sr:x} → 0")
         return self.setr(i.dst, "0u")
 
     def emit_ldc(self, i):
@@ -679,7 +719,7 @@ class Emitter:
         addr = m["addr"]
         if i.name == "ipa":
             if self.kind != "frag":
-                raise Unsupported("ipa hors fragment")
+                raise Unsupported("ipa outside fragment")
             if not i.srcs[0].zero:
                 raise Unsupported("ipa indirect")
             return self.setf(i.dst, self.attr_in(addr, flat=m["freq"] == 1))
@@ -691,7 +731,7 @@ class Emitter:
             a = addr + 4 * k
             if i.name == "ald":
                 if m["out"] or m["patch"]:
-                    raise Unsupported("ald sortie/patch")
+                    raise Unsupported("ald output/patch")
                 out.append(self.setr(self.rn(i.dst, k), self.attr_in_u(a)))
             else:
                 data = Reg(i.srcs[0].n + k if i.srcs[0].n != RZ else RZ)
@@ -707,7 +747,7 @@ class Emitter:
             k, c = (a - 0x80) // 16, ((a - 0x80) % 16) // 4
             self.vin.add(k)
             return f"floatBitsToUint(vin{k}[{c}])"
-        raise Unsupported(f"attribut d'entrée 0x{a:x} ({self.kind})")
+        raise Unsupported(f"input attribute 0x{a:x} ({self.kind})")
 
     def imap_mode(self, k, c):
         """Mode d'interpolation de l'entrée générique k, composante c, d'après l'IMAP du SPH (PS) :
@@ -737,7 +777,7 @@ class Emitter:
             return "uintBitsToFloat(gl_FrontFacing ? 0xffffffffu : 0u)"
         if a in (0x2e0, 0x2e4):
             return f"gl_PointCoord[{(a - 0x2e0) // 4}]"
-        raise Unsupported(f"attribut de fragment 0x{a:x}")
+        raise Unsupported(f"fragment attribute 0x{a:x}")
 
     def attr_out(self, a, val):
         fv = f"uintBitsToFloat({val})"
@@ -760,7 +800,7 @@ class Emitter:
                 return ""
             self.uses.add("clip")
             return f"gl_ClipDistance[{(a - 0x2c0) // 4}] = {fv};"
-        raise Unsupported(f"attribut de sortie 0x{a:x}")
+        raise Unsupported(f"output attribute 0x{a:x}")
 
     def tex_bank(self, m):
         """Banque des poignées liées ; formes 0xf60/0xf6c (indice) : 2 en graphique, 0 en calcul."""
@@ -775,7 +815,7 @@ class Emitter:
         dim = m.get("dim", "2d")
         if "ur" in m:
             if i.name == "txq":
-                raise Unsupported("txq poignée uniforme")
+                raise Unsupported("txq uniform handle")
             h = None
         else:
             h = None if bindless else self.cb(self.tex_bank(m), f"{m['toff_cb'] // 4}u")
@@ -855,7 +895,7 @@ class Emitter:
             ov = val["off"]
             if name == "tld4":
                 if m.get("toff") != 1 or dim not in ("2d", "2darray"):
-                    raise Unsupported("tld4 décalage par texel (PTP)")
+                    raise Unsupported("tld4 per-texel offset (PTP)")
                 gather_off = f"ivec2(bitfieldExtract(int({ov}), 0, 6), bitfieldExtract(int({ov}), 8, 6))"
             else:
                 if dim in ("cube", "cubearray"):
@@ -994,7 +1034,7 @@ class Emitter:
         if m.get("bindless"):
             raise Unsupported("image bindless")
         if not m.get("fmt"):
-            raise Unsupported(f"{i.name}.D (accès brut)")
+            raise Unsupported(f"{i.name}.D (raw access)")
         if m["dim"] not in self.IMG_DIMS:
             raise Unsupported(f"image dim {m['dim']}")
         ty, nc, ct = self.IMG_DIMS[m["dim"]]
@@ -1096,7 +1136,7 @@ class Emitter:
 
     def emit_global(self, i):
         if self.kind != "comp":
-            raise Unsupported(f"mémoire globale hors calcul ({i.name})")
+            raise Unsupported(f"global memory outside compute ({i.name})")
         self.uses.update(("int64", "global"))
         self.banks.add(0)
         n, m = i.name, i.mods
@@ -1161,6 +1201,18 @@ class Emitter:
              f"  uint64_t sz = packUint2x32(uvec2({cb}[b + 4u], {cb}[b + 5u]));",
              f"  return (o < sz && sz - o >= 4ul) ? packUint2x32(uvec2({cb}[b + 2u], {cb}[b + 3u])) + o : 0ul;",
              "}",
+             # Adresse absente de la table : notée dans le tampon de retour du runtime (son adresse GPU est dans la table,
+             # mots g + 2 et g + 3 ; 0 : pas de tampon), qui importera sa fenêtre pour les calculs suivants
+             # (vk_render.cpp, glob_retour). Depuis la 1.0.3, la mémoire du jeu n'est plus importée en entier.
+             "layout(buffer_reference, std430, buffer_reference_align = 8) buffer GFB { uint n; uint pad; uint64_t a[255]; };",
+             "void gxl_miss(uint64_t a) {",
+             f"  uint64_t f = packUint2x32(uvec2({cb}[{g + 2}u], {cb}[{g + 3}u]));",
+             "  if (f == 0ul || a < 0x10000ul) return;",
+             "  GFB fb = GFB(f);",
+             "  if (fb.n >= 255u) return;",
+             "  uint i = atomicAdd(fb.n, 1u);",
+             "  if (i < 255u) fb.a[i] = a;",
+             "}",
              "uint64_t gxl(uint64_t a) {",
              f"  uint n = min({cb}[{g}u], 78u);",
              "  if (gxl_last < n) { uint64_t d = gxl_try(gxl_last, a); if (d != 0ul) return d; }",
@@ -1168,6 +1220,7 @@ class Emitter:
              "    uint64_t d = gxl_try(k, a);",
              "    if (d != 0ul) { gxl_last = k; return d; }",
              "  }",
+             "  gxl_miss(a);",
              "  return 0ul;",
              "}",
              "uint gld(uint64_t a) { uint64_t d = gxl(a & ~3ul); return d != 0ul ? GW(d).v : 0u; }",
@@ -1274,7 +1327,7 @@ class Emitter:
                 return "{ " + " ".join(self.setr(self.rn(i.dst, k), f"LMEM[{addr} + {k}u]") for k in range(cnt)) + " }"
             data = i.srcs[2]
             return "{ " + " ".join(f"LMEM[{addr} + {k}u] = {self.u(Reg(data.n + k if data.n != RZ else RZ))};" for k in range(cnt)) + " }"
-        raise Unsupported(f"mémoire globale ({n})")
+        raise Unsupported(f"global memory ({n})")
 
     # ---------------------------------------------------------------- programme
     def translate(self):
@@ -1293,7 +1346,7 @@ class Emitter:
                 # décalées de la base ; sans banque 1 vidée, la cible n'est pas connue
                 cb1 = getattr(self.st, "cb1", b"")
                 if not cb1:
-                    raise Unsupported("brx sans banque 1")
+                    raise Unsupported("brx without bank 1")
                 words = struct.unpack_from(f"<{len(cb1) // 4}I", cb1)
                 base = i.mods["base"]
                 for v in words:
@@ -1387,6 +1440,8 @@ class Emitter:
                   "#extension GL_KHR_shader_subgroup_vote : require"]
         if "subgroup_arith" in self.uses:
             L.append("#extension GL_KHR_shader_subgroup_arithmetic : require")
+        if QUAD_CONTROL and self.kind == "frag" and self.uses & {"subgroup", "quad", "quadp"}:
+            L += ["#extension GL_EXT_shader_quad_control : require", "layout(quad_derivatives) in;", "layout(full_quads) in;"]
         if self.banks:
             L.append("#extension GL_EXT_scalar_block_layout : require")
         if self.kind == "comp":
@@ -1440,6 +1495,8 @@ class Emitter:
                      " uint n = (s >> (4u * k)) & 15u; uint idx = n & 7u; uint w = idx < 4u ? a : b;"
                      " uint by = (w >> (8u * (idx & 3u))) & 255u; if ((n & 8u) != 0u) by = ((by & 128u) != 0u) ? 255u : 0u;"
                      " r |= by << (8u * k); } return r; }")
+        if "quadp" in self.uses:
+            L += QUAD_AIDES
         L.append("void main() {")
         regs = ", ".join(f"R{k} = 0u" for k in range(self.max_r + 1))
         # sommets : « precise » interdit au pilote de fusionner FMUL + FADD en FMA (seules les FFMA du
@@ -1466,17 +1523,84 @@ class Emitter:
             # sans boucle infinie mesurable ; avec ce compteur, le pilote le compile autrement et il
             # s'exécute normalement (une invocation saine reste très loin de cette borne).
             L.append("  uint guard = 0u;")
-        L.append("  while (true) {")
-        if loops:
-            L.append("    if (++guard > 1000000u) return;")
-        L.append("    switch (pc) {")
-        L += body
-        L.append("    default: return;")
-        L.append("    }")
-        L.append("    return;")
-        L.append("  }")
+        if os.environ.get("RECOMP_SHADER_SWITCH"):   # forme d'origine, pour comparer (voir en_chaine)
+            L.append("  while (true) {")
+            if loops:
+                L.append("    if (++guard > 1000000u) return;")
+            L.append("    switch (pc) {")
+            L += body
+            L.append("    default: return;")
+            L.append("    }")
+            L.append("    return;")
+            L.append("  }")
+        else:
+            L += en_chaine(body, loops)
         L.append("}")
         return "\n".join(L) + "\n"
+
+
+def en_chaine(body, boucle):
+    """Corps de main() à partir des blocs `case N:` de l'émetteur, sans boucle de répartition.
+
+    Jusqu'à la 1.0.2 : `while (true) { switch (pc) { case N: … pc = M; continue; … default: return; } return; }`.
+    Les compilateurs des pilotes devaient retrouver le vrai flot de contrôle derrière l'aiguillage ; celui de NVIDIA y
+    arrive, celui d'AMD non (fondé sur LLVM, qui ne relie pas un saut à sa cible à travers l'en-tête d'une boucle) :
+    chaque pixel exécutait la boucle et l'aiguillage. Mesuré sur une carte AMD intégrée en 1080p : 0,1 image par
+    seconde dans les scènes 3D, image fausse ; compilation des shaders en plus de 4 minutes (issues n° 6, 7 et 11).
+
+    Maintenant chaque bloc est `if (pc == N) do { … pc = M; break; … } while (false);`, dans l'ordre des adresses.
+    Sans saut arrière ni saut calculé (`boucle` faux, 1 953 shaders sur 2 388), tous les sauts vont vers un bloc
+    écrit plus loin : une seule passe suffit, il ne reste ni boucle ni aiguillage, et le compilateur relie chaque saut
+    à sa cible. Sinon (435 shaders) la chaîne est répétée : un saut arrière prend effet à la passe suivante, et une
+    passe où aucun bloc ne s'exécute termine le shader (comme `default: return`). Même carte, mêmes scènes : 2,5 à 13
+    images par seconde, compilation en 53 s."""
+    blocs, cur = [], None
+    for l in body:
+        m = re.match(r"    case (\d+)u:\s*(.*)$", l)
+        if m:
+            cur = [int(m.group(1)), []]
+            blocs.append(cur)
+            if m.group(2).strip():
+                cur[1].append("      " + m.group(2))
+        else:
+            cur[1].append(l)
+    etiquettes = [pc for pc, _ in blocs]
+    garde = boucle   # (le compteur `guard` n'est déclaré que pour les shaders qui bouclent)
+    if etiquettes != sorted(etiquettes) or len(set(etiquettes)) != len(etiquettes):
+        boucle = True
+    for pc, corps in blocs:
+        for l in corps:
+            code = l.split("  //")[0]
+            if re.search(r"\bbreak;", code):
+                raise Unsupported("break in a block")
+            for cible in re.findall(r"\bpc = ([^;]+);", code):   # saut constant vers l'arrière, ou saut calculé
+                cible = cible.strip()
+                if not re.fullmatch(r"\d+u", cible) or int(cible[:-1]) <= pc:
+                    boucle = True
+    out, ind = [], "  "
+    if boucle:
+        out.append("  while (true) {")
+        if garde:
+            out.append("    if (++guard > 1000000u) return;")
+        out.append("    bool passe = false;")
+        ind = "    "
+    for k, (pc, corps) in enumerate(blocs):
+        out.append(f"{ind}if (pc == {pc}u) do {{")
+        if boucle:
+            out.append(f"{ind}  passe = true;")
+        dernier = ""
+        for l in corps:
+            out.append(re.sub(r"\bcontinue;", "break;", l))
+            code = l.split("  //")[0].strip()
+            if code:
+                dernier = code
+        if not re.fullmatch(r"(pc = [^;]*; )?(continue|return);", dernier):   # le bloc tombait dans le suivant
+            out.append(f"{ind}  pc = {blocs[k + 1][0] if k + 1 < len(blocs) else 0xffffffff}u;")
+        out.append(f"{ind}}} while (false);")
+    if boucle:
+        out.append("    if (!passe) return;")
+        out.append("  }")
+    return out
 
 
 def translate(stage):

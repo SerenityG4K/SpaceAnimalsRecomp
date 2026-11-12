@@ -34,7 +34,7 @@ def work(args):
     try:
         src, em = glsl.translate(st)
     except glsl.Unsupported as e:
-        return st, "non géré", str(e)
+        return st, "unsupported", str(e)
     gl = f"{base}.{STAGE_EXT[st.kind]}.glsl"
     open(gl, "w", encoding="utf-8", newline="\n").write(src)
     spv = base + ".spv"
@@ -73,13 +73,13 @@ def main():
             res[status] += 1
             by_kind[(st.kind, status)] += 1
             if status != "ok":
-                key = msg.split("(")[0][:90] if status == "non géré" else msg[:120]
+                key = msg.split("(")[0][:90] if status == "unsupported" else msg[:120]
                 reasons[(status, key)] += 1
                 ex.setdefault((status, key), st.name)
             elif msg and a.only:
-                print("avertissements :", msg)
-    print(f"{len(stages)} étages : " + ", ".join(f"{k} {v}" for k, v in res.items()))
-    print("par type : " + ", ".join(f"{k}/{s} {v}" for (k, s), v in sorted(by_kind.items())))
+                print("warnings:", msg)
+    print(f"{len(stages)} stages: " + ", ".join(f"{k} {v}" for k, v in res.items()))
+    print("by type: " + ", ".join(f"{k}/{s} {v}" for (k, s), v in sorted(by_kind.items())))
     for (status, key), n in reasons.most_common(40):
         print(f"  {n:4d}  [{status}] {key}   (ex. {ex[(status, key)]})")
 

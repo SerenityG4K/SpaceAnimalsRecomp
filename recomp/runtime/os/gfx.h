@@ -25,5 +25,8 @@ struct HostPad {
     bool xinput = false;   // une manette XInput est branchée
 };
 HostPad host_poll_input();
+// Vibration envoyée par le jeu (svc_hid.cpp, nn::hid::SendVibrationValue) pour un côté de la manette (0 gauche,
+// 1 droite) : amplitudes 0..1 et fréquences (Hz) des bandes basse et haute ; appliquée par input.cpp à 60 Hz.
+void host_set_vibration(int side, float amp_low, float freq_low, float amp_high, float freq_high);
 
 }  // namespace hos

@@ -62,7 +62,7 @@ def lire_json(url, delai):
 def derniere_release(delai=15):
     rel = lire_json(API, delai)
     if not isinstance(rel, dict) or "tag_name" not in rel:
-        raise Echec("réponse inattendue de GitHub")
+        raise Echec("unexpected response from GitHub")
     return rel
 
 
@@ -88,7 +88,7 @@ def empreinte_attendue(rel, a):
                     parts = ligne.split()
                     if len(parts) == 2 and parts[1].lstrip("*") == a["name"]:
                         return parts[0].lower()
-    raise Echec("empreinte SHA-256 de la mise à jour introuvable : téléchargement refusé")
+    raise Echec("SHA-256 hash of the update not found: download refused")
 
 
 def telecharger(url, chemin, debut, fin):
@@ -123,7 +123,7 @@ def extraire(archive, dest):
                 continue
             cible = os.path.abspath(os.path.join(dest, nom))
             if not cible.startswith(dest + os.sep) or os.path.isabs(nom) or ".." in nom.split("/"):
-                raise Echec(f"chemin refusé dans la mise à jour : {m.filename}")
+                raise Echec(f"path refused in the update: {m.filename}")
             os.makedirs(os.path.dirname(cible), exist_ok=True)
             with z.open(m) as s, open(cible, "wb") as d:
                 shutil.copyfileobj(s, d, 1 << 20)
@@ -140,7 +140,8 @@ def outils_manquants(racine, nouvelle):
     for o in ns["OUTILS"]:
         marque = os.path.join(racine, "outils", ".installe", o["nom"])
         try:
-            ok = open(marque, encoding="utf-8").read().strip() == o["sha256"]
+            vue = open(marque, encoding="utf-8").read().strip()
+            ok = vue == o["sha256"] or vue in o.get("acceptes", ())   # archive précédente encore acceptée : gardée
         except OSError:
             ok = False
         if not ok:
@@ -165,40 +166,40 @@ def installer(racine):
     rel = derniere_release()
     tag = rel["tag_name"].lstrip("vV")
     if numeros(tag) <= numeros(locale):
-        raise Echec(f"déjà à jour ({locale})")
+        raise Echec(f"already up to date ({locale})")
     a = asset_maj(rel)
     if not a:
-        raise Echec(f"la release {tag} n'a pas d'archive de mise à jour")
+        raise Echec(f"release {tag} has no update archive")
     attendu = empreinte_attendue(rel, a)
     dossier = os.path.join(racine, "maj")
     shutil.rmtree(dossier, ignore_errors=True)
     os.makedirs(dossier)
     archive = os.path.join(dossier, a["name"])
-    dire(f"@info {a['name']} ({a.get('size', 0) / 1e6:.1f} Mo)")
+    dire(f"@info {a['name']} ({a.get('size', 0) / 1e6:.1f} MB)")
     h = telecharger(a["browser_download_url"], archive, 0.0, 0.8)
     if h != attendu:
         os.remove(archive)
-        raise Echec(f"empreinte SHA-256 différente ({h}, attendu {attendu}) : archive supprimée")
-    dire("@info empreinte SHA-256 vérifiée")
+        raise Echec(f"SHA-256 hash differs ({h}, expected {attendu}): archive deleted")
+    dire("@info SHA-256 hash verified")
     nouvelle = os.path.join(dossier, "nouvelle")
     extraire(archive, nouvelle)
     os.remove(archive)
     if not os.path.exists(os.path.join(nouvelle, "lanceur.exe")) or not os.path.exists(os.path.join(nouvelle, "recomp", "VERSION")):
-        raise Echec("archive de mise à jour incomplète")
+        raise Echec("update archive incomplete")
     dire("@progres 0.9")
     script, manque = outils_manquants(racine, nouvelle)
     if "python" in manque:   # le Python en cours d'utilisation ne peut pas être remplacé ici
-        raise Echec("cette version demande un nouveau Python : téléchargez le paquet complet de la release")
+        raise Echec("this version needs a new Python: download the full package of the release")
     if manque:
-        dire("@info outils : " + ", ".join(manque))
+        dire("@info tools: " + ", ".join(manque))
         r = subprocess.run([sys.executable, "-X", "utf8", script, "--dest", os.path.join(racine, "outils")],
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode:
-            raise Echec("outils de la nouvelle version : " + (r.stdout + r.stderr).strip()[-300:])
+            raise Echec("tools of the new version: " + (r.stdout + r.stderr).strip()[-300:])
     with open(os.path.join(dossier, "pret.txt"), "w", encoding="utf-8") as f:
         f.write(tag + "\n")
     dire("@progres 1.000")
-    dire(f"@info {tag} prête")
+    dire(f"@info {tag} ready")
 
 
 def message(texte):
@@ -217,7 +218,7 @@ def finir(racine, pid):
 
     nouvelle = os.path.join(racine, "maj", "nouvelle")
     if not os.path.exists(os.path.join(racine, "maj", "pret.txt")):
-        note("rien à installer")
+        note("nothing to install")
     else:
         # attendre la fermeture du launcher (lanceur.exe ne peut être remplacé qu'ensuite)
         k32 = ctypes.windll.kernel32
@@ -225,6 +226,14 @@ def finir(racine, pid):
         if h:
             k32.WaitForSingleObject(h, 60000)
             k32.CloseHandle(h)
+        # copie de secours des sauvegardes du joueur avant de remplacer les fichiers (la mise à jour ne touche à aucun
+        # dossier de sauvegarde ; la copie couvre aussi ce que fera le jeu mis à jour)
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import sauvegardes
+            sauvegardes.secours("mise-a-jour", note)
+        except Exception as e:  # noqa: BLE001 - jamais bloquant
+            note(f"saves: {type(e).__name__}: {e}")
         erreurs = []
         for base, _, fichiers in os.walk(nouvelle):
             for f in fichiers:
@@ -237,14 +246,14 @@ def finir(racine, pid):
                         break
                     except OSError as e:
                         if essai == 19:
-                            erreurs.append(f"{dst} : {e}")
+                            erreurs.append(f"{dst}: {e}")
                         time.sleep(0.5)
         if erreurs:
-            note("échec : " + " ; ".join(erreurs[:5]))
+            note("failed: " + "; ".join(erreurs[:5]))
             message("La mise à jour n'a pas pu remplacer tous les fichiers (voir mise_a_jour.log).\n"
                     "The update could not replace every file (see mise_a_jour.log).")
             return 1
-        note("installée : " + version_locale(racine))
+        note("installed: " + version_locale(racine))
         shutil.rmtree(os.path.join(racine, "maj"), ignore_errors=True)
     lanceur = os.path.join(racine, "lanceur.exe")
     subprocess.Popen([lanceur], cwd=racine, creationflags=0x00000008 | 0x00000200)   # DETACHED_PROCESS, NEW_PROCESS_GROUP
@@ -278,7 +287,7 @@ def main():
         dire(f"@erreur {e}")
         return 1
     except Exception as e:  # noqa: BLE001  (réseau, disque…)
-        dire(f"@erreur {type(e).__name__} : {e}")
+        dire(f"@erreur {type(e).__name__}: {e}")
         return 1
     return 0
 

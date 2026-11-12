@@ -100,10 +100,10 @@ void input_thread() {
         st<uint32_t>(m + NPAD_COND + 0x8, g_hold_type.load());
         lifo_push(m + NPAD_BASE + LIFO_FULLKEY, ++sample, p);
         if (p.buttons != last_buttons && (g_verbose >= 2 || input_log))
-            HLOG("hid", "boutons 0x%llx, sticks (%d,%d) (%d,%d)", (unsigned long long)p.buttons, p.lx, p.ly,
+            HLOG("hid", "buttons 0x%llx, sticks (%d,%d) (%d,%d)", (unsigned long long)p.buttons, p.lx, p.ly,
                  p.rx, p.ry);
         if (input_log && (int)p.xinput != last_xinput)
-            HLOG("hid", "manette XInput hôte %s", p.xinput ? "présente" : "absente");
+            HLOG("hid", "host XInput controller %s", p.xinput ? "present" : "absent");
         last_buttons = p.buttons;
         last_xinput = p.xinput;
     }
@@ -116,7 +116,7 @@ void start_input() {
         write_static(m);
         lifo_push(m + NPAD_BASE + LIFO_FULLKEY, 0, HostPad{});   // un premier état « connecté »
         std::thread(input_thread).detach();
-        HLOG("hid", "manette Pro émulée connectée (joueur 1)");
+        HLOG("hid", "emulated Pro controller connected (player 1)");
     });
 }
 
@@ -145,13 +145,27 @@ std::shared_ptr<Service> make_hid(const char* n) {
             r.out_copy.push_back(e.copy());
             return true;
         }
+        if (r.cmd == 200 && r.in_size >= 4) {   // GetVibrationDeviceInfo(handle) → { type, position }
+            // poignée { style, joueur, côté (0 gauche, 1 droite), - } : moteur linéaire (vibration HD) de ce côté
+            const uint32_t h = r.arg<uint32_t>(0);
+            const uint32_t info[2] = {1, ((h >> 16) & 0xff) == 1 ? 2u : 1u};
+            r.out.assign((const uint8_t*)info, (const uint8_t*)info + 8);
+            static bool vu = false;
+            if (!vu) HLOG("hid", "GetVibrationDeviceInfo(0x%08x): linear motor", h), vu = true;
+            return true;
+        }
+        if (r.cmd == 205) {   // IsVibrationPermitted → oui (le réglage du launcher règle l'intensité)
+            r.out.assign(8, 0);
+            r.out[0] = 1;
+            return true;
+        }
         if (r.cmd == 203) {   // CreateActiveVibrationDeviceList → IActiveVibrationDeviceList
             r.out_objects.push_back(svc("hid:IActiveVibrationDeviceList", [](Request&) { return true; }));
             return true;
         }
         if (r.cmd == 120 && r.in_size >= 16) {   // SetNpadJoyHoldType(aruid, type)
             g_hold_type = (uint32_t)r.arg<uint64_t>(8);
-            HLOG("hid", "SetNpadJoyHoldType : arguments 0x%llx 0x%llx → type %u",
+            HLOG("hid", "SetNpadJoyHoldType: arguments 0x%llx 0x%llx → type %u",
                  (unsigned long long)r.arg<uint64_t>(0), (unsigned long long)r.arg<uint64_t>(8), g_hold_type.load());
         }
         // activations, réglages (style de manette, vibrations…) : acceptés, sortie nulle.
@@ -161,10 +175,20 @@ std::shared_ptr<Service> make_hid(const char* n) {
         static std::set<uint32_t> seen;
         std::lock_guard<std::mutex> lk(m);
         if (seen.insert(r.cmd).second)
-            HLOG("hid", "commande %u acceptée (entrée %zu o, A%zu B%zu X%zu C%zu)", r.cmd, r.in_size,
+            HLOG("hid", "command %u accepted (input %zu bytes, A%zu B%zu X%zu C%zu)", r.cmd, r.in_size,
                  r.a.size(), r.b.size(), r.x.size(), r.c.size());
         return true;
     });
+}
+
+// nn::hid::SendVibrationValue(const VibrationDeviceHandle&, const VibrationValue&) : appelée par le jeu (vibrations
+// HD, dont celles tirées du son par nn::hid::VibrationConverter). La poignée vient de GetVibrationDeviceHandles
+// (code du SDK) : { style, joueur, côté, - } ; la valeur : { amplitude basse, fréquence basse, amplitude haute,
+// fréquence haute } en flottants. Remplacée par une fonction native : la vibration va à la manette de l'hôte.
+void send_vibration_value(CPUState* ctx) {
+    const uint8_t* h = (const uint8_t*)ctx->x[0];
+    const float* v = (const float*)ctx->x[1];
+    if (h && v) host_set_vibration(h[2] == 1 ? 1 : 0, v[0], v[1], v[2], v[3]);
 }
 
 struct Registrar {
@@ -175,4 +199,11 @@ struct Registrar {
 } g_reg;
 
 }  // namespace
+
+void hle_hid_init() {
+    if (override_export("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE",
+                        send_vibration_value))
+        HLOG("hle", "rumble: nn::hid::SendVibrationValue → host controller");
+}
+
 }  // namespace hos

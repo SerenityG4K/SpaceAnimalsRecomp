@@ -3,7 +3,9 @@
 #include "cpu.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -57,7 +59,7 @@ namespace {
 #else
     (void)code;
     if (rt_fatal_hook) rt_fatal_hook(buf, pc);   // ne revient pas normalement
-    fprintf(stderr, "[recomp] fatal : %s\n", buf);
+    fprintf(stderr, "[recomp] fatal: %s\n", buf);
     fflush(stderr);
     abort();
 #endif
@@ -123,6 +125,19 @@ void rt_tailcall(CPUState* ctx, uint64_t target) {
     MUSTTAIL return fn(ctx);
 }
 
+// Saut indirect du code généré compilé par clang (clang_compat.h) : la cible est dans ctx->pad. Même corps que
+// rt_tailcall (clang refuse un appel terminal garanti vers une fonction de signature différente).
+void rt_tailjump(CPUState* ctx) {
+    const uint64_t target = ctx->pad;
+#ifndef RECOMP_BENCH
+    if (rt_call_hook) rt_call_hook(ctx, target);
+#endif
+    RecompFn fn = rt_lookup(target);
+    if (!fn) fatal(4, target, "saut indirect vers 0x%llx inconnu (lr=0x%llx)",
+                   (unsigned long long)target, (unsigned long long)ctx->x[30]);
+    MUSTTAIL return fn(ctx);
+}
+
 void rt_svc(CPUState* ctx, uint32_t imm, uint64_t pc) {
 #ifdef RECOMP_BENCH
     (void)imm;
@@ -131,23 +146,23 @@ void rt_svc(CPUState* ctx, uint32_t imm, uint64_t pc) {
     ctx->x[1] = 0;
 #else
     if (rt_svc_handler) return rt_svc_handler(ctx, imm, pc);
-    fatal(1, pc, "svc 0x%x non géré (pc=0x%llx)", imm, (unsigned long long)pc);
+    fatal(1, pc, "unsupported svc 0x%x (pc=0x%llx)", imm, (unsigned long long)pc);
 #endif
 }
 
 void rt_trap(CPUState* ctx, uint64_t pc, uint32_t word) {
     (void)ctx;
-    fatal(1, pc, "trap (brk/udf) 0x%08x à 0x%llx", word, (unsigned long long)pc);
+    fatal(1, pc, "trap (brk/udf) 0x%08x at 0x%llx", word, (unsigned long long)pc);
 }
 
 void rt_undefined(CPUState* ctx, uint64_t pc, uint32_t word) {
     (void)ctx;
-    fatal(6, pc, "instruction non allouée 0x%08x à 0x%llx", word, (unsigned long long)pc);
+    fatal(6, pc, "unallocated instruction 0x%08x at 0x%llx", word, (unsigned long long)pc);
 }
 
 void rt_unimpl(CPUState* ctx, uint64_t pc, uint32_t word) {
     (void)ctx;
-    fatal(2, pc, "instruction non implémentée 0x%08x à 0x%llx", word, (unsigned long long)pc);
+    fatal(2, pc, "unimplemented instruction 0x%08x at 0x%llx", word, (unsigned long long)pc);
 }
 
 uint64_t rt_mrs(CPUState* ctx, uint32_t enc, uint64_t pc) {
@@ -155,13 +170,13 @@ uint64_t rt_mrs(CPUState* ctx, uint32_t enc, uint64_t pc) {
     switch (enc) {   // (op0<<14)|(op1<<11)|(CRn<<7)|(CRm<<3)|op2
     case 0xD801: return 0x8444C004;   // CTR_EL0 : lignes I/D de 64 octets (valeur Cortex-A7x)
     }
-    fatal(2, pc, "mrs registre système 0x%x non géré à 0x%llx", enc, (unsigned long long)pc);
+    fatal(2, pc, "unsupported mrs system register 0x%x at 0x%llx", enc, (unsigned long long)pc);
 }
 
 void rt_msr(CPUState* ctx, uint32_t enc, uint64_t val, uint64_t pc) {
     (void)ctx;
     (void)val;
-    fatal(2, pc, "msr registre système 0x%x non géré à 0x%llx", enc, (unsigned long long)pc);
+    fatal(2, pc, "unsupported msr system register 0x%x at 0x%llx", enc, (unsigned long long)pc);
 }
 
 void rt_set_fpcr(CPUState* ctx, uint32_t v) {
@@ -190,13 +205,65 @@ uint64_t rt_cntfrq() {
     return f;
 }
 
+// Pause du compteur pendant un long blocage du côté hôte. Le moteur du jeu a un chien de garde (vwatchdog.c) : si sa
+// simulation ne donne plus signe de vie pendant environ 74 s d'après ce compteur, il arrête le jeu (« System vgame_sim
+// appears dead: last reported in 74282 ms ago », puis Abort ; issue n° 13 : RX 6800 XT, les shaders préparés au
+// démarrage par le pilote AMD ont pris plus longtemps que ce délai, écran noir puis arrêt). Sur la console, rien ne
+// bloque aussi longtemps. Entre rt_stall_begin et rt_stall_end (création de pipelines par le pilote, vk_render.cpp),
+// le compteur avance normalement pendant STALL_GRACE (5 s : une saccade ordinaire ne change donc rien), puis s'arrête ;
+// à la fin du blocage il reprend d'où il s'était arrêté. Pour le jeu, un blocage dure donc 5 s au plus.
+// Lecture sans verrou (compteur de séquence) : rt_cntvct est appelé très souvent.
+// RECOMP_NO_CLOCK_PAUSE=1 : pas de pause (pour reproduire l'arrêt par le chien de garde).
+namespace {
+constexpr int64_t STALL_GRACE = 5000000000ll;
+std::mutex g_stall_mx;
+int g_stall_niveau = 0;
+std::atomic<uint32_t> g_stall_seq{0};
+std::atomic<int64_t> g_stall_debut{0};    // ns du début du blocage en cours ; 0 : aucun
+std::atomic<int64_t> g_stall_retire{0};   // ns retirées au compteur par les blocages finis
+int64_t host_ns() {
+    using namespace std::chrono;
+    static const auto t0 = steady_clock::now();
+    return duration_cast<nanoseconds>(steady_clock::now() - t0).count();
+}
+bool stall_actif() {
+    static const bool non = getenv("RECOMP_NO_CLOCK_PAUSE") != nullptr;
+    return !non;
+}
+}  // namespace
+void rt_stall_begin() {
+    if (!stall_actif()) return;
+    std::lock_guard<std::mutex> lk(g_stall_mx);
+    if (g_stall_niveau++) return;
+    g_stall_seq.fetch_add(1, std::memory_order_acq_rel);
+    g_stall_debut.store(std::max<int64_t>(1, host_ns()), std::memory_order_relaxed);
+    g_stall_seq.fetch_add(1, std::memory_order_acq_rel);
+}
+void rt_stall_end() {
+    if (!stall_actif()) return;
+    std::lock_guard<std::mutex> lk(g_stall_mx);
+    if (--g_stall_niveau) return;
+    const int64_t duree = host_ns() - g_stall_debut.load(std::memory_order_relaxed);
+    g_stall_seq.fetch_add(1, std::memory_order_acq_rel);
+    if (duree > STALL_GRACE) g_stall_retire.fetch_add(duree - STALL_GRACE, std::memory_order_relaxed);
+    g_stall_debut.store(0, std::memory_order_relaxed);
+    g_stall_seq.fetch_add(1, std::memory_order_acq_rel);
+}
+
 uint64_t rt_cntvct() {
 #ifdef RECOMP_BENCH
     return 0x123456789ull;
 #else
-    using namespace std::chrono;
-    static const auto t0 = steady_clock::now();
-    auto ns = duration_cast<nanoseconds>(steady_clock::now() - t0).count();
+    int64_t ns, debut, retire;
+    for (;;) {
+        const uint32_t c = g_stall_seq.load(std::memory_order_acquire);
+        debut = g_stall_debut.load(std::memory_order_relaxed);
+        retire = g_stall_retire.load(std::memory_order_relaxed);
+        ns = host_ns();
+        if (!(c & 1) && g_stall_seq.load(std::memory_order_acquire) == c) break;
+    }
+    if (debut && ns > debut + STALL_GRACE) ns = debut + STALL_GRACE;   // blocage en cours : compteur arrêté
+    ns -= retire;
     return (uint64_t)((unsigned __int128)ns * rt_cntfrq() / 1000000000ull);
 #endif
 }
@@ -248,7 +315,7 @@ void stub_return_zero(CPUState* ctx) {
 #ifdef RECOMP_TRACE
 void rt_trace(CPUState* ctx, uint64_t pc) {
     ctx->pc = pc;
-    if (++g_steps > g_max_steps) fatal(3, pc, "limite de pas atteinte à 0x%llx", (unsigned long long)pc);
+    if (++g_steps > g_max_steps) fatal(3, pc, "step limit reached at 0x%llx", (unsigned long long)pc);
     if (!g_trace_on) return;
     g_trace.emplace_back();
     TraceEntry& e = g_trace.back();
@@ -281,7 +348,7 @@ void rt_trace_write(uint64_t addr, const void* data, uint32_t size) {
 void rt_push_ret(uint64_t ret) { g_shadow.push_back(ret); }
 void rt_check_ret(CPUState* ctx, uint64_t target, uint64_t pc) {
     (void)ctx;
-    if (g_shadow.empty()) fatal(5, pc, "ret sans appel à 0x%llx", (unsigned long long)pc);
+    if (g_shadow.empty()) fatal(5, pc, "ret without call at 0x%llx", (unsigned long long)pc);
     uint64_t expect = g_shadow.back();
     g_shadow.pop_back();
     if (expect != target)

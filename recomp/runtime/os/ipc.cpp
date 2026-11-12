@@ -72,7 +72,7 @@ struct StubService : Service {
         // sont presque toujours des Create…Service qui renvoient une interface : on fournit un
         // objet bouchon (journalisé) pour que le client continue.
         if (root && r.cmd <= 2 && r.in_size <= 16 && r.out_buf().size == 0) {
-            HLOG("ipc", "[deviné] %s : commande %u → objet bouchon", name.c_str(), r.cmd);
+            HLOG("ipc", "[guessed] %s: command %u → stub object", name.c_str(), r.cmd);
             r.out_objects.push_back(std::make_shared<StubService>(name + "#" + std::to_string(r.cmd), false));
             return;
         }
@@ -164,6 +164,12 @@ void parse(uint64_t buf, Parsed& p, Request& r) {
         b.mode = 0;
         r.c.push_back(b);
     }
+    // Les tampons de la requête partent vers les services, donc souvent vers le noyau de Windows (ReadFile directement
+    // dans la mémoire du jeu, svc_fs.cpp) : il échoue sur une page à la demande pas encore engagée, sans lever
+    // l'exception qui l'engagerait. On les engage d'avance.
+    for (auto* v : {&r.x, &r.a, &r.b, &r.w, &r.c})
+        for (auto& b : *v)
+            if (b.addr && b.size) mem_ensure(b.addr, b.size);
 }
 
 // écrit la réponse dans `buf` (même format HIPC)
@@ -202,7 +208,7 @@ void write_reply(uint64_t buf, uint64_t bufsize, const Request& r, bool tipc, bo
     w[0] = 0;
     w[1] = (uint32_t)nwords | (special ? 0x80000000u : 0);
     size_t total = w.size() * 4 + raw.size();
-    if (total > bufsize) panic("IPC : réponse trop grande (%zu > %llu)", total, (unsigned long long)bufsize);
+    if (total > bufsize) panic("IPC: response too large (%zu > %llu)", total, (unsigned long long)bufsize);
     memcpy((void*)buf, w.data(), w.size() * 4);
     memcpy((void*)(buf + w.size() * 4), raw.data(), raw.size());
 }
@@ -217,7 +223,7 @@ void Service::stub(Request& r) {
         first = g_seen.insert({name, r.cmd}).second;
     }
     if (first || g_verbose >= 2)
-        HLOG("ipc", "[bouchon] %s : commande %u (entrée %zu o, A%zu B%zu X%zu C%zu W%zu, "
+        HLOG("ipc", "[stub] %s: command %u (input %zu bytes, A%zu B%zu X%zu C%zu W%zu, "
              "handles c%zu m%zu)", name.c_str(), r.cmd, r.in_size, r.a.size(), r.b.size(),
              r.x.size(), r.c.size(), r.w.size(), r.copy_h.size(), r.move_h.size());
     r.out.assign(0x40, 0);
@@ -233,7 +239,7 @@ std::shared_ptr<Service> make_service(const std::string& name) {
 
 uint32_t ipc_open_service(const std::string& name) {
     bool known = factories().count(name) != 0;
-    HLOG("ipc", "ouverture du service « %s »%s", name.c_str(), known ? "" : " (bouchon)");
+    HLOG("ipc", "opening service '%s'%s", name.c_str(), known ? "" : " (stub)");
     return open_session(make_service(name));
 }
 
@@ -241,7 +247,7 @@ uint32_t ipc_new_session(std::shared_ptr<Service> s) { return open_session(std::
 
 uint32_t ipc_connect_named_port(const std::string& name) {
     if (name == "sm:") return open_session(std::make_shared<SmService>());
-    HLOG("ipc", "ConnectToNamedPort(« %s ») : port inconnu", name.c_str());
+    HLOG("ipc", "ConnectToNamedPort('%s'): unknown port", name.c_str());
     return 0;
 }
 
@@ -249,7 +255,7 @@ uint32_t ipc_send_sync_request(CPUState* ctx, uint32_t handle, uint64_t buf, uin
     (void)ctx;
     KSession* ks = dynamic_cast<KSession*>(kernel_get(handle));
     if (!ks) {
-        HLOG("ipc", "SendSyncRequest sur un handle invalide 0x%x", handle);
+        HLOG("ipc", "SendSyncRequest on an invalid handle 0x%x", handle);
         return kr::InvalidHandle;
     }
     Request r;
@@ -259,7 +265,7 @@ uint32_t ipc_send_sync_request(CPUState* ctx, uint32_t handle, uint64_t buf, uin
     std::shared_ptr<Service> target = ks->svc;
     bool tipc = p.type >= 16;
     if (p.type == 2 || p.type == 15) {   // Close (CMIF / TIPC)
-        HDBG("ipc", "fermeture de session %s", ks->svc->name.c_str());
+        HDBG("ipc", "closing session %s", ks->svc->name.c_str());
         return 0;
     }
     std::vector<uint32_t> out_ids;
@@ -287,13 +293,13 @@ uint32_t ipc_send_sync_request(CPUState* ctx, uint32_t handle, uint64_t buf, uin
             }
             target = ks->find(dom_obj);
             if (!target) {
-                HLOG("ipc", "%s : objet de domaine %u inconnu", ks->svc->name.c_str(), dom_obj);
+                HLOG("ipc", "%s: unknown domain object %u", ks->svc->name.c_str(), dom_obj);
                 return kr::InvalidHandle;
             }
             for (uint32_t i = 0; i < dom_nin; i++) r.in_objects.push_back(rd32(hdr + dom_size + 4 * i));
         }
         if (rd32(hdr) != SFCI)
-            HLOG("ipc", "%s : en-tête CMIF inattendu 0x%08x (type %u)", target->name.c_str(), rd32(hdr), p.type);
+            HLOG("ipc", "%s: unexpected CMIF header 0x%08x (type %u)", target->name.c_str(), rd32(hdr), p.type);
         r.cmd = rd32(hdr + 8);
         r.in = (const uint8_t*)(hdr + 16);
         size_t avail = 4ull * p.ndata - (hdr + 16 - p.data);
@@ -334,14 +340,14 @@ uint32_t ipc_send_sync_request(CPUState* ctx, uint32_t handle, uint64_t buf, uin
                 return 0;
             }
             default:
-                HLOG("ipc", "commande de contrôle %u inconnue", r.cmd);
+                HLOG("ipc", "unknown control command %u", r.cmd);
                 r.result = kr::NotImplemented;
                 write_reply(buf, size, r, false, false, {});
                 return 0;
             }
         }
     }
-    HDBG("ipc", "%s : commande %u (%s, %zu o)", target->name.c_str(), r.cmd, tipc ? "tipc" : "cmif", r.in_size);
+    HDBG("ipc", "%s: command %u (%s, %zu bytes)", target->name.c_str(), r.cmd, tipc ? "tipc" : "cmif", r.in_size);
     target->handle(r);
     // objets de sortie : ids de domaine ou nouvelles sessions
     for (auto& o : r.out_objects) {

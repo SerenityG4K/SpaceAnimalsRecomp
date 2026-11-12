@@ -77,11 +77,11 @@ struct Wav {
     void open(const char* path) {
         f = fopen(path, "wb");
         if (!f) {
-            HLOG("audio", "RECOMP_AUDIO_WAV : impossible de créer %s", path);
+            HLOG("audio", "RECOMP_AUDIO_WAV: cannot create %s", path);
             return;
         }
         header();
-        HLOG("audio", "mixage enregistré dans %s (48 kHz, stéréo, flottant)", path);
+        HLOG("audio", "mix saved to %s (48 kHz, stereo, float)", path);
     }
     void header() {   // tailles réécrites régulièrement : fichier lisible même si le processus est tué
         const uint32_t data = (uint32_t)std::min<uint64_t>(frames * 8, 0xFFFFFF00u);
@@ -133,17 +133,17 @@ struct Dev {
         *this = Dev{};
     }
     bool fail(const char* what, HRESULT hr, bool quiet) {
-        if (!quiet) HLOG("audio", "sortie audio : %s (0x%08lx)", what, (unsigned long)hr);
+        if (!quiet) HLOG("audio", "audio output: %s (0x%08lx)", what, (unsigned long)hr);
         close();
         return false;
     }
     bool open(bool quiet) {
         HRESULT hr = CoCreateInstance(kCLSID_MMDeviceEnumerator, nullptr, CLSCTX_ALL, kIID_IMMDeviceEnumerator, (void**)&en);
-        if (FAILED(hr)) return fail("énumérateur de périphériques indisponible", hr, quiet);
+        if (FAILED(hr)) return fail("device enumerator unavailable", hr, quiet);
         hr = en->GetDefaultAudioEndpoint(eRender, eConsole, &dev);
-        if (FAILED(hr)) return fail("aucun périphérique de sortie", hr, quiet);
+        if (FAILED(hr)) return fail("no output device", hr, quiet);
         hr = dev->Activate(kIID_IAudioClient, CLSCTX_ALL, nullptr, (void**)&client);
-        if (FAILED(hr)) return fail("activation du client audio refusée", hr, quiet);
+        if (FAILED(hr)) return fail("audio client activation refused", hr, quiet);
         WAVEFORMATEX* mixf = nullptr;
         uint32_t dev_rate = 0, dev_ch = 0;
         if (SUCCEEDED(client->GetMixFormat(&mixf)) && mixf) {
@@ -166,17 +166,17 @@ struct Dev {
                                 AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                                     AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                                 400000, 0, &wf.Format, nullptr);
-        if (FAILED(hr)) return fail("format 48 kHz stéréo flottant refusé", hr, quiet);
+        if (FAILED(hr)) return fail("48 kHz stereo float format refused", hr, quiet);
         ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        if (!ev || FAILED(client->SetEventHandle(ev))) return fail("événement de rendu", E_FAIL, quiet);
-        if (FAILED(client->GetBufferSize(&frames)) || !frames) return fail("taille du tampon", E_FAIL, quiet);
+        if (!ev || FAILED(client->SetEventHandle(ev))) return fail("render event", E_FAIL, quiet);
+        if (FAILED(client->GetBufferSize(&frames)) || !frames) return fail("buffer size", E_FAIL, quiet);
         hr = client->GetService(kIID_IAudioRenderClient, (void**)&render);
         if (FAILED(hr)) return fail("service de rendu", hr, quiet);
         BYTE* p = nullptr;
         if (SUCCEEDED(render->GetBuffer(frames, &p))) render->ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT);
         hr = client->Start();
-        if (FAILED(hr)) return fail("démarrage", hr, quiet);
-        HLOG("audio", "sortie audio Windows ouverte sur « %s » : 48 kHz stéréo flottant → périphérique %u Hz, %u canaux (tampon de %u trames)",
+        if (FAILED(hr)) return fail("start", hr, quiet);
+        HLOG("audio", "Windows audio output opened on '%s': 48 kHz stereo float → device %u Hz, %u channels (buffer of %u frames)",
              device_name(dev).c_str(), dev_rate, dev_ch, frames);
         g_active = true;
         return true;
@@ -204,7 +204,7 @@ void render_thread() {
         UINT32 pad = 0;
         HRESULT hr = d.client->GetCurrentPadding(&pad);
         if (FAILED(hr)) {   // périphérique débranché ou changé : réouverture (horloge virtuelle en attendant)
-            HLOG("audio", "sortie audio perdue (0x%08lx) : réouverture", (unsigned long)hr);
+            HLOG("audio", "audio output lost (0x%08lx): reopening", (unsigned long)hr);
             d.close();
             continue;
         }
@@ -228,7 +228,7 @@ void render_thread() {
 
 void start(MixFn mix) {
     if (getenv("RECOMP_NO_AUDIO")) {
-        HLOG("audio", "RECOMP_NO_AUDIO : pas de sortie audio (flux consommés par l'horloge virtuelle)");
+        HLOG("audio", "RECOMP_NO_AUDIO: no audio output (streams consumed by the virtual clock)");
         return;
     }
     g_mix = mix;

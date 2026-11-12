@@ -69,7 +69,7 @@ void handle(Request& r) {
     static std::set<uint32_t> seen;
     {
         std::lock_guard<std::mutex> lk(g_lk);
-        if (seen.insert(r.cmd).second) HLOG("bsd", "commande %u (entrée %zu o)", r.cmd, r.in_size);
+        if (seen.insert(r.cmd).second) HLOG("bsd", "command %u (input %zu bytes)", r.cmd, r.in_size);
     }
     int32_t a0 = r.arg<int32_t>(0), a1 = r.arg<int32_t>(4), a2 = r.arg<int32_t>(8);
     switch (r.cmd) {
@@ -232,8 +232,8 @@ void handle(Request& r) {
         if (local)
             for (auto& [k, f] : g_fds)
                 if (f.listening && port_of(f.addr) == port_of(a)) lst = k;
-        HLOG("bsd", "connect fd %d vers %u.%u.%u.%u:%u → %s", a0, a[4], a[5], a[6], a[7], port_of(a),
-             lst >= 0 ? "boucle locale" : "injoignable");
+        HLOG("bsd", "connect fd %d to %u.%u.%u.%u:%u → %s", a0, a[4], a[5], a[6], a[7], port_of(a),
+             lst >= 0 ? "loopback" : "unreachable");
         if (lst < 0) {                           // hors boucle locale : réseau injoignable
             it->second.failed_connect = true;
             g_cv.notify_all();

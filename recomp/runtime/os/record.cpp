@@ -63,7 +63,7 @@ const Config& cfg() {
         c.exit_after = getenv("RECOMP_RECORD_EXIT") != nullptr;
         if (!c.dir.empty()) {
             CreateDirectoryA(c.dir.c_str(), nullptr);
-            HLOG("rec", "extraits de cinématiques dans %s (%d au plus, %d à %d s)", c.dir.c_str(), c.clips,
+            HLOG("rec", "cutscene clips in %s (%d at most, %d to %d s)", c.dir.c_str(), c.clips,
                  c.min_frames / 30, c.max_frames / 30);
         }
         return c;
@@ -98,7 +98,7 @@ template <class T> void release(T*& p) { if (p) p->Release(), p = nullptr; }
 void writer_thread() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool mf = SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_LITE));
-    if (!mf) HLOG("rec", "Media Foundation indisponible : pas d'extraits");
+    if (!mf) HLOG("rec", "Media Foundation unavailable: no clips");
     IMFSinkWriter* sw = nullptr;
     DWORD si = 0;
     LONGLONG t = 0;
@@ -147,7 +147,7 @@ void writer_thread() {
             if (SUCCEEDED(hr)) hr = sw->BeginWriting();
             release(out), release(in);
             if (FAILED(hr)) {
-                HLOG("rec", "écrivain MP4 refusé (0x%08lx) pour %s", (unsigned long)hr, tmp.c_str());
+                HLOG("rec", "MP4 writer refused (0x%08lx) for %s", (unsigned long)hr, tmp.c_str());
                 release(sw);
             }
         } else if (m.k == Msg::Frame) {
@@ -179,12 +179,12 @@ void writer_thread() {
             if (ok && m.keep) {
                 DeleteFileW(widen(path).c_str());
                 ok = MoveFileW(widen(tmp).c_str(), widen(path).c_str());
-                HLOG("rec", "extrait écrit : %s (%ux%u, %.1f s)", path.c_str(), w, h, t / 1e7);
+                HLOG("rec", "clip written: %s (%ux%u, %.1f s)", path.c_str(), w, h, t / 1e7);
             } else {
                 DeleteFileW(widen(tmp).c_str());
             }
             if (m.last && cfg().exit_after) {
-                HLOG("rec", "derniers extraits écrits : fin du jeu (RECOMP_RECORD_EXIT)");
+                HLOG("rec", "last clips written: game exit (RECOMP_RECORD_EXIT)");
                 fflush(nullptr);
                 TerminateProcess(GetCurrentProcess(), 0);
             }
@@ -259,7 +259,7 @@ void end_clip(bool keep) {
     if (m.last) g_st.done = true;
     post(std::move(m));
     if (!good)
-        HLOG("rec", "extrait abandonné (%d images, luminance %.0f)", g_st.len, g_st.lsum / std::max(1, g_st.len));
+        HLOG("rec", "clip dropped (%d frames, luminance %.0f)", g_st.len, g_st.lsum / std::max(1, g_st.len));
 }
 
 }  // namespace
@@ -276,7 +276,7 @@ void frame(const uint8_t* px, uint32_t w, uint32_t h, uint64_t) {
     const bool cine = bar >= h * 6 / 100 && bar <= h * 22 / 100;
     static uint64_t n_calls = 0;
     if (n_calls++ % 300 == 0)
-        HLOG("rec", "image %llu : %ux%u, bande %u, cinématique %d, extraits %d", (unsigned long long)n_calls, w, h, bar,
+        HLOG("rec", "frame %llu: %ux%u, bar %u, cutscene %d, clips %d", (unsigned long long)n_calls, w, h, bar,
              (int)cine, g_st.clips);
     g_st.since++;
     // une image ratée (fondu au noir, plan très sombre) ne coupe pas une cinématique : 0,5 s de tolérance
@@ -307,8 +307,8 @@ void frame(const uint8_t* px, uint32_t w, uint32_t h, uint64_t) {
         Msg m{Msg::Start};
         m.path = path, m.w = g_st.cw, m.h = g_st.ch;
         post(std::move(m));
-        HLOG("rec", "extrait %d commencé (bande %u, zone %ux%u, %s)", g_st.clips + 1, bar, g_st.cw, g_st.ch,
-             cut ? "changement de plan" : "attente");
+        HLOG("rec", "clip %d started (bar %u, area %ux%u, %s)", g_st.clips + 1, bar, g_st.cw, g_st.ch,
+             cut ? "scene change" : "waiting");
     } else if (cut && g_st.len >= c.max_frames * 2 / 3) {   // fin propre sur un changement de plan
         end_clip(true);
         return;

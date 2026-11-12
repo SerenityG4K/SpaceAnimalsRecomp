@@ -56,7 +56,7 @@ struct Romfs {
     void build() {
         nup = CreateFileA(g_nup_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
-        if (nup == INVALID_HANDLE_VALUE) HLOG("fs", "conteneur introuvable : %s", g_nup_path.c_str());
+        if (nup == INVALID_HANDLE_VALUE) HLOG("fs", "container not found: %s", g_nup_path.c_str());
         const uint32_t NONE = 0xFFFFFFFFu, NB = 3;
         std::vector<uint8_t> dirmeta, filemeta;
         auto put32 = [](std::vector<uint8_t>& v, uint32_t x) {
@@ -90,7 +90,7 @@ struct Romfs {
                 for (size_t k; (k = fread(buf, 1, sizeof buf, of)) > 0;) host->insert(host->end(), buf, buf + k);
                 fclose(of);
                 rf.size = host->size();
-                HLOG("fs", "romfs : /%s remplacé par %s (%zu o)", rf.path.c_str(), (odir + rf.path).c_str(), host->size());
+                HLOG("fs", "romfs: /%s replaced by %s (%zu bytes)", rf.path.c_str(), (odir + rf.path).c_str(), host->size());
             } else if (rf.path == "veclipse_build.cvar" && nup != INVALID_HANDLE_VALUE && rf.size < 65536 &&
                        !getenv("RECOMP_NO_CVAR_PATCH")) {
                 // Cadence : sans « out.desired_frame_time », le régulateur du moteur vise ≈ 18 ms (55 img/s).
@@ -127,12 +127,12 @@ struct Romfs {
                         if (!empty) txt.insert(last + 1, ",");
                         host = std::make_shared<std::vector<uint8_t>>(txt.begin(), txt.end());
                         rf.size = host->size();
-                        for (auto& kv : add) HLOG("fs", "variable du moteur : %s = %s", kv.first.c_str(), kv.second.c_str());
+                        for (auto& kv : add) HLOG("fs", "engine variable: %s = %s", kv.first.c_str(), kv.second.c_str());
                     }
                 }
             }
             if (rf.path.find('/') != std::string::npos)
-                HLOG("fs", "romfs : sous-dossiers non gérés (%s)", rf.path.c_str());
+                HLOG("fs", "romfs: unsupported subfolders (%s)", rf.path.c_str());
             uint32_t off = (uint32_t)filemeta.size();
             uint32_t b = hash(0, rf.path) % NB;
             size_t nlen = rf.path.size(), padded = (nlen + 3) & ~size_t(3);
@@ -147,7 +147,7 @@ struct Romfs {
             filemeta.insert(filemeta.end(), rf.path.begin(), rf.path.end());
             filemeta.resize(filemeta.size() + padded - nlen, 0);
             files.push_back(F{data, rf.size, rf.nup_offset, host});
-            HLOG("fs", "romfs : /%s (%.1f Mo)", rf.path.c_str(), rf.size / 1048576.0);
+            HLOG("fs", "romfs: /%s (%.1f MB)", rf.path.c_str(), rf.size / 1048576.0);
             data = (data + rf.size + 15) & ~15ull;
         }
         uint64_t h[10];
@@ -194,6 +194,11 @@ struct Romfs {
                         continue;
                     }
                     uint64_t src = f->nup_off + (rel - f->off);
+                    // ReadFile écrit directement dans la mémoire du jeu, sans faute que le runtime puisse rattraper :
+                    // garde du noyau tenue de l'engagement de la plage à la fin de la lecture (aucune page vide n'est
+                    // rendue à Windows pendant ce temps, memory.cpp)
+                    MemNoyau garde;
+                    mem_ensure((uint64_t)dst, n);
                     for (uint64_t done = 0; done < n;) {
                         DWORD chunk = (DWORD)std::min<uint64_t>(n - done, 1u << 30), got = 0;
                         OVERLAPPED ov{};
@@ -247,6 +252,77 @@ fs::path host_root(const char* sub) {
     std::error_code ec;
     fs::create_directories(p, ec);
     return p;
+}
+
+// Dossier des sauvegardes du joueur.
+// Jusqu'à la 1.0.2 : « save » à côté de l'exécutable (recomp\build\full\save), donc dans le dossier d'installation :
+// perdu quand le joueur supprimait ce dossier pour réinstaller. Depuis la 1.0.3 : %APPDATA%\SpaceAnimalsRecomp\save,
+// commun à toutes les installations. Au premier lancement, une sauvegarde trouvée à l'ancien endroit y est copiée ;
+// l'ancienne reste en place. RECOMP_SAVE_DIR impose un autre dossier (essais : la sauvegarde du joueur reste intacte ;
+// le 2026-11-09, un essai avait lancé une campagne dans celle du joueur).
+size_t compter_fichiers(const fs::path& p) {
+    std::error_code ec;
+    size_t n = 0;
+    for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+        if (it->is_regular_file(ec)) n++;
+    return n;
+}
+
+const fs::path& save_root() {
+    static const fs::path racine = [] {
+        std::error_code ec;
+        char exe[MAX_PATH];
+        GetModuleFileNameA(nullptr, exe, MAX_PATH);
+        const fs::path ancien = fs::path(exe).parent_path() / "save";
+        if (const char* alt = getenv("RECOMP_SAVE_DIR"); alt && *alt) {
+            fs::path p = fs::absolute(fs::path(alt), ec);
+            fs::create_directories(p, ec);
+            HLOG("fs", "saves: %s (RECOMP_SAVE_DIR, %zu file(s))", p.u8string().c_str(), compter_fichiers(p));
+            return p;
+        }
+        const wchar_t* appdata = _wgetenv(L"APPDATA");
+        if (!appdata || !*appdata) {   // pas de profil : ancien emplacement
+            fs::create_directories(ancien, ec);
+            HLOG("fs", "saves: %s (APPDATA missing: next to the game, %zu file(s))", ancien.u8string().c_str(),
+                 compter_fichiers(ancien));
+            return ancien;
+        }
+        const fs::path nouveau = fs::path(appdata) / "SpaceAnimalsRecomp" / "save";
+        const size_t n_ancien = fs::is_directory(ancien, ec) ? compter_fichiers(ancien) : 0;
+        size_t n_nouveau = fs::is_directory(nouveau, ec) ? compter_fichiers(nouveau) : 0;
+        fs::create_directories(nouveau, ec);
+        if (ec) {   // dossier du profil inaccessible : on reste à l'ancien endroit plutôt que de perdre la sauvegarde
+            HLOG("fs", "saves: %s inaccessible (%s): next to the game, %s", nouveau.u8string().c_str(),
+                 ec.message().c_str(), ancien.u8string().c_str());
+            fs::create_directories(ancien, ec);
+            return ancien;
+        }
+        if (!n_nouveau && n_ancien) {   // première fois : la sauvegarde de l'ancien emplacement est reprise
+            fs::copy(ancien, nouveau, fs::copy_options::recursive | fs::copy_options::skip_existing, ec);
+            n_nouveau = compter_fichiers(nouveau);
+            if (ec || n_nouveau < n_ancien) {
+                HLOG("fs", "saves: cannot move %s over (%s): the game keeps the old folder",
+                     ancien.u8string().c_str(), ec.message().c_str());
+                return ancien;
+            }
+            HLOG("fs", "saves: %zu file(s) copied from %s (old location, left in place)", n_ancien,
+                 ancien.u8string().c_str());
+            if (FILE* f = _wfopen((ancien / L"SAVE MOVED - SAUVEGARDE DEPLACEE.txt").c_str(), L"wb")) {
+                const std::string t = "Since version 1.0.3, saves are kept in:\r\n  " + nouveau.u8string() +
+                                      "\r\nThis folder is the copy from before the move; the game no longer uses it.\r\n\r\n"
+                                      "Depuis la version 1.0.3, les sauvegardes sont dans :\r\n  " + nouveau.u8string() +
+                                      "\r\nCe dossier est la copie d'avant le deplacement ; le jeu ne s'en sert plus.\r\n";
+                fwrite(t.data(), 1, t.size(), f);
+                fclose(f);
+            }
+        } else if (n_nouveau && n_ancien) {
+            HLOG("fs", "saves: old folder %s ignored (%zu file(s)): the game uses %s", ancien.u8string().c_str(),
+                 n_ancien, nouveau.u8string().c_str());
+        }
+        HLOG("fs", "saves: %s (%zu file(s))", nouveau.u8string().c_str(), n_nouveau);
+        return nouveau;
+    }();
+    return racine;
 }
 
 std::string guest_path(const Request& r) {
@@ -346,7 +422,8 @@ std::shared_ptr<Service> make_dir(fs::path p, uint32_t filter) {
 
 std::shared_ptr<Service> make_host_fs(const char* n, fs::path root) {
     HLOG("fs", "%s → %s", n, root.u8string().c_str());
-    return svc(n, [root](Request& r) {
+    const bool sauvegarde = !strcmp(n, "fs:save");
+    return svc(n, [root, sauvegarde](Request& r) {
         fs::path p;
         std::error_code ec;
         std::string gp = guest_path(r);
@@ -370,6 +447,12 @@ std::shared_ptr<Service> make_host_fs(const char* n, fs::path root) {
         }
         case 8: {   // OpenFile(mode, path)
             if (!fs::is_regular_file(p, ec)) { r.result = FS_PATH_NOT_FOUND; return true; }
+            if (sauvegarde) {   // journal : le jeu a bien retrouvé (ou réécrit) sa sauvegarde
+                static std::atomic<int> nlog{0};
+                if (nlog++ < 12)
+                    HLOG("fs", "save opened for %s: %s (%llu bytes)", (r.arg<uint32_t>(0) & 2) ? "writing" : "reading",
+                         gp.c_str(), (unsigned long long)fs::file_size(p, ec));
+            }
             r.out_objects.push_back(make_file(p, r.arg<uint32_t>(0)));
             return true;
         }
@@ -382,7 +465,7 @@ std::shared_ptr<Service> make_host_fs(const char* n, fs::path root) {
         case 11: r.push<int64_t>(4ll << 30); return true;
         case 12: r.push<int64_t>(8ll << 30); return true;
         }
-        HLOG("fs", "%s : commande %u sur « %s »", "fs:IFileSystem", r.cmd, gp.c_str());
+        HLOG("fs", "%s: command %u on '%s'", "fs:IFileSystem", r.cmd, gp.c_str());
         return false;
     });
 }
@@ -394,16 +477,7 @@ std::shared_ptr<Service> make_fsp() {
         case 18: r.out_objects.push_back(make_host_fs("fs:sdcard", host_root("sdcard"))); return true;
         case 22: return true;                                        // CreateSaveDataFileSystem
         case 51: case 52: case 53: {                                 // OpenSaveDataFileSystem…
-            // RECOMP_SAVE_DIR=dossier : sauvegarde ailleurs que dans save/ (essais automatisés : la sauvegarde
-            // du joueur reste intacte ; le 2026-11-09, un essai avait lancé une campagne dans celle du joueur)
-            static const char* alt = getenv("RECOMP_SAVE_DIR");
-            fs::path root = host_root("save");
-            if (alt && *alt) {
-                std::error_code ec;
-                root = fs::absolute(fs::path(alt), ec);
-                fs::create_directories(root, ec);
-            }
-            r.out_objects.push_back(make_host_fs("fs:save", root));
+            r.out_objects.push_back(make_host_fs("fs:save", save_root()));   // %APPDATA%\SpaceAnimalsRecomp\save
             return true;
         }
         case 61:                                                     // OpenSaveDataInfoReader…
@@ -413,7 +487,7 @@ std::shared_ptr<Service> make_fsp() {
             }));
             return true;
         case 200: case 203: case 205:                                // OpenDataStorageByCurrentProcess…
-            HLOG("fs", "ouverture de la romfs (commande %u)", r.cmd);
+            HLOG("fs", "opening the romfs (command %u)", r.cmd);
             r.out_objects.push_back(make_romfs_storage());
             return true;
         case 202: r.result = FS_TARGET_NOT_FOUND; return true;      // OpenDataStorageByDataId
@@ -430,4 +504,7 @@ struct Registrar {
 } g_reg;
 
 }  // namespace
+// Dossier des sauvegardes (reprise de l'ancien emplacement faite au besoin) : option --save-dir de l'exécutable.
+std::string save_dir_path() { return save_root().u8string(); }
+
 }  // namespace hos

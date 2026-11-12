@@ -54,7 +54,7 @@ void log_draw(const GfxState& s, const Op& o, int idx) {
     g_prog.find_key(s.program, &p);
     std::string st;
     for (auto& x : p.stages) st += std::to_string(x.stage) + ":" + x.hash + " ";
-    HLOG("frame", "  #%d %s prim %llu n %llu | prog « %s » %s| rt0 %s (%d cibles) | vp %d,%d %dx%d | ds %02x %02x %02x %02x %02x %02x %02x %02x poly %08x",
+    HLOG("frame", "  #%d %s prim %llu n %llu | prog '%s' %s| rt0 %s (%d targets) | vp %d,%d %dx%d | ds %02x %02x %02x %02x %02x %02x %02x %02x poly %08x",
          idx, opname(o.t), (unsigned long long)o.a[0], (unsigned long long)(o.t == OpType::DrawArrays ? o.a[2] : o.a[2]),
          p.label.c_str(), st.c_str(), texdesc(s.rt[0]).c_str(), s.nrt, s.vp[0], s.vp[1], s.vp[2], s.vp[3],
          s.ds[0], s.ds[1], s.ds[2], s.ds[3], s.ds[4], s.ds[5], s.ds[6], s.ds[7], s.poly);
@@ -85,21 +85,21 @@ void log_draw(const GfxState& s, const Op& o, int idx) {
                 snprintf(b, sizeof b, " ss%d=%llx", k, (unsigned long long)(s.sepsamp[stg][k] >> 20));
                 t += b;
             }
-        if (!u.empty() || !t.empty()) HLOG("frame", "      étage %d :%s%s", stg, u.c_str(), t.c_str());
+        if (!u.empty() || !t.empty()) HLOG("frame", "      stage %d:%s%s", stg, u.c_str(), t.c_str());
     }
     std::string va;
     for (int k = 0; k < s.nattr; k++) {
         uint32_t a = s.attribs[k];
         char b[48];
-        snprintf(b, sizeof b, " a%d(fmt %u, flux %u, +%u)", k, a & 0x3ff, (a >> 10) & 0x1f, a >> 15);
+        snprintf(b, sizeof b, " a%d(fmt %u, stream %u, +%u)", k, a & 0x3ff, (a >> 10) & 0x1f, a >> 15);
         va += b;
     }
     for (int k = 0; k < s.nstream; k++) {
         char b[48];
-        snprintf(b, sizeof b, " s%d(pas %u, vb %llx)", k, s.streams[k][0], (unsigned long long)s.vb[k].addr);
+        snprintf(b, sizeof b, " s%d(stride %u, vb %llx)", k, s.streams[k][0], (unsigned long long)s.vb[k].addr);
         va += b;
     }
-    if (!va.empty()) HLOG("frame", "      sommets :%s", va.c_str());
+    if (!va.empty()) HLOG("frame", "      vertices:%s", va.c_str());
 }
 
 // Diagnostic (RECOMP_DRAW_DUMP=image:n) : écrit dans build/full/drawdump/ les tampons uniformes de
@@ -173,7 +173,7 @@ void perf_report_ops() {
         o += b;
     }
     for (int i = 0; i < 96; i++) g_op_ns[i] = 0, g_op_n[i] = 0;
-    HLOG("perf", "opérations (ms/image, nombre) :%s", o.c_str());
+    HLOG("perf", "operations (ms/frame, count):%s", o.c_str());
 }
 void nvn_execute(const std::vector<Op>& ops) {
     auto t_exec = std::chrono::steady_clock::now();
@@ -190,7 +190,7 @@ void nvn_execute(const std::vector<Op>& ops) {
     GfxState& s = g_st;
     bool log = stats_frame >= 0 && g_frame.load() >= (uint64_t)stats_frame &&
                g_frame.load() < (uint64_t)(stats_frame + stats_count);
-    if (log) HLOG("frame", "--- soumission de %zu commandes (image %llu)", ops.size(), (unsigned long long)g_frame.load());
+    if (log) HLOG("frame", "--- submitting %zu commands (frame %llu)", ops.size(), (unsigned long long)g_frame.load());
     // RECOMP_RT_SNAPSHOT=N : captures de toutes les soumissions commencées pendant l'image N (le
     // compteur avance à la présentation, sur un autre fil, en cours de soumission)
     static const char* rt_env = getenv("RECOMP_RT_SNAPSHOT");
@@ -386,7 +386,7 @@ void nvn_execute(const std::vector<Op>& ops) {
         {
             static const long tl = getenv("RECOMP_TS_LOG") ? atol(getenv("RECOMP_TS_LOG")) : 0;
             if (tl && g_frame.load() >= (uint64_t)tl && g_frame.load() < (uint64_t)tl + 4)
-                HLOG("ts", "  ReportCounter type %llu → %llx à %.3f ms", (unsigned long long)a[0],
+                HLOG("ts", "  ReportCounter type %llu → %llx at %.3f ms", (unsigned long long)a[0],
                      (unsigned long long)a[1], gpu_ns() / 1e6);
         }
             if (a[1] && mem_valid(a[1], 16)) {
@@ -445,7 +445,7 @@ void nvn_execute(const std::vector<Op>& ops) {
         case OpType::UpdateUniformBuffer: {  // (addr, size, offset, dataSize, data)
             static int nlog = 0;
             if (nlog++ < 8)
-                HLOG("nvn", "UpdateUniformBuffer 0x%llx (taille 0x%llx) + 0x%llx : %zu o", (unsigned long long)a[0],
+                HLOG("nvn", "UpdateUniformBuffer 0x%llx (size 0x%llx) + 0x%llx: %zu bytes", (unsigned long long)a[0],
                      (unsigned long long)a[1], (unsigned long long)a[2], o.blob.size());
             if (a[0] && !o.blob.empty() && a[2] + o.blob.size() <= a[1] && mem_valid(a[0] + a[2], o.blob.size()))
                 memcpy((void*)(a[0] + a[2]), o.blob.data(), o.blob.size());
@@ -461,7 +461,7 @@ void nvn_execute(const std::vector<Op>& ops) {
                 log_draw(s, o, idx);
                 break;
             case OpType::RenderTargets:
-                HLOG("frame", "  #%d cibles : %s | %s | %s, profondeur %s", idx, texdesc(s.rt[0]).c_str(),
+                HLOG("frame", "  #%d targets: %s | %s | %s, depth %s", idx, texdesc(s.rt[0]).c_str(),
                      texdesc(s.rt[1]).c_str(), texdesc(s.rt[2]).c_str(), texdesc(s.depth).c_str());
                 break;
             case OpType::SepTextures: case OpType::SepSamplers: {
@@ -471,7 +471,7 @@ void nvn_execute(const std::vector<Op>& ops) {
                     snprintf(b, sizeof b, " %llx", (unsigned long long)((const uint64_t*)o.blob.data())[k]);
                     v += b;
                 }
-                HLOG("frame", "  #%d %s étage %llu, premier %llu, nombre %llu :%s", idx, opname(o.t), (unsigned long long)a[0],
+                HLOG("frame", "  #%d %s stage %llu, first %llu, count %llu:%s", idx, opname(o.t), (unsigned long long)a[0],
                      (unsigned long long)a[1], (unsigned long long)a[2], v.c_str());
                 break;
             }
@@ -483,12 +483,12 @@ void nvn_execute(const std::vector<Op>& ops) {
             case OpType::ClearColor: {   // valeurs réelles (copiées dans le blob)
                 float c[4] = {};
                 if (o.blob.size() >= 16) memcpy(c, o.blob.data(), 16);
-                HLOG("frame", "  #%d ClearColor cible %llu masque %llx couleur %g %g %g %g", idx, (unsigned long long)a[0],
+                HLOG("frame", "  #%d ClearColor target %llu mask %llx color %g %g %g %g", idx, (unsigned long long)a[0],
                      (unsigned long long)a[2], c[0], c[1], c[2], c[3]);
                 break;
             }
             default:
-                HLOG("frame", "  #%d %s (%llx %llx %llx %llx) f %g %g %g %g, %zu o", idx, opname(o.t), (unsigned long long)a[0],
+                HLOG("frame", "  #%d %s (%llx %llx %llx %llx) f %g %g %g %g, %zu bytes", idx, opname(o.t), (unsigned long long)a[0],
                      (unsigned long long)a[1], (unsigned long long)a[2], (unsigned long long)a[3], o.f[0], o.f[1], o.f[2],
                      o.f[3], o.blob.size());
             }
