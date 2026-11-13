@@ -158,6 +158,7 @@ SpaceAnimalsRecomp so far.
 | 🗺️ | amiibo | 0% | Planned: the game's amiibo features |
 | 🗺️ | Controller remapping and several controllers | 0% | Planned |
 | 🗺️ | PlayStation and Switch Pro controllers, rumble | 0% | Planned (asked for in #3) |
+| 🗺️ | Ultrawide (21:9) | 0% | Possibly feasible, not started (asked for in #2) |
 | 🗺️ | Linux | 0% | Planned |
 
 ✅ done · 🔧 in progress · 🗺️ roadmap
