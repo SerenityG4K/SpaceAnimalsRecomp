@@ -163,6 +163,7 @@ SpaceAnimalsRecomp so far.
 | 🗺️ | amiibo | 0% | Planned: the game's amiibo features |
 | 🗺️ | Several controllers at once | 0% | Planned |
 | 🗺️ | Ultrawide (21:9, 32:9) | 0% | Possibly feasible, not started (asked for in #2) |
+| 🗺️ | HDR | 0% | Planned: the game has HDR built in, it has to be turned on for PC screens (asked for in #30) |
 | 🗺️ | 5.1 surround sound | 0% | Planned, as an experimental option: the game already mixes in 5.1 (asked for in #28) |
 | 🗺️ | Linux | 0% | Planned |
 
