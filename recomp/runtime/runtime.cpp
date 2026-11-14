@@ -66,11 +66,50 @@ namespace {
 }
 }  // namespace
 
+// Cache des appels indirects (soir du 2026-11-12). Chaque appel indirect du jeu (méthode virtuelle, pointeur de
+// fonction, saut de table) cherchait sa cible par dichotomie dans la table de toutes les fonctions (≈ 300 000 entrées,
+// 18 comparaisons dispersées en mémoire : ≈ 3,5 % du temps des fils du jeu dans le profil d'une mission). Les cibles
+// sont peu nombreuses : un cache à accès direct de 16 384 entrées répond d'abord. Chaque entrée porte un compteur de
+// version (pair : stable, impair : en cours d'écriture) ; un lecteur qui voit la version changer ou impaire passe par
+// la recherche complète, un écrivain qui ne prend pas l'entrée du premier coup renonce. Vidé à chaque inscription de
+// fonction (une fonction native peut remplacer une cible déjà mise en cache). RECOMP_NO_CALL_CACHE=1 : sans cache.
+namespace {
+struct CibleCache {
+    std::atomic<uint32_t> version{0};
+    std::atomic<uint64_t> addr{0};
+    std::atomic<RecompFn> fn{nullptr};
+};
+constexpr size_t CIBLES_N = 1 << 14;
+CibleCache g_cibles[CIBLES_N];
+inline size_t cible_case(uint64_t addr) { return (size_t)((addr >> 2) ^ (addr >> 16)) & (CIBLES_N - 1); }
+void cibles_ecrire(CibleCache& c, uint64_t addr, RecompFn fn) {
+    uint32_t v = c.version.load(std::memory_order_relaxed);
+    if ((v & 1) || !c.version.compare_exchange_strong(v, v + 1, std::memory_order_acquire)) return;
+    c.addr.store(addr, std::memory_order_relaxed);
+    c.fn.store(fn, std::memory_order_relaxed);
+    c.version.store(v + 2, std::memory_order_release);
+}
+void cibles_vider() {
+    for (CibleCache& c : g_cibles) {
+        for (int essai = 0; essai < 1000; essai++) {   // une écriture en cours finit en quelques nanosecondes
+            uint32_t v = c.version.load(std::memory_order_relaxed);
+            if (!(v & 1) && c.version.compare_exchange_strong(v, v + 1, std::memory_order_acquire)) {
+                c.addr.store(0, std::memory_order_relaxed);
+                c.fn.store(nullptr, std::memory_order_relaxed);
+                c.version.store(v + 2, std::memory_order_release);
+                break;
+            }
+        }
+    }
+}
+}  // namespace
+
 void rt_register_functions(const uint64_t* addrs, const RecompFn* fns, size_t n) {
     auto& d = dispatch();
     d.tab.reserve(d.tab.size() + n);
     for (size_t i = 0; i < n; i++) d.tab.emplace_back(addrs[i], fns[i]);
     d.sorted = false;
+    cibles_vider();
 }
 
 // Tri définitif de la table (à appeler avant de lancer des threads invités). En cas de
@@ -88,11 +127,22 @@ void rt_dispatch_finalize() {
     }
     d.tab.swap(out);
     d.sorted = true;
+    cibles_vider();
 }
 
 const std::vector<std::pair<uint64_t, RecompFn>>& rt_dispatch_table() { return dispatch().tab; }
 
 RecompFn rt_lookup(uint64_t addr) {
+    static const bool sans_cache = getenv("RECOMP_NO_CALL_CACHE") != nullptr;
+    CibleCache& c = g_cibles[cible_case(addr)];
+    if (!sans_cache) {
+        const uint32_t v1 = c.version.load(std::memory_order_acquire);
+        if (!(v1 & 1)) {
+            const uint64_t a = c.addr.load(std::memory_order_relaxed);
+            const RecompFn f = c.fn.load(std::memory_order_relaxed);
+            if (a == addr && f && c.version.load(std::memory_order_acquire) == v1) return f;
+        }
+    }
     auto& d = dispatch();
     if (!d.sorted) {
         std::sort(d.tab.begin(), d.tab.end(),
@@ -101,7 +151,10 @@ RecompFn rt_lookup(uint64_t addr) {
     }
     auto it = std::lower_bound(d.tab.begin(), d.tab.end(), addr,
                                [](const auto& e, uint64_t a) { return e.first < a; });
-    if (it != d.tab.end() && it->first == addr) return it->second;
+    if (it != d.tab.end() && it->first == addr) {
+        if (!sans_cache) cibles_ecrire(c, addr, it->second);
+        return it->second;
+    }
     return nullptr;
 }
 

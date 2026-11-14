@@ -2,7 +2,10 @@
 """Compile le launcher : lanceur.exe à la racine du projet, à côté de recomp/, comme dans le paquet (Win32, Direct2D,
 DirectWrite, Media Foundation ; aucune DLL à fournir à côté).
 
-  python construire.py [--out lanceur_new.exe]   # g++ et windres de MSYS2 (ucrt64) ou du PATH
+  python construire.py [--out lanceur_new.exe] [--classe NomDeClasse]   # g++ et windres de MSYS2 (ucrt64) ou du PATH
+
+--classe : version d'essai avec une autre classe de fenêtre (instance unique par classe), qui peut tourner à côté du
+launcher du joueur.
 """
 import os
 import shutil
@@ -10,7 +13,7 @@ import subprocess
 import sys
 
 ICI = os.path.dirname(os.path.abspath(__file__))
-SOURCES = ["lanceur.cpp", "dessin.cpp", "video.cpp", "textes.cpp"]
+SOURCES = ["lanceur.cpp", "dessin.cpp", "video.cpp", "textes.cpp", "manette.cpp"]
 LIBS = ["-ld3d11", "-ldxgi", "-ld2d1", "-ldwrite", "-lwindowscodecs", "-lmfplat", "-lmfreadwrite", "-lmfuuid", "-lole32",
         "-loleaut32", "-luuid", "-lshell32", "-lshlwapi", "-ldwmapi", "-lwinmm"]
 
@@ -58,8 +61,17 @@ def main():
     if r.returncode:
         print(r.stdout + r.stderr)
         return 1
+    # en-têtes Vulkan du moteur (liste des cartes graphiques, lanceur.cpp : vulkan-1.dll est chargé à l'exécution)
+    vulkan = os.path.join("..", "runtime", "third_party")
+    classe = []
+    if "--classe" in sys.argv:
+        nom = sys.argv[sys.argv.index("--classe") + 1]
+        if not nom.isalnum():
+            print("--classe : lettres et chiffres seulement")
+            return 1
+        classe = [f'-DLANCEUR_CLASSE=L"{nom}"']
     cmd = [gxx, "-std=c++20", "-O2", "-municode", "-mwindows", "-Wall", "-Wno-unknown-pragmas", "-static", "-static-libgcc",
-           "-static-libstdc++", "-B" + sans_manifeste + "/", *SOURCES, res, "-o", sortie, *LIBS]
+           "-static-libstdc++", "-I" + vulkan, *classe, "-B" + sans_manifeste + "/", *SOURCES, res, "-o", sortie, *LIBS]
     r = subprocess.run(cmd, cwd=ICI, env=env, capture_output=True, text=True)
     messages = (r.stdout + r.stderr).strip()
     if messages:

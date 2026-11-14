@@ -64,15 +64,18 @@ The only configuration tested so far is a powerful one: AMD Ryzen 7 9700X, NVIDI
 experimental and not optimized yet, so a less powerful PC may not reach a steady 60 fps.
 
 **About performance**: on Switch 2, the game needs DLSS to run smoothly: it draws at a lower resolution and DLSS
-upscales the picture. SpaceAnimalsRecomp has no DLSS yet and draws everything at native resolution. The picture is
-sharper, but it needs a lot more power from your graphics card. DLSS on PC is on the roadmap.
+upscales the picture. By default SpaceAnimalsRecomp draws everything at native resolution: the picture is sharper, but
+it needs a lot more power from your graphics card. Since 1.1.0, **GRAPHICS** in the launcher has a lower 3D rendering
+scale, AMD FSR (all cards) and NVIDIA DLSS (RTX cards), all experimental. They help when your graphics card is what
+holds the game back.
 
 **Handheld PCs:** not tested yet on handhelds such as the Steam Deck, Lenovo Legion Go or ASUS ROG Ally. On the Steam
 Deck (SteamOS), the Windows build would have to run through Proton. Feedback is welcome in the
 [Issues](https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues).
 
-1. Download `SpaceAnimalsRecomp-1.0.3-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
-   It bundles everything the build needs (Python, Clang, GCC, glslang): nothing else to install.
+1. Download `SpaceAnimalsRecomp-1.1.0-windows.zip` from [Releases](https://github.com/SerenityG4K/SpaceAnimalsRecomp/releases).
+   It bundles everything the build and the game need (Python, Clang, GCC, glslang, SDL3, and the FSR and DLSS
+   libraries): nothing else to install.
 2. Extract it to a folder you can write to, **not** Program Files, whose path has only Latin characters, for example
    `C:\Games\StarFox`. Spaces are fine: the compiler is then copied once to `C:\ProgramData\StarFoxRecomp` (about 400 MB).
 3. Run `lanceur.exe`. Choose your copy (**COPY › choose**: your `.nup` file), then click **BUILD THE GAME**.
@@ -82,8 +85,9 @@ Deck (SteamOS), the Windows build would have to run through Proton. Feedback is 
    - It then compiles every shader for your GPU, like recent PC games do on their first launch (about a minute), so
      there is no shader compilation stutter in game. Nothing opens by itself during the build.
 4. Click **PLAY**. Under the button, choose **FULL SCREEN** or **WINDOWED** (Alt+Enter or F11 also switch in game).
-   **SETTINGS** has the game language (15 choices), resolution (up to 4K), frame rate, native or console-like 3D
-   rendering, volume and update checks.
+   **SETTINGS** has the game language (15 choices), resolution (up to 4K), frame rate, volume, update checks, the
+   game's location (**Move…**) and a desktop shortcut. **GRAPHICS** has the graphics card, the 3D rendering scale and
+   upscaling (FSR, or DLSS on NVIDIA RTX).
 
 Your copy is never modified (read-only). The game's own icon is taken from your copy at build time and shown on
 `recomp_main.exe` (named "StarFox Remake" in the Task Manager); it is never distributed. The launcher's background clips, gameplay
@@ -95,7 +99,8 @@ The launcher checks this repository's releases when it starts (you can turn it o
 is out, it asks you first; if you say yes, it downloads it, checks its SHA-256 hash, installs it and restarts. It then
 asks if you want to rebuild the game: some improvements require rebuilding the game. It only redoes the parts whose
 code changed. You can say no and keep playing; **REBUILD NOW ›** on the launcher's home page does it later. Your copy,
-your saves and your settings stay.
+your saves and your settings stay. Since 1.1.0, the update also downloads the FSR and DLSS libraries from AMD's and
+NVIDIA's official repositories, with their SHA-256 hashes checked.
 
 ### Shader precompilation
 
@@ -119,8 +124,8 @@ own, close the game and copy the whole `save` folder.
 ## Uninstalling
 
 Click **UNINSTALL** on the launcher's build page, or run `uninstall.bat`. It removes everything SpaceAnimalsRecomp put on
-your PC (the build, the compiler copy in `C:\ProgramData\StarFoxRecomp`, temporary files and logs). It never touches
-your copy of the game, and keeps your saves unless you ask it to remove them. Then delete the folder.
+your PC (the install folder, the build, the compiler copy in `C:\ProgramData\StarFoxRecomp`, temporary files and
+logs). It never touches your copy of the game, and keeps your saves unless you ask it to remove them.
 
 ## What you need
 
@@ -147,17 +152,16 @@ SpaceAnimalsRecomp so far.
 | 🔧 | Frame rate | 90% | A steady 60 fps; 90 and 120 fps are not stable yet (55 to 118 fps in Corneria at 120 for now) |
 | 🔧 | Horizon OS services | 90% | Threads, files, controllers, applets, time and audio: everything the game has used so far |
 | 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD support improved in 1.0.3; Intel is untested |
-| 🔧 | Controls | 75% | Keyboard (keys changeable in the launcher) and one XInput controller (Xbox layout), by button position; no mouse yet |
+| 🔧 | Controls | 85% | Keyboard and controllers (Xbox, PlayStation, Switch Pro, Joy-Con), all remappable in the launcher; no mouse yet |
 | 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
-| 🗺️ | NVIDIA DLSS | 0% | Planned: DLSS on PC, with free output resolution |
-| 🗺️ | AMD FSR 3 | 0% | Planned after DLSS: FSR 3 upscaling, for all graphics cards |
+| 🔧 | NVIDIA DLSS | 70% | Experimental since 1.1.0, RTX cards only: DLAA or upscaling, DLSS 4 or 4.5 model |
+| 🔧 | AMD FSR | 70% | Experimental since 1.1.0, all cards: FSR 3.1, or FSR 4 on some Radeon cards (FSR 4 untested so far) |
 | 🗺️ | Frame generation | 0% | Planned: generated frames between the ones the game draws, for a higher frame rate on screen |
 | 🗺️ | Mod support | 0% | Planned: loading mods, managed from the launcher |
 | 🗺️ | Online play | 0% | Planned: the game's online modes |
 | 🗺️ | Mouse controls | 0% | Planned: the game's mouse mode, with the PC mouse |
 | 🗺️ | amiibo | 0% | Planned: the game's amiibo features |
-| 🗺️ | Controller remapping and several controllers | 0% | Planned |
-| 🗺️ | PlayStation and Switch Pro controllers, rumble | 0% | Planned (asked for in #3) |
+| 🗺️ | Several controllers at once | 0% | Planned |
 | 🗺️ | Ultrawide (21:9) | 0% | Possibly feasible, not started (asked for in #2) |
 | 🗺️ | Linux | 0% | Planned |
 
@@ -165,10 +169,15 @@ SpaceAnimalsRecomp so far.
 
 ## Controls
 
-Controller buttons follow the position on the pad (the Switch's A is the Xbox B, and so on). The keyboard keys below are
-the default ones. You can change them on the launcher's **CONTROLS** page: pick **WASD (QWERTY)** or **ZQSD (AZERTY)**,
-or click a key's box and press the key you want. Changes apply the next time you start the game (since 1.0.3, after
-rebuilding the game).
+Xbox, PlayStation (DualShock 4, DualSense), Switch Pro and Joy-Con controllers work, USB or Bluetooth (since 1.1.0;
+Switch 2 controllers are not supported yet). Controller buttons follow the position on the pad (the Switch's A is the
+Xbox B, and so on). The keys and buttons below are the default ones. You can change them on the launcher's
+**CONTROLS** page:
+
+- **KEYBOARD**: pick **WASD (QWERTY)** or **ZQSD (AZERTY)**, or click a key's box and press the key you want;
+- **CONTROLLER**: click a button, then press the new one or click it on the drawing of your controller.
+
+Changes apply the next time you start the game.
 
 | Switch | Keyboard | Xbox controller |
 |---|---|---|
@@ -227,7 +236,9 @@ debugging switches (`RECOMP_*` environment variables), are in [docs/DEV-NOTES-fr
 - Libraries and tools: [Capstone](https://www.capstone-engine.org) (BSD), [python-zstandard](https://github.com/indygreg/python-zstandard)
   (BSD), [python-lz4](https://github.com/python-lz4/python-lz4) (BSD), [glslang](https://github.com/KhronosGroup/glslang)
   (BSD-3-Clause and Apache 2.0), the Vulkan headers (Apache 2.0), [GCC](https://gcc.gnu.org) through
-  [WinLibs](https://winlibs.com) (GPL 3 with the GCC Runtime Library Exception) and [Python](https://www.python.org) (PSF License).
+  [WinLibs](https://winlibs.com) (GPL 3 with the GCC Runtime Library Exception), [Python](https://www.python.org) (PSF License),
+  [SDL](https://www.libsdl.org) (zlib), the [AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)
+  (MIT) and [NVIDIA DLSS](https://github.com/NVIDIA/DLSS) (NVIDIA's license). This software uses NVIDIA DLSS.
 
 ## License
 
@@ -237,8 +248,15 @@ same license, with its source code, and keep the copyright notices and credit to
 Third-party components in `recomp/runtime/third_party/` keep their own licenses. The license covers this project's
 code only: it grants nothing for Nintendo's game, which you must supply yourself.
 
+**Additional permission (GPL-3.0 section 7) for NVIDIA DLSS.** If you modify SpaceAnimalsRecomp, or any covered work, by
+linking or combining it with NVIDIA DLSS (`nvngx_dlss.dll`, from the NVIDIA DLSS SDK), containing parts covered by the
+terms of NVIDIA's DLSS SDK license, the licensor of SpaceAnimalsRecomp grants you additional permission to convey the
+resulting work. NVIDIA DLSS is a separate work: the GPL does not apply to it, and it stays under NVIDIA's license. The
+AMD FSR libraries are under the MIT license, which is compatible with the GPL.
+
 The full Windows package (`-windows.zip`) also bundles, in its `outils` folder, the unmodified binaries of the build
-tools, under their own licenses. GCC and glslang are reduced to the files the build uses.
+tools and of the libraries the game loads, under their own licenses. GCC and glslang are reduced to the files the build
+uses.
 
 - GCC 16.2.0, GNU Binutils 2.47 and MinGW-w64 14.0.0, from the
   [WinLibs build](https://github.com/brechtsanders/winlibs_mingw/releases/tag/16.2.0posix-23.1.3-14.0.0-ucrt-r3)
@@ -246,7 +264,13 @@ tools, under their own licenses. GCC and glslang are reduced to the files the bu
   with the libraries the compiler uses: GMP, MPFR, MPC (LGPL 3), isl (MIT), libiconv, libintl (LGPL 2.1), zstd (BSD)
   and zlib;
 - glslang 16.6.0 (BSD-3-Clause, Apache 2.0 and other free licenses);
-- Python 3.13.17 embeddable (PSF License), with zstandard 0.25.0, lz4 4.4.5 and capstone 5.0.7 (BSD).
+- Python 3.13.17 embeddable (PSF License), with zstandard 0.25.0, lz4 4.4.5 and capstone 5.0.7 (BSD);
+- SDL 3.4.20 (zlib), for controllers;
+- AMD FSR libraries from the FidelityFX SDK 2.4.0 (MIT);
+- NVIDIA DLSS (`nvngx_dlss.dll`, DLSS SDK 310.9.16). It is **not** free software and **not** under the GPL: it stays
+  under NVIDIA's license (`NVIDIA-DLSS-SDK-LICENSE.txt`), may only be used with this application, and may not be
+  modified or redistributed on its own. This software uses NVIDIA DLSS. NVIDIA, GeForce RTX and DLSS are trademarks
+  of NVIDIA Corporation.
 
 [`recomp/licences/THIRD_PARTY_NOTICES.txt`](recomp/licences/THIRD_PARTY_NOTICES.txt) lists every component with its exact
 version, its license and where to get its source code; the full license texts are next to it, in

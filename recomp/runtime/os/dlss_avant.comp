@@ -1,0 +1,29 @@
+// Passe avant le DLSS (dlss.cpp, vk_render.cpp : dlss_taa). Source de dlss_spirv.h (dlss_spirv.py).
+//
+// Le moteur garde sa couleur en YCoCg dans une texture RGBA16 : (Co + 0,5, Y, Cg + 0,5), sur une couleur RVB déjà
+// compressée (x / (1 + x) ou racine carrée, voir dlss_apres.comp). Le DLSS veut du RVB : conversion inverse, la même
+// que celle du shader taa_resolve du jeu. Les vecteurs de mouvement du moteur (RG16 SNORM) sont en unités NDC du
+// déplacement de l'image précédente vers l'image en cours ; le DLSS veut des pixels rendus, de l'image en cours vers la
+// précédente : multipliés par (−0,5 × largeur, +0,5 × hauteur), l'échelle que le jeu passe au DLSS de la console.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform texture2D couleur;
+layout(set = 0, binding = 1) uniform texture2D vecteurs;
+layout(set = 0, binding = 2) uniform writeonly image2D couleur_rvb;   // RGBA16F (écriture sans format)
+layout(set = 0, binding = 3) uniform writeonly image2D vecteurs_px;   // RG16F
+layout(push_constant) uniform Constantes {
+    vec2 echelle_mv;
+    ivec2 taille;
+} pc;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.taille.x || p.y >= pc.taille.y) return;
+    const vec4 c = texelFetch(couleur, p, 0);
+    const float co = c.r - 0.5, y = c.g, cg = c.b - 0.5;
+    const vec3 rvb = vec3(y + co - cg, y + cg, y - co - cg);
+    imageStore(couleur_rvb, p, vec4(clamp(rvb, 0.0, 1.0), 1.0));
+    const vec2 v = texelFetch(vecteurs, p, 0).rg;
+    imageStore(vecteurs_px, p, vec4(v * pc.echelle_mv, 0.0, 0.0));
+}

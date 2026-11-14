@@ -338,8 +338,9 @@ def e_recompiler(copie, a):
     fils = fils_selon_memoire(a.fils)
     for essai in range(4):
         try:
-            lancer([sys.executable, "-X", "utf8", os.path.join(RECOMP, "fullbuild.py"), *ordre, "-j", str(fils)], RECOMP,
-                   analyse)
+            # fullbuild.py, par ce script-ci : compilations bornées par la mémoire libre (construction_surveillee)
+            lancer([sys.executable, "-X", "utf8", os.path.abspath(__file__), "--fullbuild", *ordre, "-j", str(fils)],
+                   RECOMP, analyse)
             return
         except Echec as e:
             # certains lots demandent bien plus que la moyenne : si la mémoire a manqué (MemoryError dans Python, « out
@@ -367,6 +368,131 @@ def e_recompiler(copie, a):
 GO_PAR_TACHE = 1.4
 GO_PAR_TACHE_CLANG = 0.4
 GO_RESERVE = 2.0
+
+
+# Mémoire pendant la construction (issue n° 24, 2026-11-13). Le nombre de tâches n'était fixé qu'au départ, sur une
+# estimation par compilation ; or une compilation peut prendre bien plus que prévu : sous Linux avec Proton, 31 clang à
+# la fois ont rempli 31 Go et Linux a tué la construction, alors que les mêmes prennent 0,2 à 0,44 Go chacun sous
+# Windows. e_recompiler lance donc fullbuild.py par « preparer.py --fullbuild … » (construction_surveillee), qui
+# remplace sa classe Compilations par une sous-classe qui regarde la mémoire pendant la construction :
+# - la mémoire de chaque compilation est relevée deux fois par seconde (memoire_processus) ;
+# - tant qu'aucune compilation n'a été mesurée, pas plus de DEPART_MAX à la fois ;
+# - ensuite, une compilation de plus seulement si la mémoire libre, moins GO_MARGE, couvre celle-ci et les
+#   compilations de moins de JEUNE_S secondes (qui n'ont pas encore pris toute leur mémoire) au plus grand pic mesuré ;
+# - une compilation au moins tourne toujours.
+# fullbuild.py lui-même n'est PAS modifié : il fait partie de la signature de l'étape « recompiler », et le changer
+# ferait repasser cette étape chez chaque joueur à la mise à jour (109 s sur 16 fils sans rien compiler, bien plus sur
+# un petit PC). Le jour où il change pour une autre raison, y remettre ce code.
+GO_MARGE = 2.0      # mémoire laissée libre
+JEUNE_S = 15        # avant cet âge, une compilation n'a pas encore pris toute sa mémoire
+DEPART_MAX = 8      # compilations à la fois tant qu'aucune n'a été mesurée
+_MESURE = {"go": 0.0, "faite": False}   # plus grand pic mesuré (Go) ; gardé d'un module au suivant
+
+
+def memoire_processus(p):
+    """Mémoire (Go) d'un processus lancé par subprocess : le plus grand de ses compteurs (jeu de travail et mémoire
+    privée, actuels et de pointe) ; 0 si elle n'est pas lisible (hors de Windows, processus disparu)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Compteurs(ctypes.Structure):
+            _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [(n, ctypes.c_size_t) for n in (
+                "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+                "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")]
+        c = Compteurs()
+        c.cb = ctypes.sizeof(Compteurs)
+        lire = ctypes.windll.kernel32.K32GetProcessMemoryInfo
+        lire.argtypes = [wintypes.HANDLE, ctypes.POINTER(Compteurs), wintypes.DWORD]
+        lire.restype = wintypes.BOOL
+        if not lire(int(p._handle), ctypes.byref(c), c.cb):
+            return 0.0
+        return max(c.PeakWorkingSetSize, c.WorkingSetSize, c.PagefileUsage, c.PeakPagefileUsage) / 1e9
+    except (AttributeError, OSError, ValueError, TypeError):
+        return 0.0
+
+
+def compilations_surveillees(fullbuild):
+    """Sous-classe de fullbuild.Compilations qui borne les compilations lancées par la mémoire libre."""
+
+    class CompilationsSurveillees(fullbuild.Compilations):
+        def __init__(self, cxx, flags, jobs):
+            super().__init__(cxx, flags, jobs)
+            self.go_depart = GO_PAR_TACHE_CLANG if "clang" in os.path.basename(str(cxx)).lower() else GO_PAR_TACHE
+            self.t_mesure = self.t_dit = 0.0
+            self.max_actives = 0
+            self.libre_min = None
+            self.nom = ""
+
+        def go(self):
+            """Mémoire comptée pour une compilation (Go) : l'estimation de départ, puis le plus grand pic mesuré."""
+            return max(self.go_depart, _MESURE["go"])
+
+        def mesurer(self):
+            maintenant = time.time()
+            if maintenant - self.t_mesure < 0.5:
+                return
+            self.t_mesure = maintenant
+            for t in self.actives:
+                g = memoire_processus(t[0])
+                if g > _MESURE["go"]:
+                    _MESURE["go"] = g
+                if g and maintenant - t[0].debut >= JEUNE_S:
+                    _MESURE["faite"] = True
+
+        def libres(self):
+            n = self.jobs - len(self.actives)
+            if n <= 0 or not self.actives:
+                return n
+            self.mesurer()
+            if not _MESURE["faite"] and len(self.actives) >= DEPART_MAX:
+                return 0
+            libre = fullbuild.go_libres()
+            if libre is None:
+                return n
+            if self.libre_min is None or libre < self.libre_min:
+                self.libre_min = libre
+            maintenant = time.time()
+            jeunes = sum(1 for t in self.actives if maintenant - t[0].debut < JEUNE_S)
+            possibles = int((libre - GO_MARGE) / self.go()) - jeunes
+            if possibles <= 0 and maintenant - self.t_dit > 60:
+                self.t_dit = maintenant
+                print(f"{self.nom}: free memory {libre:.1f} GB, a compilation takes up to {self.go():.2f} GB: "
+                      f"{len(self.actives)} compilation(s) at once for now instead of {self.jobs}", flush=True)
+            return max(0, min(n, possibles))
+
+        def lancer(self, idx, src, obj, key):
+            self.nom = self.nom or os.path.basename(os.path.dirname(obj))
+            super().lancer(idx, src, obj, key)
+            self.max_actives = max(self.max_actives, len(self.actives))
+
+        def finies(self, keep):
+            self.mesurer()
+            for t in self.actives:
+                if t[0].poll() is not None:   # pic final (sous Windows, lisible après la fin du processus)
+                    g = memoire_processus(t[0])
+                    if g > _MESURE["go"]:
+                        _MESURE["go"] = g
+                    if g or _MESURE["go"]:
+                        _MESURE["faite"] = True
+            return super().finies(keep)
+
+        def reprendre(self, keep, log, nom):
+            if self.max_actives:   # bilan du module, pour le diagnostic (preparation.log)
+                log(f"{nom}: compilations: up to {self.max_actives} at once, up to {_MESURE['go']:.2f} GB each"
+                    + (f", free memory at the lowest {self.libre_min:.1f} GB" if self.libre_min is not None else ""))
+            return super().reprendre(keep, log, nom)
+
+    return CompilationsSurveillees
+
+
+def construction_surveillee(arguments):
+    """« preparer.py --fullbuild <arguments de fullbuild.py> » : fullbuild.py avec les compilations surveillées."""
+    sys.path.insert(0, RECOMP)
+    import fullbuild
+    fullbuild.Compilations = compilations_surveillees(fullbuild)
+    sys.argv = [os.path.join(RECOMP, "fullbuild.py")] + list(arguments)
+    return fullbuild.main()
 
 
 def avec_clang():
@@ -703,6 +829,8 @@ FONCTIONS = {"extraire": e_extraire, "images": e_images, "recompiler": e_recompi
 
 
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--fullbuild":   # recompilation elle-même (lancée par e_recompiler)
+        return construction_surveillee(sys.argv[2:])
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", line_buffering=True)
     ap = argparse.ArgumentParser()

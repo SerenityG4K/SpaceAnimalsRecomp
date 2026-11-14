@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <immintrin.h>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -43,7 +44,7 @@ struct KThread : KObject {
     // indépendamment de la résolution du minuteur système ; std::condition_variable arrondissait
     // les délais à 10-15 ms, ce qui faisait tomber le jeu à ~42 images/s)
     HANDLE wake_ev = nullptr, hr_timer = nullptr;
-    bool woken = false;
+    std::atomic<bool> woken{false};   // atomique : lu sans le verrou pendant l'attente active (block)
     uint32_t wait_result = 0;
     int32_t wait_index = -1;
     bool cancel_pending = false, in_sync = false;
@@ -193,10 +194,47 @@ void precise_sleep(KThread* t, int64_t ns) {
     else std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
 }
 
+// Attente active avant de dormir (soir du 2026-11-12). Profil d'une mission (scènes à 2 500 dessins) : aucun fil du
+// jeu n'est saturé, ses fils de travail passent plus de la moitié du temps endormis entre deux tâches, et chaque
+// endormissement suivi d'un réveil par événement Windows coûte des dizaines de microsecondes : c'est ce va-et-vient
+// qui donnait le rythme. Un fil qui doit attendre tourne donc d'abord à vide quelques dizaines de microsecondes
+// (instruction pause, verrou relâché) en surveillant son réveil, et ne s'endort qu'ensuite. Durée : RECOMP_SPIN_US
+// (microsecondes ; 0 : aucune, comme avant) ; par défaut 50 avec au moins 8 fils matériels, sinon 0 (sur un petit
+// processeur, les fils qui tournent à vide prendraient la place de ceux qui travaillent). Mesure (mission de
+// Corneria, 1440p, fenêtres de 2 000 à 3 000 dessins par image) : intervalle médian 9,50 → 8,68 ms avec 50 µs, 9,62 ms
+// sans dans un essai témoin plus tard, 9,42 ms avec 150 µs (trop long : les fils qui tournent à vide gênent les
+// autres) ; coût à 50 µs : ≈ 3,5 % de temps processeur de plus par fil de travail du jeu.
+int64_t attente_active_qpc() {
+    static const int64_t n = [] {
+        const char* e = getenv("RECOMP_SPIN_US");
+        int us = e ? atoi(e) : (std::thread::hardware_concurrency() >= 8 ? 50 : 0);
+        us = us < 0 ? 0 : us > 2000 ? 2000 : us;
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        HLOG("thread", "waits between game threads: %d microseconds of active waiting before sleeping (%s)", us,
+             e ? "RECOMP_SPIN_US" : "default for this processor");
+        return (int64_t)us * f.QuadPart / 1000000;
+    }();
+    return n;
+}
+
 bool block(std::unique_lock<std::mutex>& lk, KThread* t, int64_t timeout_ns) {
     if (t->woken) return true;
     if (!t->wake_ev) t->wake_ev = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     auto dl = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout_ns < 0 ? 0 : timeout_ns);
+    if (const int64_t actif = attente_active_qpc(); actif > 0 && (timeout_ns < 0 || timeout_ns > 500000)) {
+        lk.unlock();
+        LARGE_INTEGER t0, t1;
+        QueryPerformanceCounter(&t0);
+        for (;;) {
+            for (int i = 0; i < 16; i++) _mm_pause();
+            if (t->woken.load(std::memory_order_acquire)) break;
+            QueryPerformanceCounter(&t1);
+            if (t1.QuadPart - t0.QuadPart >= actif) break;
+        }
+        lk.lock();
+        if (t->woken) return true;
+    }
     while (!t->woken) {
         DWORD r;
         if (timeout_ns < 0) {

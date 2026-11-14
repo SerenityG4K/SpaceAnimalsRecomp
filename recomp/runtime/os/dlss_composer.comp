@@ -1,0 +1,30 @@
+// Passe de recomposition (vk_render.cpp : dlss_agrandir), rendu 3D sous 100 % avec le DLSS en super résolution.
+// Source de dlss_spirv.h (dlss_spirv.py).
+//
+// La sortie pleine taille du DLSS remplace l'agrandissement du moteur (upsample.frag). Mais le jeu dessine encore dans
+// la cible de taa_resolve après lui (le viseur de l'Arwing, entre autres : il disparaissait, essai de l'Area 6 du
+// 2026-11-12) : ces ajouts, absents de la sortie du DLSS, sont repris de la cible du jeu. `base` est la copie de ce que
+// dlss_taa avait écrit dans cette cible ; là où la cible du jeu en diffère, on prend son agrandissement bilinéaire
+// (comme upsample.frag), sinon la sortie du DLSS. Là où le jeu n'a rien ajouté, les deux lectures sont identiques au
+// bit près : la sortie du DLSS reste intacte. Lectures sRGB décodées (vues sRGB), mélange en linéaire.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D cible_jeu;          // cible 0 de taa_resolve, après les dessins suivants
+layout(set = 0, binding = 1) uniform sampler2D base;               // ce que dlss_taa y avait écrit
+layout(set = 0, binding = 2, rgba16f) uniform image2D lineaire;    // sortie du DLSS, pleine taille (relue et réécrite)
+layout(push_constant) uniform Constantes {
+    ivec2 taille;       // taille de la sortie
+    vec2 echelle_uv;    // bornes des coordonnées dans la source (mots 8-9 de la banque 6 de upsample.frag)
+} pc;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.taille.x || p.y >= pc.taille.y) return;
+    const vec2 uv = min((vec2(p) + 0.5) / vec2(pc.taille) * pc.echelle_uv, pc.echelle_uv);
+    const vec4 j = textureLod(cible_jeu, uv, 0.0);
+    const vec4 b = textureLod(base, uv, 0.0);
+    const vec3 d = abs(j.rgb - b.rgb);
+    const float m = clamp(max(d.r, max(d.g, d.b)) * 32.0, 0.0, 1.0);   // ajout du jeu : 0 (aucun) à 1 (net)
+    const vec4 c = imageLoad(lineaire, p);
+    imageStore(lineaire, p, vec4(mix(c.rgb, j.rgb, m), j.a));
+}

@@ -3,6 +3,7 @@
 #include "nvn_exec.h"
 
 #include <functional>
+#include <string>
 
 namespace hos {
 namespace vkr {
@@ -26,6 +27,10 @@ struct DrawCall {
 
 bool available();
 void ensure_init();
+// Carte graphique que le jeu prendra (même choix que l'initialisation de Vulkan : recomp.ini gpu, sinon la carte dédiée
+// qui a le plus de mémoire vidéo), connue avant celle-ci : son nom et l'identifiant de son fabricant (0x10DE : NVIDIA).
+// Faux si Vulkan ne répond pas. Crée une instance Vulkan temporaire : pour le DLSS (dlss.cpp), pas à chaque image.
+bool carte_prevue(std::string* nom, uint32_t* fabricant);
 // recomp_main --precompile : compile tous les shaders du cache pour ce GPU (pipelines.cache), sans fenêtre ni jeu ;
 // avancement sur la sortie standard (@progres, @info, @saute, @erreur). Rend le code de sortie du processus.
 int precompile();

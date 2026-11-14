@@ -18,6 +18,12 @@ rapide
   desinstaller  désinstallation (desinstaller.py) sur de fausses installations, APPDATA, ProgramData et TEMP d'essai :
               nettoyage, désinstallation avec et sans sauvegardes, copie du jeu du joueur jamais supprimée, refus dans
               un dossier de sources (verif/essai_desinstaller.py)
+  rapport     anonymisation du rapport de bug (rapport.py) sur une fausse installation : chemin de la copie, profils,
+              noms d'utilisateur et de PC, autres lecteurs absents du zip ; lanceur.ini UTF-16 lisible
+              (verif/essai_rapport.py)
+  deplacement déplacement de l'installation (deplacer.py, issue n° 14) sur de fausses installations : même volume
+              (renommage), autre volume (copie forcée, copie du jeu laissée en place), refus, copie interrompue, jeu
+              en marche (verif/essai_deplacement.py)
   depot       export du dépôt public (depot.py : fichiers interdits, traces personnelles)
   paquet      paquet complet et mise à jour (paquet.py) : licences, extraits, outils allégés, sources à jour, rien du jeu
   outils      GCC allégé du paquet : fichiers utilisés (verif/gcc_utilises.txt) présents, DLL importées présentes
@@ -67,8 +73,8 @@ LANCEUR = os.path.join(RECOMP, "launcher")
 FULL = os.path.join(RECOMP, "build", "full")
 DEPOT_GITHUB = "SerenityG4K/SpaceAnimalsRecomp"
 NOM = "SpaceAnimalsRecomp"
-RAPIDES = ["versions", "python", "runtime", "sauvegardes", "launcher", "desinstaller", "depot", "paquet", "outils", "maj",
-           "precompile", "deplace"]
+RAPIDES = ["versions", "python", "runtime", "sauvegardes", "launcher", "desinstaller", "rapport", "deplacement", "depot",
+           "paquet", "outils", "maj", "precompile", "deplace"]
 COMPLETES = ["neuve", "regeneration", "shaders", "jeu", "sans_gpl", "lanceur"]
 
 
@@ -504,6 +510,27 @@ class Verif:
             raise Echec("essai_desinstaller.py :\n" + fin(sortie, 30))
         return f"{len(re.findall(r'conditions', sortie))} scénarios : nettoyage, désinstallation, copie du jeu gardée, refus"
 
+    def deplacement(self):
+        """Emplacement du jeu (issue n° 14) : deplacer.py sur de fausses installations."""
+        travail = os.path.join(self.t, "sar_verif_deplacement")
+        code, sortie = lancer([sys.executable, "-X", "utf8", os.path.join(ICI, "essai_deplacement.py"), LANCEUR, travail],
+                              timeout=300)
+        shutil.rmtree(travail, ignore_errors=True)
+        if code or "tout passe" not in sortie:
+            raise Echec("essai_deplacement.py :\n" + fin(sortie, 30))
+        return f"{len(re.findall(r'conditions', sortie))} scénarios : même volume, autre volume, refus, abandon, jeu en marche"
+
+    def rapport(self):
+        """Anonymisation du rapport de bug (issue n° 5 : chemin de la copie resté dans lanceur.log)."""
+        travail = os.path.join(self.t, "sar_verif_rapport")
+        code, sortie = lancer([sys.executable, "-X", "utf8", os.path.join(ICI, "essai_rapport.py"), LANCEUR, travail],
+                              timeout=180)
+        shutil.rmtree(travail, ignore_errors=True)
+        if code or "tout passe" not in sortie:
+            raise Echec("essai_rapport.py :\n" + fin(sortie, 30))
+        m = re.search(r"(\d+) noms privés cherchés", sortie)
+        return f"fausse installation : {m.group(1) if m else '?'} noms privés absents du zip, lanceur.ini UTF-16 lisible"
+
     def depot(self):
         out = os.path.join(self.t, "depot")
         shutil.rmtree(out, ignore_errors=True)
@@ -537,7 +564,11 @@ class Verif:
         for rel in ("lanceur.exe", "LISEZMOI.txt", "README.txt", "THIRD_PARTY_NOTICES.txt", "recomp/VERSION",
                     "recomp/lots.txt", "recomp/hooks.txt", "recomp/launcher/sauvegardes.py", "recomp/launcher/rapport.py",
                     "recomp/launcher/preparer.py", "recomp/launcher/maj.py", "recomp/launcher/outils.py",
-                    "recomp/launcher/desinstaller.py", "uninstall.bat",
+                    "recomp/launcher/desinstaller.py", "recomp/launcher/deplacer.py", "uninstall.bat",
+                    "outils/sdl3/SDL3.dll", "outils/fsr/amd_fidelityfx_loader_vk.dll",
+                    "outils/fsr/amd_fidelityfx_upscaler_vk.dll", "outils/dlss/nvngx_dlss.dll",
+                    "LICENCES/AMD-FidelityFX-SDK-LICENSE.txt", "LICENCES/NVIDIA-DLSS-SDK-LICENSE.txt",
+                    "recomp/runtime/third_party/ffx/LICENSE.md",
                     "outils/python/python.exe", "outils/gcc/bin/g++.exe", "outils/gcc/bin/clang++.exe",
                     "outils/glslang/bin/glslang.exe",
                     "outils/gcc/libexec/gcc/x86_64-w64-mingw32/16.2.0/cc1plus.exe"):
@@ -656,6 +687,30 @@ class Verif:
         sauv_contenu = os.urandom(40000)   # sauvegarde d'essai à l'emplacement de la version précédente
         open(sauv, "wb").write(sauv_contenu)
         outils_avant = arbre(os.path.join(racine, "outils"))
+        # Outils que la nouvelle version ajoute (SDL3, DLL du FSR et du DLSS depuis la 1.1.0) : chez le joueur, la mise
+        # à jour les télécharge depuis leurs sources. Ici rien n'est téléchargé : leurs archives sont posées d'avance
+        # dans outils/_archives (outils.py vérifie leur SHA-256 et ne télécharge pas une archive déjà là), prises dans
+        # le paquet (fichiers seuls) ou dans le cache des vérifications. RECOMP_OUTILS_SANS_RESEAU reste posé : tout
+        # autre téléchargement fait échouer l'essai. Les adresses elles-mêmes ne sont donc pas essayées ici.
+        ns_n = {"__file__": "outils.py", "__name__": "verif_outils_apres"}
+        exec(compile(open(os.path.join(self.etat["paquet"], "recomp", "launcher", "outils.py"), encoding="utf-8").read(),
+                     "outils.py", "exec"), ns_n)
+        avant_par_nom = {o["nom"]: o["sha256"] for o in ns["OUTILS"]}
+        ajoutes = [o for o in ns_n["OUTILS"]
+                   if avant_par_nom.get(o["nom"]) not in (o["sha256"],) + tuple(o.get("acceptes", ()))]
+        a_telecharger = 0
+        for o in ajoutes:
+            nom_archive = o["url"].rsplit("/", 1)[1]
+            sources = [os.path.join(cache, nom_archive)]
+            if o.get("fichier"):
+                sources.insert(0, os.path.join(self.etat["paquet"], "outils", *o["dest"].split("/"), nom_archive))
+            source = next((p for p in sources if os.path.exists(p) and empreinte(p) == o["sha256"]), None)
+            if not source:
+                raise Saute(f"archive de l'outil « {o['nom']} » absente de {cache} ({nom_archive}) : cette vérification "
+                            "ne télécharge pas les outils")
+            os.makedirs(os.path.join(racine, "outils", "_archives"), exist_ok=True)
+            shutil.copyfile(source, os.path.join(racine, "outils", "_archives", nom_archive))
+            a_telecharger += os.path.getsize(source)
         sig_avant = charger(os.path.join(racine, "recomp", "launcher", "preparer.py"), "verif_prep_avant").signatures("copie")
         mod = charger(os.path.join(racine, "recomp", "launcher", "maj.py"), "verif_maj_avant")
         if mod.version_locale(racine) != tag.lstrip("vV"):
@@ -728,10 +783,18 @@ class Verif:
         outils_apres = arbre(os.path.join(racine, "outils"))
         for o in (outils_avant, outils_apres):   # LISEZMOI.txt est réécrit par outils.py (liste des outils)
             o.pop("LISEZMOI.txt", None)
-        if outils_apres != outils_avant:
-            erreurs.append("outils/ modifié par la mise à jour : "
-                           + ", ".join(sorted(k for k in set(outils_avant) | set(outils_apres)
-                                              if outils_avant.get(k) != outils_apres.get(k))[:8]))
+        # attendu : les outils d'avant intacts, plus ceux que la nouvelle version ajoute, tels que dans le paquet
+        outils_attendus = dict(outils_avant)
+        paquet_outils = arbre(os.path.join(self.etat["paquet"], "outils"))
+        for o in ajoutes:
+            outils_attendus[f".installe/{o['nom']}"] = paquet_outils.get(f".installe/{o['nom']}")
+            for k, h in paquet_outils.items():
+                if k.startswith(o["dest"] + "/"):
+                    outils_attendus[k] = h
+        if outils_apres != outils_attendus:
+            erreurs.append("outils/ après la mise à jour, différences avec l'attendu : "
+                           + ", ".join(sorted(k for k in set(outils_attendus) | set(outils_apres)
+                                              if outils_attendus.get(k) != outils_apres.get(k))[:8]))
         if not relance:
             erreurs.append("le launcher n'aurait pas été relancé")
         if erreurs:
@@ -739,7 +802,10 @@ class Verif:
         sig_apres = charger(os.path.join(racine, "recomp", "launcher", "preparer.py"), "verif_prep_apres").signatures("copie")
         refaites = [e for e in sig_apres if sig_avant.get(e) != sig_apres[e]]
         shutil.rmtree(base, ignore_errors=True)
-        info = f"depuis {tag} : fichiers installés, outils intacts, sauvegarde intacte"
+        info = f"depuis {tag} : fichiers installés, outils d'avant intacts, sauvegarde intacte"
+        if ajoutes:
+            info += (f" ; outils ajoutés : {', '.join(o['nom'] for o in ajoutes)} ({a_telecharger / 1e6:.0f} Mo à "
+                     "télécharger chez le joueur ; ici archives locales, adresses non essayées)")
         info += f" ; restes de {tag} non supprimés : {', '.join(restes)}" if restes else ""
         info += f" ; « RECONSTRUIRE MAINTENANT » refera : {', '.join(refaites) if refaites else 'rien'}"
         return info

@@ -9,9 +9,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 
@@ -32,6 +35,18 @@ std::chrono::steady_clock::time_point g_last;
 std::chrono::steady_clock::time_point g_fps_t0;
 uint64_t g_fps_f0 = 0;
 double g_fps = 0;
+
+// Mise à l'échelle de Windows de l'écran principal (1 = 100 %, 1,5 = 150 %). Le jeu est compatible DPI depuis le
+// 2026-11-12 (host_main.cpp, dpi_compatible) : ses tailles sont en pixels réels. RECOMP_DPI=<ppp> (essais : 144 pour
+// 150 %) simule une mise à l'échelle pour le choix de resolution = auto et la taille de la fenêtre.
+double echelle_ecran() {
+    static const double k = [] {
+        UINT ppp = GetDpiForSystem();
+        if (const char* e = getenv("RECOMP_DPI")) ppp = (UINT)atoi(e);
+        return ppp >= 48 ? ppp / 96.0 : 1.0;
+    }();
+    return k;
+}
 
 // Plein écran sans bordure (recomp.ini : window_mode) : fenêtre sans cadre couvrant l'écran où elle se
 // trouve, pour présenter l'image pixel pour pixel. Une fenêtre à cadre de la taille de l'écran n'a
@@ -103,6 +118,19 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         break;
+    case WM_DPICHANGED: {   // fenêtre passée sur un écran à une autre mise à l'échelle (compatible DPI par écran)
+        const RECT* r = (const RECT*)lp;
+        if (g_borderless) {   // plein écran : couvrir le nouvel écran, pixel pour pixel
+            MONITORINFO mi{sizeof mi};
+            GetMonitorInfoW(MonitorFromRect(r, MONITOR_DEFAULTTONEAREST), &mi);
+            SetWindowPos(h, nullptr, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                         mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        } else {   // fenêtré : taille apparente gardée (rectangle proposé par Windows)
+            SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        HLOG("gfx", "window moved to a screen with %u %% display scaling", (unsigned)(LOWORD(wp) * 100 / 96));
+        return 0;
+    }
     case WM_CLOSE:
         HLOG("gfx", "window closed: process exiting");
         vkr::save_caches();   // pipelines créés pendant la partie
@@ -125,8 +153,29 @@ void window_thread() {
                                    GetSystemMetrics(SM_CYSMICON), 0);
     wc.lpszClassName = L"recomp_main";
     RegisterClassExW(&wc);
+    {   // fenêtré : taille apparente d'avant la compatibilité DPI (2/3 de la sortie, en points), passée en pixels réels.
+        // À 100 %, rien ne change : trop grande pour l'écran, Windows la réduit à sa création, comme avant (2560×1421 sur
+        // un écran 1440p). Sur un écran mis à l'échelle, Windows ne réduisait que sa hauteur (3840×1421 sur un écran
+        // 2560×1440 à 150 %, plus large que l'écran) : elle tient maintenant dans la zone de travail, cadre compris,
+        // proportions gardées.
+        const double e = echelle_ecran();
+        if (e != 1.0) {
+            g_w = (int)lround(g_w * e);
+            g_h = (int)lround(g_h * e);
+            RECT zt{}, cadre{0, 0, 0, 0};
+            SystemParametersInfoW(SPI_GETWORKAREA, 0, &zt, 0);
+            AdjustWindowRectExForDpi(&cadre, WS_OVERLAPPEDWINDOW, FALSE, 0, GetDpiForSystem());
+            const int mw = (zt.right - zt.left) - (cadre.right - cadre.left), mh = (zt.bottom - zt.top) - (cadre.bottom - cadre.top);
+            if (mw > 0 && mh > 0 && (g_w > mw || g_h > mh)) {
+                const double r = std::min((double)mw / g_w, (double)mh / g_h);
+                g_w = (int)lround(g_w * r);
+                g_h = (int)lround(g_h * r);
+            }
+        }
+        HLOG("gfx", "host window %dx%d (Windows display scaling %.0f %%)", g_w, g_h, e * 100);
+    }
     RECT r{0, 0, g_w, g_h};
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+    AdjustWindowRectExForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, GetDpiForSystem());
     g_hwnd = CreateWindowW(L"recomp_main", L"StarFox Remake [recompiled]", WS_OVERLAPPEDWINDOW,
                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr,
                            nullptr, inst, nullptr);
@@ -155,8 +204,7 @@ void gfx_open_window(int width, int height) {
         g_w = width >= 1920 ? width * 2 / 3 : width;
         g_h = width >= 1920 ? height * 2 / 3 : height;
         g_last = g_fps_t0 = std::chrono::steady_clock::now();
-        std::thread(window_thread).detach();
-        HLOG("gfx", "host window %dx%d", g_w, g_h);
+        std::thread(window_thread).detach();   // taille en pixels réels : window_thread
     });
 }
 
@@ -169,8 +217,11 @@ void gfx_status(const char* text) {
 }
 
 void gfx_screen_size(int* w, int* h) {
-    *w = GetSystemMetrics(SM_CXSCREEN);
-    *h = GetSystemMetrics(SM_CYSCREEN);
+    // en points (pixels réels ÷ mise à l'échelle de Windows) : resolution = auto garde le choix d'avant la compatibilité
+    // DPI, par exemple 1080p pour un écran 4K à 200 %, plutôt qu'un rendu plus lourd après une mise à jour
+    const double k = echelle_ecran();
+    *w = (int)lround(GetSystemMetrics(SM_CXSCREEN) / k);
+    *h = (int)lround(GetSystemMetrics(SM_CYSCREEN) / k);
 }
 
 void gfx_count_frame(uint64_t frame) {

@@ -366,6 +366,7 @@ NVN(nvnDeviceRegisterFastClearColor) { R(ctx, 1); }
 // ================================================================ tampons de commandes
 struct CmdBuf {
     std::shared_ptr<std::vector<Op>> ops;
+    size_t dernier = 0;   // commandes de l'enregistrement précédent : capacité réservée au suivant
 };
 Table<CmdBuf> g_cmd;
 std::mutex g_handles_lk;
@@ -373,10 +374,24 @@ std::unordered_map<uint64_t, std::shared_ptr<std::vector<Op>>> g_handles;
 std::deque<uint64_t> g_handle_order;
 std::atomic<uint64_t> g_next_handle{0x10000};
 
+// Tampon en cours d'enregistrement (soir du 2026-11-12). Le jeu enregistre ≈ 36 000 commandes par image dans les scènes
+// chargées, par séries de ≈ 1 000 dans le même tampon : chaque commande prenait le verrou de la table et y cherchait
+// son tampon. Chaque fil retient maintenant le dernier tampon où il a écrit ; g_rec_gen change dès qu'un tampon
+// commence, finit, apparaît ou disparaît, et la recherche est alors refaite. RECOMP_NO_REC_CACHE=1 : comme avant.
+std::atomic<uint64_t> g_rec_gen{1};
 std::vector<Op>* rec(CPUState* ctx) {
-    auto& c = g_cmd[A(0)];
+    static const bool sans = getenv("RECOMP_NO_REC_CACHE") != nullptr;
+    struct Dernier {
+        uint64_t obj = 0, gen = 0;
+        std::vector<Op>* ops = nullptr;
+    };
+    thread_local Dernier d;
+    const uint64_t obj = A(0), gen = g_rec_gen.load(std::memory_order_acquire);
+    if (d.ops && d.obj == obj && d.gen == gen && !sans) return d.ops;
+    auto& c = g_cmd[obj];
     if (!c.ops) c.ops = std::make_shared<std::vector<Op>>();
-    return c.ops.get();
+    d.obj = obj, d.gen = gen, d.ops = c.ops.get();
+    return d.ops;
 }
 Op& push(CPUState* ctx, OpType t) {
     auto* v = rec(ctx);
@@ -393,9 +408,13 @@ void blob(Op& o, uint64_t addr, size_t n) {
 
 NVN(nvnCommandBufferInitialize) {
     g_cmd.create(A(0));
+    g_rec_gen.fetch_add(1, std::memory_order_release);
     R(ctx, 1);
 }
-NVN(nvnCommandBufferFinalize) { g_cmd.erase(A(0)); }
+NVN(nvnCommandBufferFinalize) {
+    g_cmd.erase(A(0));
+    g_rec_gen.fetch_add(1, std::memory_order_release);
+}
 NVN(nvnCommandBufferSetDebugLabel) { (void)ctx; }
 NVN(nvnCommandBufferAddCommandMemory) { (void)ctx; }
 NVN(nvnCommandBufferAddControlMemory) { (void)ctx; }
@@ -407,11 +426,20 @@ NVN(nvnCommandBufferGetCommandMemoryFree) { R(ctx, 0x100000); }
 NVN(nvnCommandBufferGetControlMemorySize) { R(ctx, 0x10000); }
 NVN(nvnCommandBufferGetControlMemoryUsed) { R(ctx, 0); }
 NVN(nvnCommandBufferGetControlMemoryFree) { R(ctx, 0x10000); }
-NVN(nvnCommandBufferBeginRecording) { g_cmd[A(0)].ops = std::make_shared<std::vector<Op>>(); }
+NVN(nvnCommandBufferBeginRecording) {
+    auto& c = g_cmd[A(0)];
+    auto ops = std::make_shared<std::vector<Op>>();
+    // capacité de l'enregistrement précédent de ce tampon, plus un huitième : le vecteur ne grandit plus par doublements
+    ops->reserve(std::min<size_t>(c.dernier + c.dernier / 8 + 16, 65536));
+    c.ops = std::move(ops);
+    g_rec_gen.fetch_add(1, std::memory_order_release);
+}
 NVN(nvnCommandBufferEndRecording) {
     auto& c = g_cmd[A(0)];
     auto ops = c.ops ? c.ops : std::make_shared<std::vector<Op>>();
+    c.dernier = ops->size();
     c.ops.reset();
+    g_rec_gen.fetch_add(1, std::memory_order_release);
     uint64_t h = g_next_handle++;
     std::lock_guard<std::mutex> lk(g_handles_lk);
     g_handles[h] = ops;
@@ -599,14 +627,172 @@ NVN(nvnDlssNetworkBuilderSetOutputResolution) {   // (builder, w, h)
 }
 NVN(nvnDlssNetworkBuilderGetOptimalSettings) {    // (builder, u32* w, u32* h, …)
     DlssBuilder b = g_dlssb[A(0)];
-    if (A(1)) *P<uint32_t>(A(1)) = b.out_w;
-    if (A(2)) *P<uint32_t>(A(2)) = b.out_h;
-    HLOG("nvn", "DLSS: rendering %ux%u (= output, no scaling)", b.out_w, b.out_h);
+    // RECOMP_DLSS_SCALE=s (essais) : résolution de rendu = s × sortie
+    static const double s = getenv("RECOMP_DLSS_SCALE") ? atof(getenv("RECOMP_DLSS_SCALE")) : 1.0;
+    const uint32_t w = s > 0 && s < 1 ? (uint32_t)(b.out_w * s + 0.5) & ~1u : b.out_w;
+    const uint32_t h = s > 0 && s < 1 ? (uint32_t)(b.out_h * s + 0.5) & ~1u : b.out_h;
+    if (A(1)) *P<uint32_t>(A(1)) = w;
+    if (A(2)) *P<uint32_t>(A(2)) = h;
+    HLOG("nvn", "DLSS: rendering %ux%u for an output of %ux%u", w, h, b.out_w, b.out_h);
 }
 NVN(nvnDlssNetworkBuilderGetStorageSize) { R(ctx, 0x10000); }
-NVN(nvnDlssNetworkInitialize) { R(ctx, 1); }
+Table<DlssBuilder> g_dlssn;   // réseau initialisé : sa résolution de sortie
+NVN(nvnDlssNetworkInitialize) {   // (réseau, builder)
+    g_dlssn.create(A(0), g_dlssb[A(1)]);
+    R(ctx, 1);
+}
 NVN(nvnDlssNetworkResize) { R(ctx, 1); }
-NVN(nvnCommandBufferEvaluateDlss) { push(ctx, OpType::EvaluateDlss); }
+
+// Paramètres d'une évaluation (2026-11-12, relevés avec RECOMP_DLSS_TRACE) : le moteur n'évalue le DLSS que
+// dans le réglage « Comme la console » (native_resolution = false, rendu à 50 %), comme un anticrénelage à la
+// résolution interne : couleur RGBA16F, profondeur D32F_S8, vecteurs de mouvement RG16F, masque R8 et sortie
+// RGBA16F, toutes à la résolution interne ; il agrandit ensuite l'image lui-même. Les textures sont gardées par
+// clé d'objet, avec leur taille.
+struct DlssParams {
+    struct Tx {
+        uint64_t key = 0;
+        uint32_t w = 0, h = 0;
+        int32_t base[2] = {0, 0};
+    } color, depth, mv, out, mask;
+    uint32_t in_w = 0, in_h = 0;
+    float jitter[2] = {0, 0}, mv_scale[2] = {1, 1};
+    bool reset = false;
+    uint32_t index = 0;
+};
+Table<DlssParams> g_dlssp;
+void dlss_tx(DlssParams::Tx& t, uint64_t obj) {
+    t.key = obj ? obj_key(obj) : 0;
+    Tex x;
+    if (obj && g_tex.find(obj, &x)) t.w = (uint32_t)x.b.w, t.h = (uint32_t)x.b.h;
+}
+NVN(nvnDlssParametersSetDefaults) { g_dlssp.create(A(0)); }
+NVN(nvnDlssParametersSetInputColor) { dlss_tx(g_dlssp[A(0)].color, A(1)); }
+NVN(nvnDlssParametersSetDepth) { dlss_tx(g_dlssp[A(0)].depth, A(1)); }
+NVN(nvnDlssParametersSetMotionVectors) { dlss_tx(g_dlssp[A(0)].mv, A(1)); }
+NVN(nvnDlssParametersSetOutputColor) { dlss_tx(g_dlssp[A(0)].out, A(1)); }
+NVN(nvnDlssParametersSetBiasCurrentColorMask) { dlss_tx(g_dlssp[A(0)].mask, A(1)); }
+NVN(nvnDlssParametersSetInputColorSubrectangleBase) {
+    auto& p = g_dlssp[A(0)];
+    p.color.base[0] = (int32_t)A(1), p.color.base[1] = (int32_t)A(2);
+}
+NVN(nvnDlssParametersSetDepthSubrectangleBase) {
+    auto& p = g_dlssp[A(0)];
+    p.depth.base[0] = (int32_t)A(1), p.depth.base[1] = (int32_t)A(2);
+}
+NVN(nvnDlssParametersSetMotionVectorSubrectangleBase) {
+    auto& p = g_dlssp[A(0)];
+    p.mv.base[0] = (int32_t)A(1), p.mv.base[1] = (int32_t)A(2);
+}
+NVN(nvnDlssParametersSetOutputSubrectangleBase) {
+    auto& p = g_dlssp[A(0)];
+    p.out.base[0] = (int32_t)A(1), p.out.base[1] = (int32_t)A(2);
+}
+NVN(nvnDlssParametersSetBiasCurrentColorSubrectangleBase) {
+    auto& p = g_dlssp[A(0)];
+    p.mask.base[0] = (int32_t)A(1), p.mask.base[1] = (int32_t)A(2);
+}
+NVN(nvnDlssParametersSetInputSubrectangleSize) {
+    auto& p = g_dlssp[A(0)];
+    p.in_w = (uint32_t)A(1), p.in_h = (uint32_t)A(2);
+}
+NVN(nvnDlssParametersSetJitterOffset) {   // flottants (s0, s1)
+    auto& p = g_dlssp[A(0)];
+    p.jitter[0] = ctx->v[0].f32[0], p.jitter[1] = ctx->v[1].f32[0];
+}
+NVN(nvnDlssParametersSetMotionVectorScale) {   // flottants (s0, s1)
+    auto& p = g_dlssp[A(0)];
+    p.mv_scale[0] = ctx->v[0].f32[0], p.mv_scale[1] = ctx->v[1].f32[0];
+}
+NVN(nvnDlssParametersSetHistoryReset) { g_dlssp[A(0)].reset = A(1) != 0; }
+NVN(nvnDlssParametersSetEvaluationIndex) { g_dlssp[A(0)].index = (uint32_t)A(1); }
+// RECOMP_DLSS_TRACE=1 (essais) : arguments et mémoire pointée des appels DLSS du jeu, pour retrouver ce qu'il passe à
+// l'évaluation (couleur, profondeur, vecteurs de mouvement, sortie, décalage de gigue…).
+void dlss_trace(CPUState* ctx, const char* nom, uint32_t n) {
+    HLOG("nvn", "DLSS trace %s #%u: x0..x7 = %llx %llx %llx %llx %llx %llx %llx %llx", nom, n,
+         (unsigned long long)A(0), (unsigned long long)A(1), (unsigned long long)A(2), (unsigned long long)A(3),
+         (unsigned long long)A(4), (unsigned long long)A(5), (unsigned long long)A(6), (unsigned long long)A(7));
+    HLOG("nvn", "  s0..s7 = %g %g %g %g %g %g %g %g", ctx->v[0].f32[0], ctx->v[1].f32[0], ctx->v[2].f32[0],
+         ctx->v[3].f32[0], ctx->v[4].f32[0], ctx->v[5].f32[0], ctx->v[6].f32[0], ctx->v[7].f32[0]);
+    uint64_t pile[8] = {};
+    if (mem_valid(ctx->sp, sizeof pile)) memcpy(pile, (const void*)ctx->sp, sizeof pile);
+    HLOG("nvn", "  [sp+0..0x38] = %llx %llx %llx %llx %llx %llx %llx %llx", (unsigned long long)pile[0],
+         (unsigned long long)pile[1], (unsigned long long)pile[2], (unsigned long long)pile[3],
+         (unsigned long long)pile[4], (unsigned long long)pile[5], (unsigned long long)pile[6],
+         (unsigned long long)pile[7]);
+    auto vider = [](const char* nom, uint64_t p, int taille) {
+        if (p < 0x7000000000ull || p >= 0x8000000000ull || !mem_valid(p, taille)) return;
+        for (int l = 0; l < taille; l += 32) {
+            char b[32 * 3 + 1];
+            for (int j = 0; j < 32; j++) snprintf(b + 3 * j, 4, "%02x ", ((const uint8_t*)p)[l + j]);
+            HLOG("nvn", "  %s+%03x: %s", nom, l, b);
+        }
+    };
+    char etiquette[16];
+    for (int k = 0; k < 8; k++) {
+        Tex t;
+        if (A(k) >= 0x7000000000ull && A(k) < 0x8000000000ull && g_tex.find(A(k), &t))
+            HLOG("nvn", "  x%d = texture %dx%dx%d, format %u, target %u, levels %u, @%llx", k, t.b.w, t.b.h, t.b.d,
+                 t.b.format, t.b.target, t.b.levels, (unsigned long long)t.addr);
+    }
+    for (int k = 0; k < 8; k++) {
+        Tex t;
+        if (pile[k] >= 0x7000000000ull && pile[k] < 0x8000000000ull && g_tex.find(pile[k], &t))
+            HLOG("nvn", "  [sp+%x] = texture %dx%dx%d, format %u, target %u, levels %u, @%llx", k * 8, t.b.w, t.b.h,
+                 t.b.d, t.b.format, t.b.target, t.b.levels, (unsigned long long)t.addr);
+    }
+    for (int k = 0; k < 8; k++) {
+        snprintf(etiquette, sizeof etiquette, "x%d", k);
+        vider(etiquette, A(k), 0x100);
+    }
+    for (int k = 0; k < 8; k++) {
+        snprintf(etiquette, sizeof etiquette, "sp%d", k);
+        vider(etiquette, pile[k], 0xc0);
+    }
+}
+bool dlss_trace_on() {
+    static const bool on = getenv("RECOMP_DLSS_TRACE") != nullptr;
+    return on;
+}
+NVN(nvnDlssNetworkBuilderSetTextureIDs) {
+    if (dlss_trace_on()) dlss_trace(ctx, "SetTextureIDs", 0);
+}
+// (tampon de commandes, réseau, paramètres) : jusqu'ici ignorée, la sortie restait vide (scène 3D noire avec « Comme
+// la console »). Maintenant : la couleur d'entrée est recopiée dans la sortie (agrandie si leurs tailles diffèrent),
+// en attendant un vrai DLSS (SDK de NVIDIA, avec l'accord de l'utilisateur).
+NVN(nvnCommandBufferEvaluateDlss) {
+    static std::atomic<uint32_t> n{0};
+    if (dlss_trace_on()) {
+        const uint32_t i = n++;
+        if (i < 3 || i % 600 == 0) dlss_trace(ctx, "Evaluate", i);
+    }
+    DlssParams p;
+    if (!A(2) || !g_dlssp.find(A(2), &p) || !p.color.key || !p.out.key) {
+        push(ctx, OpType::EvaluateDlss);
+        return;
+    }
+    const uint32_t iw = p.in_w ? p.in_w : p.color.w, ih = p.in_h ? p.in_h : p.color.h;
+    DlssBuilder net;
+    const bool net_ok = A(1) && g_dlssn.find(A(1), &net);
+    uint32_t ow = p.out.w > (uint32_t)p.out.base[0] ? p.out.w - (uint32_t)p.out.base[0] : 0;
+    uint32_t oh = p.out.h > (uint32_t)p.out.base[1] ? p.out.h - (uint32_t)p.out.base[1] : 0;
+    if (net_ok && net.out_w && net.out_h) ow = std::min(ow, net.out_w), oh = std::min(oh, net.out_h);
+    if (!iw || !ih || !ow || !oh) {
+        push(ctx, OpType::EvaluateDlss);
+        return;
+    }
+    Op& o = push(ctx, OpType::CopyTextureToTexture);
+    o.blob.assign(80, 0);
+    const int32_t rs[6] = {p.color.base[0], p.color.base[1], 0, (int32_t)iw, (int32_t)ih, 1};
+    const int32_t rd[6] = {p.out.base[0], p.out.base[1], 0, (int32_t)ow, (int32_t)oh, 1};
+    memcpy(o.blob.data(), rs, 24);
+    memcpy(o.blob.data() + 24, rd, 24);
+    memcpy(o.blob.data() + 64, &p.color.key, 8);
+    memcpy(o.blob.data() + 72, &p.out.key, 8);
+    o.a[6] = iw != ow || ih != oh ? 1 : 0;   // drapeaux de la copie : filtre linéaire si agrandie
+    static std::atomic<bool> dit{false};
+    if (!dit.exchange(true))
+        HLOG("nvn", "DLSS evaluation: input %ux%u copied to output %ux%u (no DLSS yet)", iw, ih, ow, oh);
+}
 
 // ================================================================ file
 NVN(nvnQueueSubmitCommands) {   // (queue, count, const NVNcommandHandle*)

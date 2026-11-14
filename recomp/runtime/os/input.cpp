@@ -16,7 +16,12 @@
 // cette touche à une autre action.
 // Manettes, disposition par position (comme une manette Nintendo) : bouton du bas = B, droite = A, gauche = Y,
 // haut = X ; LB/RB (L1/R1) = L/R ; gâchettes = ZL/ZR ; Start/Options/+ = +, Back/Share/Create/- = -.
-// Sur une manette Pro de la Switch, chaque bouton fait donc ce qui est écrit dessus.
+// Sur une manette Pro de la Switch, chaque bouton fait donc ce qui est écrit dessus. Chaque bouton de la Switch peut
+// être donné à une autre entrée de la manette (settings().pad, clés pad_… de recomp.ini, page Contrôles du launcher,
+// onglet Manette) ; les sticks restent les sticks.
+// SDL3.dll est fournie depuis la version qui suit la 1.0.3 (launcher/outils.py, outils\sdl3) : avant, elle n'était
+// cherchée que là, sans y être, et seules les manettes Xbox marchaient. Joy-Con : une paire est réunie en une manette
+// (SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS) ; un Joy-Con seul se tient à l'horizontale, comme une petite manette.
 #include "gfx.h"
 #include "settings.h"
 
@@ -47,6 +52,9 @@ enum : uint64_t {
     BTN_LS_LEFT = 1ull << 16, BTN_RS_LEFT = 1ull << 20,
 };
 constexpr int32_t STICK_MAX = 0x7FFF;
+// bits des boutons de la Switch, dans l'ordre K_A … K_RIGHT de Settings (touches du clavier, boutons de la manette)
+const uint64_t kBoutons[16] = {BTN_A, BTN_B, BTN_X, BTN_Y, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
+                               BTN_LSTICK, BTN_RSTICK, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT};
 
 typedef DWORD(WINAPI* XInputGetStateFn)(DWORD, XINPUT_STATE*);
 typedef DWORD(WINAPI* XInputSetStateFn)(DWORD, XINPUT_VIBRATION*);
@@ -166,13 +174,45 @@ bool charger_sdl() {
     // détection des branchements tourne dans un fil de SDL (pas de boucle d'événements SDL dans le jeu).
     sdl::SetHint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     sdl::SetHint("SDL_JOYSTICK_THREAD", "1");
+    // Joy-Con : les deux d'une paire forment une seule manette (valeur par défaut de SDL 3, écrite pour le dire) ; un
+    // Joy-Con seul, à l'horizontale
+    sdl::SetHint("SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS", "1");
+    sdl::SetHint("SDL_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS", "0");
     if (!sdl::Init(sdl::INIT_GAMEPAD)) {
         HLOG("input", "SDL_Init (controllers) failed: %s; XInput controller only", sdl::GetError());
         return false;
     }
-    HLOG("input", "SDL %d.%d.%d loaded (%s): Xbox, PlayStation 4 and 5, Switch Pro controllers…", v / 1000000,
-         v / 1000 % 1000, v % 1000, utf8(chemin).c_str());
+    HLOG("input", "SDL %d.%d.%d loaded (%s): Xbox, PlayStation 4 and 5, Switch Pro and Joy-Con controllers…",
+         v / 1000000, v / 1000 % 1000, v % 1000, utf8(chemin).c_str());
     return true;
+}
+
+// Entrée d'une manette SDL (Settings::P_*) appuyée ? Boutons : P_SUD … P_PAVE = SDL_GAMEPAD_BUTTON_SOUTH … TOUCHPAD ;
+// gâchettes : au-delà d'un quart de course.
+bool entree_sdl(sdl::Gamepad* g, int e) {
+    if (e >= Settings::P_SUD && e <= Settings::P_PAVE) return sdl::GetGamepadButton(g, e - Settings::P_SUD);
+    if (e == Settings::P_GACHETTE_G) return sdl::GetGamepadAxis(g, sdl::LEFT_TRIGGER) > 8000;
+    if (e == Settings::P_GACHETTE_D) return sdl::GetGamepadAxis(g, sdl::RIGHT_TRIGGER) > 8000;
+    return false;
+}
+
+// Entrées appuyées d'une manette XInput (sans SDL3.dll), une par bit Settings::P_*
+uint32_t entrees_xinput(const XINPUT_GAMEPAD& x) {
+    static const struct { WORD x; int e; } map[] = {
+        {XINPUT_GAMEPAD_A, Settings::P_SUD}, {XINPUT_GAMEPAD_B, Settings::P_EST}, {XINPUT_GAMEPAD_X, Settings::P_OUEST},
+        {XINPUT_GAMEPAD_Y, Settings::P_NORD}, {XINPUT_GAMEPAD_BACK, Settings::P_BACK},
+        {XINPUT_GAMEPAD_START, Settings::P_START}, {XINPUT_GAMEPAD_LEFT_THUMB, Settings::P_STICK_G},
+        {XINPUT_GAMEPAD_RIGHT_THUMB, Settings::P_STICK_D}, {XINPUT_GAMEPAD_LEFT_SHOULDER, Settings::P_EPAULE_G},
+        {XINPUT_GAMEPAD_RIGHT_SHOULDER, Settings::P_EPAULE_D}, {XINPUT_GAMEPAD_DPAD_UP, Settings::P_HAUT},
+        {XINPUT_GAMEPAD_DPAD_DOWN, Settings::P_BAS}, {XINPUT_GAMEPAD_DPAD_LEFT, Settings::P_GAUCHE},
+        {XINPUT_GAMEPAD_DPAD_RIGHT, Settings::P_DROITE},
+    };
+    uint32_t m = 0;
+    for (auto& e : map)
+        if (x.wButtons & e.x) m |= 1u << e.e;
+    if (x.bLeftTrigger > 30) m |= 1u << Settings::P_GACHETTE_G;
+    if (x.bRightTrigger > 30) m |= 1u << Settings::P_GACHETTE_D;
+    return m;
 }
 
 // Manettes branchées ou débranchées (toutes les 0,5 s) : chaque changement est noté dans le journal.
@@ -406,17 +446,9 @@ HostPad host_poll_input() {
         for (Pad& pd : g_pads) {
             if (!lire) break;
             p.xinput = true;
-            static const struct { int s; uint64_t b; } map[] = {
-                {sdl::SOUTH, BTN_B}, {sdl::EAST, BTN_A}, {sdl::WEST, BTN_Y}, {sdl::NORTH, BTN_X},
-                {sdl::LEFT_SHOULDER, BTN_L}, {sdl::RIGHT_SHOULDER, BTN_R}, {sdl::START, BTN_PLUS},
-                {sdl::BACK, BTN_MINUS}, {sdl::LEFT_STICK, BTN_LSTICK}, {sdl::RIGHT_STICK, BTN_RSTICK},
-                {sdl::DPAD_LEFT, BTN_LEFT}, {sdl::DPAD_UP, BTN_UP}, {sdl::DPAD_RIGHT, BTN_RIGHT},
-                {sdl::DPAD_DOWN, BTN_DOWN},
-            };
-            for (auto& m : map)
-                if (sdl::GetGamepadButton(pd.g, m.s)) p.buttons |= m.b;
-            if (sdl::GetGamepadAxis(pd.g, sdl::LEFT_TRIGGER) > 8000) p.buttons |= BTN_ZL;
-            if (sdl::GetGamepadAxis(pd.g, sdl::RIGHT_TRIGGER) > 8000) p.buttons |= BTN_ZR;
+            // chaque bouton de la Switch : l'entrée choisie (settings().pad ; par défaut, la disposition par position)
+            for (int i = 0; i < Settings::PAD_NB; i++)
+                if (entree_sdl(pd.g, settings().pad[i])) p.buttons |= kBoutons[i];
             // SDL : y positif vers le bas ; Switch : vers le haut
             auto ax = [&](int a, bool inv, int32_t dz) {
                 int32_t v = sdl::GetGamepadAxis(pd.g, a);
@@ -433,20 +465,9 @@ HostPad host_poll_input() {
     XINPUT_STATE st{};
     if (!g_sdl && g_xget && lire && g_xget(0, &st) == ERROR_SUCCESS) {
         p.xinput = true;
-        const WORD w = st.Gamepad.wButtons;
-        struct { WORD x; uint64_t b; } map[] = {
-            {XINPUT_GAMEPAD_A, BTN_B}, {XINPUT_GAMEPAD_B, BTN_A}, {XINPUT_GAMEPAD_X, BTN_Y},
-            {XINPUT_GAMEPAD_Y, BTN_X}, {XINPUT_GAMEPAD_LEFT_SHOULDER, BTN_L},
-            {XINPUT_GAMEPAD_RIGHT_SHOULDER, BTN_R}, {XINPUT_GAMEPAD_START, BTN_PLUS},
-            {XINPUT_GAMEPAD_BACK, BTN_MINUS}, {XINPUT_GAMEPAD_LEFT_THUMB, BTN_LSTICK},
-            {XINPUT_GAMEPAD_RIGHT_THUMB, BTN_RSTICK}, {XINPUT_GAMEPAD_DPAD_LEFT, BTN_LEFT},
-            {XINPUT_GAMEPAD_DPAD_UP, BTN_UP}, {XINPUT_GAMEPAD_DPAD_RIGHT, BTN_RIGHT},
-            {XINPUT_GAMEPAD_DPAD_DOWN, BTN_DOWN},
-        };
-        for (auto& m : map)
-            if (w & m.x) p.buttons |= m.b;
-        if (st.Gamepad.bLeftTrigger > 30) p.buttons |= BTN_ZL;
-        if (st.Gamepad.bRightTrigger > 30) p.buttons |= BTN_ZR;
+        const uint32_t e = entrees_xinput(st.Gamepad);   // mêmes réglages que les manettes SDL
+        for (int i = 0; i < Settings::PAD_NB; i++)
+            if (settings().pad[i] && (e >> settings().pad[i] & 1)) p.buttons |= kBoutons[i];
         p.lx = mix(p.lx, dead(st.Gamepad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE));
         p.ly = mix(p.ly, dead(st.Gamepad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE));
         p.rx = mix(p.rx, dead(st.Gamepad.sThumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE));

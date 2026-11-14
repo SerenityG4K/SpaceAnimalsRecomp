@@ -9,8 +9,14 @@ Crée <racine>/SpaceAnimalsRecomp-bug-report.zip :
   logs/…       journaux de la construction, des shaders, du jeu, de la mise à jour et du launcher
 
 Rien du jeu n'y entre (ni la copie, ni le code généré, ni les shaders, ni la sauvegarde) : seulement des journaux texte.
-Les chemins sont anonymisés : le dossier d'installation devient <install>, le profil Windows %USERPROFILE%, le nom
-d'utilisateur <user> et le nom du PC <pc>. Le joueur peut ouvrir le zip et relire le texte avant de l'envoyer.
+Les chemins sont anonymisés : le chemin de la copie du jeu devient <copy> (celui de lanceur.ini, de RECOMP_NUP, et tout
+chemin absolu en .nup, anciennes copies comprises), le dossier d'installation <install>, le profil Windows
+%USERPROFILE%, le nom d'utilisateur <user>, le nom du PC <pc>, et tout autre chemin absolu <path> (lettre du lecteur
+et extension gardées ; sauf ceux de Windows, Program Files et ProgramData). Le joueur peut ouvrir le zip et relire le
+texte avant de l'envoyer.
+
+Avant le 2026-11-12 (issue n° 5) : le chemin de la copie passé à preparer.py (--copie) restait dans lanceur.log, et
+lanceur.ini (UTF-16) était lu comme de l'UTF-8, si bien que rien n'y était anonymisé (caractères nuls intercalés).
 """
 import argparse
 import ctypes
@@ -48,8 +54,73 @@ JOURNAUX = [
 ]
 
 
+# ---------------------------------------------------------------- copie du jeu
+def decoder(data):
+    """Texte d'un fichier : UTF-16 avec BOM (lanceur.ini, écrit par WritePrivateProfileStringW), UTF-8 avec ou sans
+    BOM."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    if data[:3] == b"\xef\xbb\xbf":
+        return data[3:].decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="replace")
+
+
+def copies():
+    """Chemins connus de la copie du jeu : celui que garde le launcher (lanceur.ini, clé « copie ») et RECOMP_NUP."""
+    out = []
+    try:
+        with open(os.path.join(RACINE, "lanceur.ini"), "rb") as f:
+            for ligne in decoder(f.read()).splitlines():
+                cle, _, valeur = ligne.partition("=")
+                if cle.strip().lower() == "copie" and valeur.strip():
+                    out.append(valeur.strip())
+    except OSError:
+        pass
+    if os.environ.get("RECOMP_NUP", "").strip():
+        out.append(os.environ["RECOMP_NUP"].strip())
+    return list(dict.fromkeys(out))
+
+
+def description_copie(chemins):
+    """Ce qui peut aider sur la copie, sans son chemin : lecteur, espaces, caractères non ASCII, taille…"""
+    if not chemins:
+        return "none chosen"
+    c = chemins[0]
+    notes = []
+    lecteur = os.path.splitdrive(c)[0].upper()
+    if lecteur:
+        meme = lecteur == os.path.splitdrive(os.path.abspath(RACINE))[0].upper()
+        notes.append(f"drive {lecteur}" + ("" if meme else " (not the install's drive)"))
+    if os.path.normcase(os.path.abspath(c)).startswith(os.path.normcase(os.path.abspath(RACINE)) + os.sep):
+        notes.append("inside the install folder")
+    if " " in c:
+        notes.append("path has spaces")
+    if any(ord(x) > 127 for x in c):
+        notes.append("path has non-ASCII characters")
+    if "onedrive" in c.lower():
+        notes.append("inside OneDrive")
+    if len(c) > 200:
+        notes.append(f"path of {len(c)} characters")
+    try:
+        notes.append(f"{os.path.getsize(c) / (1 << 30):.1f} GB")
+    except OSError:
+        notes.append("not found")
+    return "<copy> (" + ", ".join(notes) + ")"
+
+
 # ---------------------------------------------------------------- anonymisation
-def anonymiseur():
+# Chemins absolus : lecteur, segments intermédiaires quelconques (espaces et parenthèses compris), dernier segment fait
+# de mots séparés par une seule espace (il s'arrête à « ( », « , », « ; », « ) », aux guillemets…). Gardés tels quels :
+# Windows, Program Files et ProgramData (rien de personnel), et ce qui est déjà anonymisé.
+_SEG = r"[^\\/:*?\"<>|\r\n]+"
+_DERNIER = r"[^\\/:*?\"<>|\r\n\s,;()]+(?: [^\\/:*?\"<>|\r\n\s,;()]+)*"
+CHEMIN = re.compile(r"(?<![A-Za-z0-9])([A-Za-z]):[\\/]+(?:" + _SEG + r"[\\/]+)*(?:" + _DERNIER + r")?")
+SURS = re.compile(r"[A-Za-z]:[\\/]+(?:Windows|Program Files(?: \(x86\))?|ProgramData)(?:[\\/]|$)", re.IGNORECASE)
+# tout chemin absolu d'une copie (.nup), même ancienne (« the manifest says … »), jusqu'au premier « .nup »
+NUP = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/][^:*?\"<>|\r\n]*?\.nup(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def anonymiseur(chemins_copie=()):
     remplacements = []
 
     def ajouter(chemin, par):
@@ -58,8 +129,17 @@ def anonymiseur():
         for c in {chemin, chemin.replace("\\", "/"), chemin.replace("/", "\\")}:
             remplacements.append((re.compile(re.escape(c), re.IGNORECASE), par))
 
-    ajouter(os.path.normpath(RACINE), "<install>")
-    ajouter(os.environ.get("USERPROFILE", ""), "%USERPROFILE%")
+    # la copie avant le dossier d'installation (elle peut s'y trouver), puis son nom seul
+    for c in sorted(chemins_copie, key=len, reverse=True):
+        ajouter(os.path.normpath(c), "<copy>")
+        ajouter(c, "<copy>")
+    noms_copie = [re.compile(r"(?<![A-Za-z0-9])" + re.escape(os.path.basename(c)) + r"(?![A-Za-z0-9])", re.IGNORECASE)
+                  for c in chemins_copie if len(os.path.basename(c)) >= 5]
+    installation = []
+    for chemin, par in ((os.path.normpath(RACINE), "<install>"), (os.environ.get("USERPROFILE", ""), "%USERPROFILE%")):
+        if chemin and len(chemin) >= 4:
+            for c in {chemin, chemin.replace("\\", "/"), chemin.replace("/", "\\")}:
+                installation.append((re.compile(re.escape(c), re.IGNORECASE), par))
     profil = re.compile(r"([A-Za-z]:[\\/]+Users[\\/]+)(?!<user>)([^\\/:*?\"<>|\r\n]+)", re.IGNORECASE)
     noms = []
     for var, par in (("USERNAME", "<user>"), ("COMPUTERNAME", "<pc>"), ("USERDOMAIN", "<pc>")):
@@ -67,10 +147,23 @@ def anonymiseur():
         if len(v) >= 3:
             noms.append((re.compile(r"(?<![A-Za-z0-9])" + re.escape(v) + r"(?![A-Za-z0-9])", re.IGNORECASE), par))
 
+    def autre_chemin(m, texte):
+        chemin = m.group(0)
+        if len(chemin) <= 3 or SURS.match(chemin) or texte[m.end():m.end() + 1] in ("<", "%"):
+            return chemin   # sûr, ou suivi d'une partie déjà anonymisée (profil d'un autre compte : …\Users\<user>\…)
+        ext = re.search(r"\.[A-Za-z0-9]{1,5}$", chemin)
+        return m.group(1).upper() + ":\\<path>" + (ext.group(0) if ext else "")
+
     def anonymiser(texte):
         for motif, par in remplacements:
             texte = motif.sub(lambda m, p=par: p, texte)
+        texte = NUP.sub("<copy>", texte)
+        for motif in noms_copie:
+            texte = motif.sub("<copy>", texte)
+        for motif, par in installation:
+            texte = motif.sub(lambda m, p=par: p, texte)
         texte = profil.sub(lambda m: m.group(1) + "<user>", texte)
+        texte = CHEMIN.sub(lambda m: autre_chemin(m, texte), texte)
         for motif, par in noms:
             texte = motif.sub(par, texte)
         return texte
@@ -278,14 +371,15 @@ def lire(chemin):
             tete = f.read(TAILLE_MAX // 4)
             f.seek(taille - TAILLE_MAX * 3 // 4)
             data = tete + f"\n\n[... {taille - TAILLE_MAX} bytes cut by the bug report ...]\n\n".encode() + f.read()
-    return data.decode("utf-8", errors="replace")
+    return decoder(data)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sortie", default=os.path.join(RACINE, NOM))
     a = ap.parse_args()
-    anon = anonymiseur()
+    chemins_copie = copies()
+    anon = anonymiseur(chemins_copie)
     maintenant = datetime.datetime.now()
     joints = [(c, n) for c, n in JOURNAUX if os.path.exists(c)]
     run = os.path.join(FULL, "recomp_run.log")
@@ -296,7 +390,7 @@ def main():
          f"Memory: {memoire()}"]
     r += [f"GPU: {x}" for x in gpus()]
     r += [f"Vulkan (last game): {x.split('] ', 2)[-1]}" for x in lignes_journal(run, ("[vk    ] GPU:", "[vk    ] display ", "[vk    ] pipelines:"))]
-    r += [f"Install folder: {dossier_installation()}", ""]
+    r += [f"Install folder: {dossier_installation()}", f"Game copy: {description_copie(chemins_copie)}", ""]
     r += ["Build:"] + [f"  {x}" for x in etat_construction()]
     r += ["Tools:"] + [f"  {x}" for x in outils()]
     r += ["", "Attached files:"]

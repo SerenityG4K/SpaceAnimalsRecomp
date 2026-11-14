@@ -10,6 +10,9 @@ Résultat (par défaut recomp/outils/) :
   python/     Python 3.13 embarquable, avec zstandard et lz4 (lecture de la copie, extraction des shaders)
   gcc/        GCC 16.2 (WinLibs, UCRT, threads POSIX) : compile le C++ généré, le runtime et le launcher
   glslang/    glslang 16.6 : traduit les shaders GLSL en SPIR-V
+  sdl3/       SDL 3.4 (SDL3.dll seule) : manettes PlayStation, Switch Pro et Joy-Con, pour le jeu et le launcher
+  fsr/        FSR d'AMD (FidelityFX SDK 2.4.0) : les deux bibliothèques signées que le jeu charge (runtime/os/fsr.cpp)
+  dlss/       DLSS de NVIDIA (SDK 310.9.16) : nvngx_dlss.dll, que le pilote NVIDIA charge pour le jeu (runtime/os/dlss.cpp)
   LISEZMOI.txt   versions, sources et licences
 """
 import argparse
@@ -57,6 +60,32 @@ OUTILS = [
      "acceptes": ("3c69305081e4a647144339a936244fcf7d3d9e558319e1ad7be2cd2886d4b6a1",),
      "licence": "GPL v3 avec exception de bibliothèque d'exécution GCC ; LLVM : Apache 2.0 avec exceptions LLVM ; "
                 "MinGW-w64 : licences libres (ZPL, MIT…) ; Z3 : MIT"},
+    # Manettes PlayStation (DualShock 4, DualSense), Switch Pro et Joy-Con : SDL3.dll, chargée à l'exécution par le jeu
+    # (runtime/os/input.cpp) et par le launcher (page Contrôles). Ajoutée après la 1.0.3 : le jeu la cherchait déjà
+    # mais elle n'était pas fournie (seules les manettes Xbox marchaient, par XInput). Une mise à jour l'installe
+    # (maj.py relance outils.py).
+    {"nom": "sdl3", "version": "3.4.20",
+     "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20-win32-x64.zip",
+     "sha256": "368bed8b24e44ad9ea372990814f2343fcfb9e468abb7f8f4a3bc146c7304752", "dest": "sdl3", "racine": False,
+     "licence": "zlib"},
+    # Mises à l'échelle (1.1.0), livrées avec le paquet comme dans un jeu du commerce (décision de SerenityG4K) : un
+    # fichier chacune, pris tel quel dans le dépôt officiel de son éditeur ("fichier" : pas une archive). Aucune n'est
+    # sous GPL : licences dans LICENCES/ (MIT pour ces fichiers d'AMD, licence des SDK RTX pour NVIDIA).
+    {"nom": "fsr-loader", "version": "FidelityFX SDK 2.4.0 (amd_fidelityfx_loader_vk.dll)", "fichier": True,
+     "url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/signedbin/"
+            "amd_fidelityfx_loader_vk.dll",
+     "sha256": "38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e5769b323b200dc1f142bab9", "dest": "fsr", "racine": False,
+     "licence": "MIT (AMD), voir LICENCES/AMD-FidelityFX-SDK-LICENSE.txt"},
+    {"nom": "fsr-upscaler", "version": "FidelityFX SDK 2.4.0 (amd_fidelityfx_upscaler_vk.dll : FSR 4.1.2 et FSR 3.1.6)",
+     "fichier": True,
+     "url": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/signedbin/"
+            "amd_fidelityfx_upscaler_vk.dll",
+     "sha256": "4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7", "dest": "fsr", "racine": False,
+     "licence": "MIT (AMD), voir LICENCES/AMD-FidelityFX-SDK-LICENSE.txt"},
+    {"nom": "dlss", "version": "DLSS SDK 310.9.16 (nvngx_dlss.dll)", "fichier": True,
+     "url": "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll",
+     "sha256": "d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e", "dest": "dlss", "racine": False,
+     "licence": "propriétaire (NVIDIA RTX SDKs License), voir LICENCES/NVIDIA-DLSS-SDK-LICENSE.txt"},
     {"nom": "glslang", "version": "16.6.0",
      "url": "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip",
      "sha256": "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b", "dest": "glslang", "racine": False,
@@ -269,6 +298,13 @@ def main():
         if deja and not any(p["dest"] == "python" and not os.path.exists(os.path.join(marques, p["nom"])) for p in OUTILS):
             print("  already installed", flush=True)
             continue
+        # fichier seul (DLL du FSR, du DLSS) déjà à sa place avec la bonne empreinte : rien à télécharger
+        place = os.path.join(dest, o["dest"], os.path.basename(fichier))
+        if o.get("fichier") and os.path.exists(place) and empreinte(place) == o["sha256"]:
+            with open(marque, "w", encoding="utf-8") as f:
+                f.write(o["sha256"] + "\n")
+            print("  already there, SHA-256 hash verified", flush=True)
+            continue
         if not (os.path.exists(fichier) and empreinte(fichier) == o["sha256"]):
             print(f"  download: {o['url']}", flush=True)
             telecharger(o["url"], fichier)
@@ -281,7 +317,10 @@ def main():
         if o["nom"] in ("python", "gcc", "glslang") and os.path.isdir(cible):
             shutil.rmtree(cible)
         os.makedirs(cible, exist_ok=True)
-        extraire(fichier, cible, o["racine"])
+        if o.get("fichier"):
+            shutil.copyfile(fichier, place)
+        else:
+            extraire(fichier, cible, o["racine"])
         if o["nom"] in ("gcc", "glslang") and not a.complet:
             n, taille = alleger(cible, o["nom"])
             print(f"  slimmed down: {n} files not needed for the build removed ({taille / 1e6:.0f} MB)", flush=True)

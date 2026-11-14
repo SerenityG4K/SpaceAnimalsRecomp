@@ -1,0 +1,27 @@
+// Passe après le DLSS (dlss.cpp, vk_render.cpp : dlss_taa). Source de dlss_spirv.h (dlss_spirv.py).
+//
+// Remplace les deux sorties du shader taa_resolve du jeu à partir de l'image du DLSS (RVB compressé) :
+//  * historique (cible 1, RGBA16) : (Co + 0,5, Y, Cg + 0,5), comme le moteur le garde ;
+//  * couleur linéaire, recopiée ensuite dans la cible 0 (RGBA8 sRGB) par vkCmdBlitImage : x / (1 − x) si le mot 14
+//    de la banque 6 a son bit 0 (compression x / (1 + x)), sinon x² (racine carrée), comme le shader du jeu.
+#version 450
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform texture2D sortie_dlss;
+layout(set = 0, binding = 1) uniform writeonly image2D historique;   // RGBA16 (écriture sans format)
+layout(set = 0, binding = 2) uniform writeonly image2D lineaire;   // RGBA16F
+layout(push_constant) uniform Constantes {
+    ivec2 taille;
+    uint reinhard;
+} pc;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.taille.x || p.y >= pc.taille.y) return;
+    const vec3 c = clamp(texelFetch(sortie_dlss, p, 0).rgb, 0.0, 1.0);
+    const float y = 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+    const float co = 0.5 * (c.r - c.b), cg = 0.5 * c.g - 0.25 * (c.r + c.b);
+    imageStore(historique, p, vec4(co + 0.5, y, cg + 0.5, 1.0));
+    const vec3 l = pc.reinhard != 0u ? c / max(1.0 - c, vec3(1.0 / 65504.0)) : c * c;
+    imageStore(lineaire, p, vec4(l, 1.0));
+}

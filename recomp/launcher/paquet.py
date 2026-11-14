@@ -25,11 +25,14 @@ Contenu :
   recomp/launcher/rapport.py       rapport de bug (bouton « RAPPORT DE BUG ») et en-tête des journaux
   recomp/launcher/sauvegardes.py   copies de secours des sauvegardes avant construction et mise à jour
   recomp/launcher/desinstaller.py  nettoyage et désinstallation (bouton « DÉSINSTALLER » du launcher)
+  recomp/launcher/deplacer.py      déplacement de l'installation (page Réglages, « Emplacement du jeu »)
   uninstall.bat                 la même désinstallation sans le launcher (double-clic)
   recomp/launcher/extraits/*.mp4   extraits vidéo du fond du launcher (gameplay de SerenityG4K, fournis à sa demande)
   tools/nup.py, tools/nso.py       lecture de la copie .nup et des exécutables NSO
-  outils/                          Python, GCC, glslang (paquet complet seulement ; GCC et glslang réduits aux
-                                   fichiers que la construction utilise, voir outils.GARDER_GCC)
+  outils/                          Python, GCC, glslang, SDL3, et les bibliothèques de mise à l'échelle : FSR d'AMD
+                                   (outils/fsr) et DLSS de NVIDIA (outils/dlss), ni l'une ni l'autre sous GPL (paquet
+                                   complet seulement ; GCC et glslang réduits aux fichiers que la construction
+                                   utilise, voir outils.GARDER_GCC)
 
 Le joueur fournit sa propre copie (.nup) ; tout ce qui en dérive est produit sur son PC et y reste.
 """
@@ -81,16 +84,20 @@ Il vous faut :
     C:\\ProgramData\\StarFoxRecomp (environ 600 Mo).
 
 Étapes :
-  1. Décompressez ce dossier où vous voulez (pas dans Program Files).
+  1. Décompressez ce dossier où vous voulez (pas dans Program Files). Vous pourrez le déplacer plus tard depuis le
+     launcher (Réglages › Emplacement du jeu), et y créer un raccourci sur le bureau.
   2. Lancez lanceur.exe.
   3. Choisissez votre copie (COPIE › choisir), puis cliquez « RECOMPILER LE JEU ».
      Comptez 20 à 45 minutes selon votre processeur : le launcher reste utilisable pendant ce temps.
   4. Vers la fin, tous les shaders du jeu sont compilés pour votre carte graphique (environ une minute) : plus
      aucune saccade de compilation en jeu. Le jeu tourne aussi quelques secondes en arrière-plan, sans fenêtre ni
      son, pour relever les shaders qu'il crée au démarrage. Rien ne s'ouvre tout seul pendant la construction.
-  5. Cliquez « JOUER ». Sous le bouton : plein écran ou fenêtré. Réglages : langue du jeu, résolution, images
-     par seconde, volume, vibrations, mises à jour. Contrôles : les touches du clavier se changent (clic sur une
-     touche, puis la touche voulue), avec deux préréglages, WASD (clavier QWERTY) et ZQSD (clavier AZERTY).
+  5. Cliquez « JOUER ». Sous le bouton : plein écran ou fenêtré. Graphismes : carte graphique, résolution, images
+     par seconde, rendu 3D, et deux mises à l'échelle expérimentales, le DLSS de NVIDIA (cartes RTX seulement) et le
+     FSR d'AMD. Réglages : langue du jeu, volume, vibrations, mises à jour, emplacement du jeu, raccourci sur le
+     bureau. Contrôles : les touches du clavier se changent (clic sur une touche, puis la touche voulue), avec deux
+     préréglages, WASD (clavier QWERTY) et ZQSD (clavier AZERTY) ; les boutons de la manette aussi (Xbox,
+     PlayStation, Switch Pro, Joy-Con).
 
 Mises à jour : le launcher vérifie au démarrage les releases du projet sur GitHub (désactivable dans Réglages) et vous
 demande avant d'en installer une. Un clic sur « MISE À JOUR … DISPONIBLE » télécharge la nouvelle version, vérifie son
@@ -129,8 +136,12 @@ est tirée de votre copie et ne quitte jamais votre PC.
 Votre copie n'est jamais modifiée (lecture seule).
 
 Licences : SpaceAnimalsRecomp est sous licence GNU GPL v3. Le dossier outils contient des logiciels libres tiers,
-inchangés (GCC, Clang/LLVM, binutils et MinGW-w64 de WinLibs, glslang, Python) : leurs licences et les adresses de leur code
+inchangés (GCC, Clang/LLVM, binutils et MinGW-w64 de WinLibs, glslang, Python, SDL3) : leurs licences et les adresses de leur code
 source sont dans THIRD_PARTY_NOTICES.txt, et les textes complets des licences dans le dossier LICENCES.
+Il contient aussi deux bibliothèques de mise à l'échelle, inchangées : le FSR d'AMD (outils\\fsr, licence MIT) et le DLSS
+de NVIDIA (outils\\dlss\\nvngx_dlss.dll). Le DLSS n'est pas un logiciel libre : il est fourni sous la licence de NVIDIA
+(LICENCES\\NVIDIA-DLSS-SDK-LICENSE.txt), pas sous la GPL. Ce logiciel utilise NVIDIA DLSS ; NVIDIA, GeForce RTX et DLSS
+sont des marques de NVIDIA Corporation.
 
 Star Fox est une marque de Nintendo. Projet de fan, sans lien avec Nintendo.
 """
@@ -159,16 +170,19 @@ You need:
     (about 600 MB).
 
 Steps:
-  1. Unzip this folder wherever you like (not in Program Files).
+  1. Unzip this folder wherever you like (not in Program Files). You can move it later from the launcher (Settings ›
+     Game location), and create a desktop shortcut there.
   2. Run lanceur.exe (the launcher; EN at the top right switches it to English).
   3. Choose your copy (COPY › choose), then click "RECOMPILE THE GAME".
      Allow 20 to 45 minutes depending on your processor: the launcher stays usable meanwhile.
   4. Near the end, all the game's shaders are compiled for your graphics card (about a minute): no more
      compilation stutter in game. The game also runs for a few seconds in the background, with no window and no
      sound, to collect the shaders it creates at startup. Nothing opens by itself during the build.
-  5. Click "PLAY". Under the button: fullscreen or windowed. Settings: game language, resolution, frames per
-     second, volume, rumble, updates. Controls: the keyboard keys can be changed (click a key, then press the one
-     you want), with two presets, WASD (QWERTY keyboard) and ZQSD (AZERTY keyboard).
+  5. Click "PLAY". Under the button: fullscreen or windowed. Graphics: graphics card, resolution, frames per
+     second, 3D rendering, and two experimental upscalers, NVIDIA DLSS (RTX cards only) and AMD FSR. Settings: game
+     language, volume, rumble, updates, game location, desktop shortcut. Controls: the keyboard keys can be changed
+     (click a key, then press the one you want), with two presets, WASD (QWERTY keyboard) and ZQSD (AZERTY
+     keyboard); so can the controller buttons (Xbox, PlayStation, Switch Pro, Joy-Con).
 
 Updates: at startup the launcher checks the project's releases on GitHub (can be turned off in Settings) and asks
 before installing one. A click on "UPDATE … AVAILABLE" downloads the new version, checks its SHA-256 hash, installs it
@@ -205,8 +219,12 @@ from your copy and never leaves your PC.
 Your copy is never modified (read-only).
 
 Licences: SpaceAnimalsRecomp is under the GNU GPL v3. The outils folder contains third-party free software, unchanged
-(GCC, Clang/LLVM, binutils and MinGW-w64 from WinLibs, glslang, Python): their licences and the addresses of their
+(GCC, Clang/LLVM, binutils and MinGW-w64 from WinLibs, glslang, Python, SDL3): their licences and the addresses of their
 source code are in THIRD_PARTY_NOTICES.txt, and the full licence texts in the LICENCES folder.
+It also contains two upscaling libraries, unchanged: AMD FSR (outils\\fsr, MIT licence) and NVIDIA DLSS
+(outils\\dlss\\nvngx_dlss.dll). DLSS is not free software: it comes under NVIDIA's licence
+(LICENCES\\NVIDIA-DLSS-SDK-LICENSE.txt), not under the GPL. This software uses NVIDIA DLSS; NVIDIA, GeForce RTX and DLSS
+are trademarks of NVIDIA Corporation.
 
 Star Fox is a trademark of Nintendo. Fan project, not affiliated with Nintendo.
 """
@@ -276,11 +294,12 @@ def main():
     for f in ("recomp.py", "build.py", "fullbuild.py", "link.py", "hooks.txt", "lots.txt", "VERSION"):
         copier(os.path.join(RECOMP, f), os.path.join(r, f))
     copier_arbre(os.path.join(RECOMP, "a64"), os.path.join(r, "a64"), (".py",))
-    copier_arbre(os.path.join(RECOMP, "runtime"), os.path.join(r, "runtime"), (".cpp", ".h", ".hpp", ".c", ".inl"))
+    copier_arbre(os.path.join(RECOMP, "runtime"), os.path.join(r, "runtime"), (".cpp", ".h", ".hpp", ".c", ".inl", ".comp",
+                                                                            ".py", ".md", ".txt"))
     for f in os.listdir(os.path.join(RECOMP, "shaders")):
         if f.endswith(".py"):
             copier(os.path.join(RECOMP, "shaders", f), os.path.join(r, "shaders", f))
-    for f in ("preparer.py", "maj.py", "outils.py", "rapport.py", "sauvegardes.py", "desinstaller.py"):
+    for f in ("preparer.py", "maj.py", "outils.py", "rapport.py", "sauvegardes.py", "desinstaller.py", "deplacer.py"):
         copier(os.path.join(LANCEUR, f), os.path.join(r, "launcher", f))
     # extraits du fond du launcher : gameplay enregistré par SerenityG4K, distribué à sa demande (1.0.2)
     extraits = sorted(f for f in os.listdir(os.path.join(LANCEUR, "extraits")) if f.startswith("extrait_") and f.endswith(".mp4"))
@@ -302,12 +321,21 @@ def main():
     sys.path.insert(0, LANCEUR)
     import outils as regles   # noqa: E402  (fichiers de GCC et de glslang utiles à la construction)
     retires = taille_retiree = 0
+    # Outils faits de fichiers seuls (DLL du FSR, du DLSS) : le paquet ne porte que ce que outils.py installe, pour
+    # qu'une installation mise à jour (qui les télécharge) ait le même dossier outils qu'une installation neuve. Leurs
+    # licences sont dans LICENCES/, à la racine.
+    seuls = {}
+    for o in regles.OUTILS:
+        if o.get("fichier"):
+            seuls.setdefault(o["dest"], set()).add(o["url"].rsplit("/", 1)[1])
     for racine, dossiers, fichiers in os.walk(outils):   # sans les archives téléchargées ni les caches Python
         dossiers[:] = [d for d in dossiers if d not in ("_archives", "__pycache__")]
         for f in fichiers:
             p = os.path.join(racine, f)
             rel = os.path.relpath(p, outils).replace("\\", "/")
             outil, _, dans_outil = rel.partition("/")
+            if outil in seuls and dans_outil not in seuls[outil]:
+                continue   # note ou licence posée à la main à côté des DLL : pas dans le paquet
             if dans_outil and not regles.garder(outil, dans_outil):
                 retires += 1
                 taille_retiree += os.path.getsize(p)

@@ -24,6 +24,7 @@ Ce que le paquet écrit sur un PC :
   %ProgramData%\\StarFoxRecomp           copie du compilateur (installation dans un dossier dont le chemin a des espaces)
   %TEMP%\\recomp_textures_*.tmp          fichier temporaire d'une partie interrompue par une coupure de courant
   %APPDATA%\\SpaceAnimalsRecomp          sauvegardes et copies de secours
+  Bureau\\StarFox Remake [recompiled].lnk  raccourci créé depuis le launcher, s'il mène à cette installation
   <installation>                         le paquet : launcher, outils, sources
 Journal : %TEMP%\\SpaceAnimalsRecomp-uninstall.log (en anglais).
 """
@@ -84,6 +85,32 @@ def copies_du_jeu(racine):
     return out
 
 
+def raccourci_bureau(racine):
+    """Raccourci du launcher sur le bureau (page Réglages), s'il mène à cette installation : le chemin de son
+    lanceur.exe est cherché dans le fichier .lnk (UTF-16 et page de codes de Windows), sans l'interpréter.
+    LANCEUR_BUREAU (vérification) : un autre dossier que le bureau."""
+    try:
+        bureau = os.environ.get("LANCEUR_BUREAU")
+        if not bureau:
+            b = ctypes.create_unicode_buffer(1024)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, b):   # CSIDL_DESKTOPDIRECTORY
+                return []
+            bureau = b.value
+        lnk = os.path.join(bureau, "StarFox Remake [recompiled].lnk")
+        with open(lnk, "rb") as f:
+            donnees = f.read().lower()   # minuscules ASCII seulement, comme la cible ci-dessous
+    except (OSError, AttributeError):
+        return []
+    cible = "".join(c.lower() if c.isascii() else c for c in os.path.join(os.path.abspath(racine), "lanceur.exe"))
+    for codage in ("utf-16-le", "mbcs"):
+        try:
+            if cible.encode(codage) in donnees:
+                return [lnk]
+        except (UnicodeError, LookupError):
+            pass
+    return []
+
+
 def elements(racine):
     """(clé, description en anglais, chemins) de tout ce que le paquet a écrit ; les chemins absents sont retirés."""
     r = os.path.join(racine, "recomp")
@@ -96,6 +123,7 @@ def elements(racine):
         ("compilateur", "compiler copy", [os.path.join(programdata, "StarFoxRecomp")]),
         ("temporaires", "temporary files", glob.glob(os.path.join(glob.escape(tempfile.gettempdir()), "recomp_textures_*.tmp"))),
         ("paquet", "the package: launcher, tools, sources", [racine]),
+        ("raccourci", "desktop shortcut", raccourci_bureau(racine)),
         ("sauvegardes", "your saves and their backups", [os.path.join(appdata, "SpaceAnimalsRecomp")] if appdata else []),
     ]
     return [(k, d, [p for p in ch if os.path.exists(p)]) for k, d, ch in liste]
@@ -227,7 +255,8 @@ def main():
         dire(f"@erreur {qui} is running: close it first")
         return 2
     voulu = ("jeu", "code", "extraits", "compilateur", "temporaires") if a.nettoyer else \
-        ("jeu", "code", "extraits", "compilateur", "temporaires", "paquet") + (("sauvegardes",) if a.sauvegardes else ())
+        ("jeu", "code", "extraits", "compilateur", "temporaires", "paquet", "raccourci") + \
+        (("sauvegardes",) if a.sauvegardes else ())
     cibles = [(cle, desc, chemins) for cle, desc, chemins in el if cle in voulu and chemins]
     dire(("Cleaning" if a.nettoyer else "Uninstalling") + f" SpaceAnimalsRecomp ({racine})")
     for cle, desc, chemins in cibles:
@@ -275,8 +304,11 @@ def main():
                            for d in dossiers if os.path.exists(d))
                + f"; if (-not (Get-ChildItem -LiteralPath {q(racine)} -Force -ErrorAction SilentlyContinue)) "
                + f"{{ Remove-Item -LiteralPath {q(racine)} -Force -ErrorAction SilentlyContinue }}")
+        # NEW_PROCESS_GROUP | CREATE_NO_WINDOW, sans DETACHED_PROCESS : lancé « détaché », PowerShell se termine aussitôt
+        # sans rien exécuter (jusqu'à la 1.0.3, le dossier d'installation restait donc là, avec le Python fourni dedans ;
+        # vu le 2026-11-13 avec un Python rangé dans l'installation, comme chez un joueur)
         subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", cmd],
-                         cwd=tempfile.gettempdir(), creationflags=0x00000008 | 0x00000200 | 0x08000000,
+                         cwd=tempfile.gettempdir(), creationflags=0x00000200 | 0x08000000,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         autres = [r for r in restes if not os.path.normcase(r).startswith(os.path.normcase(os.path.dirname(moi)))]
         if autres:

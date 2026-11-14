@@ -2,6 +2,7 @@
 //  * romfs : image RomFS virtuelle (en-tête + tables construites en mémoire), dont les données
 //    sont lues en place dans le conteneur .nup d'origine (ouvert en lecture seule, jamais copié) ;
 //  * sauvegardes et carte SD : dossiers de l'hôte (à côté de l'exécutable).
+#include <atomic>
 #include "svc_util.h"
 #include "settings.h"
 
@@ -15,21 +16,38 @@
 namespace fs = std::filesystem;
 
 namespace hos {
+namespace dlss {
+double echelle_dlss();   // dlss.cpp (dlss.h demande les en-têtes Vulkan)
+}
 namespace {
 
 constexpr uint32_t FS_PATH_NOT_FOUND = MakeResult(2, 1), FS_PATH_EXISTS = MakeResult(2, 2),
                    FS_TARGET_NOT_FOUND = MakeResult(2, 1002);
 
 // ---------------------------------------------------------------- variables du moteur (PC)
-// Réglages injectés dans veclipse_build.cvar. Rendu interne à la résolution de sortie (le moteur rend
-// sinon à 50 % puis suréchantillonne, comme sur la console ; native_resolution = false pour cela).
+// Réglages injectés dans veclipse_build.cvar. Rendu interne à render_scale % de la résolution de sortie (100 :
+// natif). Passes relevées le 2026-11-12 (RECOMP_VK_DEBUG) : sous 100 %, le moteur fait son anticrénelage temporel
+// (taa_resolve) à la taille du rendu, puis upsample.frag agrandit l'image (un échantillon bilinéaire) vers la taille
+// de l'écran, avant l'interface. Mais deux chemins « Nintendo only » prennent le relais selon l'échelle :
+//  * render.dlss_allowed (vrai par défaut) : dès un rapport de 1,5 (échelle ≤ 0,6667), réseau DLSS de la console à la
+//    place de taa_resolve (present.frag, dlss_velocity, nvnCommandBufferEvaluateDlss), puis agrandissement par un
+//    calcul (48e14554faa3dae5) absent du cache : scène 3D noire. 0,67 passait, juste au-dessus du seuil ;
+//  * render.ndsr_allowed (vrai par défaut) : à 50 %, upsample.frag écrit une image de la taille du rendu et un calcul à
+//    instructions matricielles (059b307b6448e8a1, réseau NDSR) l'agrandit : intraduisible, scène 3D noire.
+// Les deux sont donc toujours coupés : à toute échelle, taa_resolve puis upsample.frag, que le DLSS de NVIDIA
+// remplace en super résolution (dlss.cpp, dlss_taa et dlss_agrandir dans vk_render.cpp ; l'échelle suit alors son
+// mode, jusqu'à 33 %).
 std::vector<std::pair<std::string, std::string>> recomp_cvars() {
     std::vector<std::pair<std::string, std::string>> v;
-    if (settings().native_resolution) {   // recomp.ini : native_resolution (false : comportement console)
-        v.push_back({"render.resolution_scale_console", "1.0"});
-        v.push_back({"render.resolution_scale", "1.0"});
-        v.push_back({"render.dynres_enabled", "false"});
-    }
+    double echelle = dlss::echelle_dlss();
+    if (echelle <= 0) echelle = std::clamp(settings().render_scale, 67, 100) / 100.0;
+    char e[16];
+    snprintf(e, sizeof e, "%.4f", echelle);
+    v.push_back({"render.resolution_scale_console", e});
+    v.push_back({"render.resolution_scale", e});
+    v.push_back({"render.dynres_enabled", "false"});
+    v.push_back({"render.dlss_allowed", "false"});   // pas le réseau DLSS de la console
+    v.push_back({"render.ndsr_allowed", "false"});   // ni son agrandissement NDSR
     return v;
 }
 
@@ -111,7 +129,14 @@ struct Romfs {
                             size_t p1 = all.find(';', p0);
                             std::string item = all.substr(p0, p1 == std::string::npos ? std::string::npos : p1 - p0);
                             size_t eq = item.find('=');
-                            if (eq != std::string::npos) add.push_back({item.substr(0, eq), item.substr(eq + 1)});
+                            if (eq != std::string::npos) {
+                                // remplace une entrée du recomp du même nom, au lieu d'une clé en double (on ne
+                                // sait pas laquelle le moteur garde)
+                                const std::string k = item.substr(0, eq);
+                                add.erase(std::remove_if(add.begin(), add.end(), [&](const auto& kv) { return kv.first == k; }),
+                                          add.end());
+                                add.push_back({k, item.substr(eq + 1)});
+                            }
                             if (p1 == std::string::npos) break;
                             p0 = p1 + 1;
                         }
@@ -205,6 +230,16 @@ struct Romfs {
                         ov.Offset = (DWORD)(src + done);
                         ov.OffsetHigh = (DWORD)((src + done) >> 32);
                         if (!ReadFile(nup, dst + done, chunk, &got, &ov) || !got) {
+                            // Échec autrefois silencieux : le jeu recevait des zéros sans qu'aucune ligne le dise.
+                            const DWORD err = GetLastError();
+                            static std::atomic<int> nech{0};
+                            const int k = nech.fetch_add(1);
+                            if (k < 40 || k % 1000 == 0)
+                                HLOG("fs", "game data read FAILED (Windows error %lu, %lu bytes read of %lu) at file offset "
+                                           "0x%llx into game memory 0x%llx: %llu bytes zero-filled (failure %d)",
+                                     (unsigned long)err, (unsigned long)got, (unsigned long)chunk,
+                                     (unsigned long long)(src + done), (unsigned long long)(uint64_t)(dst + done),
+                                     (unsigned long long)(n - done), k + 1);
                             memset(dst + done, 0, n - done);
                             break;
                         }

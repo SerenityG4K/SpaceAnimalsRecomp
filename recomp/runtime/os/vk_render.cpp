@@ -26,6 +26,9 @@
 #include "vk_render.h"
 #include "record.h"
 #include "settings.h"
+#include "dlss.h"
+#include "fsr.h"
+#include "dlss_spirv.h"
 
 // runtime.cpp : pause du compteur du jeu pendant un long blocage du pilote. Pas déclarées dans cpu.h : cet en-tête
 // entre dans l'empreinte de chaque objet du jeu recompilé (build.py, GEN_HEADERS) ; y toucher ferait recompiler tout
@@ -50,6 +53,7 @@ void rt_stall_end();
 namespace hos {
 namespace vkr {
 void flush_locked(const char* where);   // soumet et attend le GPU (défini plus bas)
+void dlss_emplacement(int slot);        // jeux de descripteurs des passes du DLSS de cet emplacement, remis à zéro
 namespace {
 
 // ================================================================ fonctions Vulkan
@@ -84,7 +88,8 @@ namespace {
     X(vkWaitSemaphores) X(vkGetSemaphoreCounterValue)                                                       \
     X(vkCmdSetCullMode) X(vkCmdSetFrontFace) X(vkCmdSetDepthTestEnable) X(vkCmdSetDepthWriteEnable)            \
     X(vkCmdSetDepthCompareOp) X(vkCmdSetStencilTestEnable) X(vkCmdSetStencilOp) X(vkCmdSetDepthBiasEnable)     \
-    X(vkCreatePipelineCache) X(vkGetPipelineCacheData) X(vkDestroyPipeline)
+    X(vkCreatePipelineCache) X(vkGetPipelineCacheData) X(vkDestroyPipeline)                                     \
+    X(vkCmdPushConstants) X(vkDestroyShaderModule)
 
 #define DECL(n) PFN_##n n = nullptr;
 PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr = nullptr;
@@ -115,6 +120,8 @@ struct Image {
     // octets de la source hors de ces pages ; rel_n : nombre de rendus de cette image
     uint64_t rel_d = 0, rel_f = 0, rel_id = 0, edge_hash = 0;
     uint8_t rel_n = 0;
+    // numéro de la demande de rendu en attente (tex_release_later), 0 : aucune ; un nouvel envoi ou contrôle l'annule
+    uint64_t rel_serie = 0;
     // objets texture vivants du jeu qui l'utilisent (celui qui l'a créée + ceux qui la partagent) ; à 0, l'image
     // reste réemployable (by_addr) dans la limite du cache des images sans objet (texture_released)
     uint32_t refs = 0;
@@ -124,6 +131,10 @@ struct Image {
     // plages vidées par le jeu (pool_flushed) : numéro du dernier vidage connu quand le contenu a été lu pour la
     // dernière fois (envoi ou contrôle), et image affichée du dernier contrôle (un par image affichée)
     uint64_t chk_serial = 0, chk_frame = 0;
+    // Empreinte éparse de la source, prise juste avant la lecture de l'envoi (empreinte_eparse) : flush_recheck la
+    // refait toutes les EPARSE_PERIODE images tant que la source n'est pas rendue à Windows. 0 : pas prise.
+    // eparse_due : image affichée à partir de laquelle la refaire.
+    uint64_t eparse = 0, eparse_due = 0;
 };
 struct PoolBuf {
     uint64_t base = 0, size = 0;
@@ -135,11 +146,13 @@ struct PoolBuf {
 };
 struct ShaderMod {
     bool ok = false;
+    mutable uint64_t lot = 0;   // lot de shaders (g_lot_gen) où ce shader est déjà noté : voir note_shader
     std::string hash;   // nom dans le cache (diagnostic des blocages GPU)
     VkShaderModule mod = VK_NULL_HANDLE;
     std::vector<int> banks, vin, fout;
     int model = -1;     // modèle d'exécution SPIR-V : 0 sommets, 4 fragments, 5 calcul
     std::vector<std::string> tex;
+    int tex_mask = -1;   // types de tex en bits (tex_mask()), -1 : pas encore calculé
     struct ImgHandle { int bank; uint32_t off; std::string dim; };
     std::vector<ImgHandle> img;                 // poignées d'images lues par le shader
     std::vector<std::pair<int, uint32_t>> texh; // poignées de textures lues en banque constante (banque, déplacement)
@@ -234,7 +247,16 @@ struct Vk {
     uint64_t libs_on_demand = 0;              // bibliothèques de shaders créées pendant le jeu, au premier dessin
     bool libs_sur_demande = false;            // recomp.ini, shaders_on_demand : c'est le cas normal (voir ensure_init)
     // état dynamique déjà réglé dans le tampon de commandes en cours (remis à zéro à chaque enregistrement)
-    struct Dyn { int cull = -1, front = -1, bias = -1, dt = -1, dw = -1, dop = -1, st = -1; uint32_t sf = ~0u, sb = ~0u; } dyn;
+    struct Dyn {
+        int cull = -1, front = -1, bias = -1, dt = -1, dw = -1, dop = -1, st = -1;
+        uint32_t sf = ~0u, sb = ~0u;
+        // remis à chaque dessin jusqu'au 2026-11-12 : gardés tant qu'ils ne changent pas (RECOMP_NO_DYN_CACHE=1 : comme avant)
+        bool vp_ok = false, sc_ok = false, st_ok = false, bl_ok = false, db_ok = false;
+        VkViewport vp{};
+        VkRect2D sc{};
+        uint32_t sref = 0, svm = 0, swm = 0;
+        float blend[4] = {}, dbias[3] = {};
+    } dyn;
     VkDescriptorSetLayout dsl_banks = VK_NULL_HANDLE, dsl_tex = VK_NULL_HANDLE;
     VkPipelineLayout layout = VK_NULL_HANDLE;
     VkDescriptorPool dpool = VK_NULL_HANDLE, tpool = VK_NULL_HANDLE;
@@ -243,6 +265,7 @@ struct Vk {
     VkBuffer ring = VK_NULL_HANDLE;
     uint8_t* ringptr = nullptr;
     uint64_t ringsize = 16ull << 20, ringoff = 0;
+    uint64_t banques_repris = 0, banques_faits = 0;   // jeux de descripteurs des banques repris / écrits (RECOMP_PERF)
     VkBuffer zerobuf = VK_NULL_HANDLE;
     std::unordered_map<uint64_t, VkSampler> samplers;   // empreinte → échantillonneur
     std::unordered_map<uint32_t, uint64_t> tex_written, samp_written;   // id → clé écrite dans le jeu de textures
@@ -263,10 +286,14 @@ struct Vk {
     bool in_render = false;
     uint64_t cur_rt[18] = {};   // cibles de la passe ouverte et niveau / couche de leurs vues
     uint64_t frame_draws = 0, frame_skipped = 0;
+    uint32_t cb_draws = 0;      // dessins de l'enregistrement en cours (soumissions partielles : soumettre_morceau)
+    uint64_t morceaux = 0;      // soumissions partielles depuis le dernier relevé (RECOMP_PERF)
     bool dbg = false;   // RECOMP_VK_DEBUG=N : journal détaillé de l'image N
+    bool dbg_dump = false;   // RECOMP_DBG_TEX_DUMP : le dessin en cours vide ses textures (dbg_tex_dump)
     std::set<std::string> missing;
-    // tampons intermédiaires des envois de textures : libérés après la prochaine attente du GPU
-    struct Staging { VkBuffer b; VkDeviceMemory m; };
+    // tampons intermédiaires des envois de textures : libérés après la prochaine attente du GPU ; taille non nulle :
+    // tampon de la réserve des envois de textures (transit_prendre), projeté en p, rendu à la réserve (transit_rendre)
+    struct Staging { VkBuffer b; VkDeviceMemory m; uint64_t taille = 0; uint8_t* p = nullptr; };
     std::vector<Staging> staging;
     uint64_t staging_bytes = 0;   // octets des tampons de transit de l'enregistrement en cours (voir borner_transit)
     // données des textures rendues (tex_release) : octets gardés parce qu'un import les verrouille, réemplois d'une
@@ -275,7 +302,8 @@ struct Vk {
     uint64_t tex_uploads = 0, tex_upload_bytes = 0, tex_reuploads = 0;   // envois, dont renvois (contenu changé)
     // contrôles du contenu à l'usage (flush_recheck), dont renvois ; par cause : 1 plage vidée par le jeu, 2 image sans
     // objet dont les données rendues ont été retouchées, 3 image sans objet, contrôle périodique
-    uint64_t flush_checks[4] = {}, flush_reuploads[4] = {};
+    // 4 objet vivant, données rendues retouchées ; 5 source restée en mémoire, empreinte éparse changée
+    uint64_t flush_checks[6] = {}, flush_reuploads[6] = {};
     // Soumissions asynchrones. Chaque enregistrement (jusqu'au vidage suivant : FenceSync, présentation)
     // prend l'emplacement suivant : tampon de commandes, pools de descripteurs, anneau de constantes,
     // tampons intermédiaires. Un emplacement est réutilisé quand le GPU a fini sa soumission précédente
@@ -648,6 +676,124 @@ bool create_layouts() {
     return true;
 }
 
+// ---- choix de la carte graphique
+// recomp.ini, gpu (le launcher y écrit le nom complet de la carte choisie dans sa page Graphismes ; RECOMP_GPU pour les
+// essais) : la première carte dont le nom contient ce texte, sans tenir compte des majuscules. Sinon (auto, ou aucune
+// carte de ce nom, carte changée depuis par exemple) : la carte dédiée qui a le plus de mémoire vidéo, à défaut la
+// carte qui en a le plus ; à égalité, la première. Le launcher fait le même choix sur la même énumération Vulkan, pour
+// afficher la carte de « Automatique » et savoir si le DLSS est possible (lanceur.cpp, carte_du_jeu) : les garder pareils.
+struct CarteVue {
+    VkPhysicalDevice pd = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties pr{};
+    uint64_t memoire = 0;   // plus grand tas local de la carte (sa mémoire vidéo)
+};
+std::string minuscules(std::string s) {
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+uint64_t memoire_locale(const VkPhysicalDeviceMemoryProperties& mp) {
+    uint64_t m = 0;
+    for (uint32_t i = 0; i < mp.memoryHeapCount; i++)
+        if (mp.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) m = std::max<uint64_t>(m, mp.memoryHeaps[i].size);
+    return m;
+}
+// Carte que le jeu peut prendre de lui-même : Vulkan 1.3 au moins, et pas la couche « Vulkan sur Direct3D 12 » de
+// Microsoft (Dozen, apportée par le pack de compatibilité OpenCL, OpenGL et Vulkan de Windows). Cette couche double
+// chaque carte sous le nom « Microsoft Direct3D12 (…) », en Vulkan 1.2 et sans bibliothèques de pipelines. Issue GitHub
+// n° 18 : sur une RX 9070 XT, la 1.0.3 (dernière carte dédiée de la liste) l'a prise à la place du pilote d'AMD, et la
+// précompilation plantait. RECOMP_GPU_SET_ASIDE=<partie du nom> (essais) : écarte aussi ces cartes-là.
+bool carte_utilisable(const VkPhysicalDeviceProperties& pr) {
+    if (pr.apiVersion < VK_API_VERSION_1_3 || !strncmp(pr.deviceName, "Microsoft Direct3D12", 20)) return false;
+    static const char* ecart = getenv("RECOMP_GPU_SET_ASIDE");
+    return !(ecart && *ecart && minuscules(pr.deviceName).find(minuscules(ecart)) != std::string::npos);
+}
+
+// Indice de la carte choisie (-1 : aucune carte) ; *nommee : désignée par le réglage gpu. Réglage gpu : une carte
+// utilisable de ce nom d'abord (le nom de la carte est aussi dans celui de sa doublure Direct3D 12), sinon la première
+// de ce nom. Automatique : une carte utilisable avant tout, puis une carte dédiée, puis celle qui a le plus de
+// mémoire ; à égalité, la première de la liste.
+int choisir_carte(const std::vector<CarteVue>& cartes, bool* nommee) {
+    *nommee = false;
+    const std::string voulu = minuscules(settings().gpu);
+    if (voulu != "auto" && !voulu.empty()) {
+        int trouvee = -1;
+        for (size_t i = 0; i < cartes.size(); i++)
+            if (minuscules(cartes[i].pr.deviceName).find(voulu) != std::string::npos) {
+                if (carte_utilisable(cartes[i].pr)) {
+                    *nommee = true;
+                    return (int)i;
+                }
+                if (trouvee < 0) trouvee = (int)i;
+            }
+        if (trouvee >= 0) {
+            *nommee = true;
+            return trouvee;
+        }
+    }
+    int choix = -1;
+    for (size_t i = 0; i < cartes.size(); i++) {
+        if (choix < 0) {
+            choix = (int)i;
+            continue;
+        }
+        const bool u = carte_utilisable(cartes[i].pr), uc = carte_utilisable(cartes[choix].pr);
+        const bool d = cartes[i].pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+                   dc = cartes[choix].pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (u != uc ? u : d != dc ? d : cartes[i].memoire > cartes[choix].memoire) choix = (int)i;
+    }
+    return choix;
+}
+
+}  // namespace
+
+// Carte que init prendra, connue avant lui par une énumération à part : instance Vulkan temporaire et pointeurs de
+// fonction locaux (rien de partagé avec init, qui peut tourner sur un autre fil). Pour le DLSS (dlss.cpp, carte_dlss) :
+// son mode de super résolution règle l'échelle du rendu dès la lecture des variables du moteur, avant init.
+bool carte_prevue(std::string* nom, uint32_t* fabricant) {
+    HMODULE lib = LoadLibraryW(L"vulkan-1.dll");   // gardée chargée : le jeu s'en sert ensuite
+    if (!lib) return false;
+    const auto gipa = (PFN_vkGetInstanceProcAddr)(void*)GetProcAddress(lib, "vkGetInstanceProcAddr");
+    const auto creer = gipa ? (PFN_vkCreateInstance)gipa(nullptr, "vkCreateInstance") : nullptr;
+    if (!creer) return false;
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName = "recomp_main";
+    app.apiVersion = VK_API_VERSION_1_3;
+    VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    ici.pApplicationInfo = &app;
+    VkInstance inst = VK_NULL_HANDLE;
+    if (creer(&ici, nullptr, &inst) != VK_SUCCESS) return false;
+    const auto detruire = (PFN_vkDestroyInstance)gipa(inst, "vkDestroyInstance");
+    const auto enumerer = (PFN_vkEnumeratePhysicalDevices)gipa(inst, "vkEnumeratePhysicalDevices");
+    const auto proprietes = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
+    const auto memoire = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(inst, "vkGetPhysicalDeviceMemoryProperties");
+    bool ok = false;
+    if (enumerer && proprietes && memoire) {
+        uint32_t n = 0;
+        enumerer(inst, &n, nullptr);
+        std::vector<VkPhysicalDevice> pds(n);
+        if (n) enumerer(inst, &n, pds.data());
+        std::vector<CarteVue> cartes(n);
+        for (uint32_t i = 0; i < n; i++) {
+            cartes[i].pd = pds[i];
+            proprietes(pds[i], &cartes[i].pr);
+            VkPhysicalDeviceMemoryProperties mp;
+            memoire(pds[i], &mp);
+            cartes[i].memoire = memoire_locale(mp);
+        }
+        bool nommee = false;
+        const int c = choisir_carte(cartes, &nommee);
+        if (c >= 0) {
+            *nom = cartes[c].pr.deviceName;
+            *fabricant = cartes[c].pr.vendorID;
+            ok = true;
+        }
+    }
+    if (detruire) detruire(inst, nullptr);
+    return ok;
+}
+
+namespace {
+
 bool init(HWND hwnd) {
     g.lib = LoadLibraryW(L"vulkan-1.dll");
     if (!g.lib) {
@@ -661,45 +807,52 @@ bool init(HWND hwnd) {
     VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     app.pApplicationName = "recomp_main";
     app.apiVersion = VK_API_VERSION_1_3;
-    const char* iext[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    std::vector<const char*> iext = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    // DLSS (dlss.cpp) : pas pour la précompilation des pipelines (sans fenêtre)
+    const bool avec_dlss = hwnd && dlss::modele_demande();
+    if (avec_dlss) {   // extensions d'instance demandées par NGX, s'il y en a
+        uint32_t ni = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &ni, nullptr);
+        std::vector<VkExtensionProperties> dispo(ni);
+        vkEnumerateInstanceExtensionProperties(nullptr, &ni, dispo.data());
+        dlss::extensions_instance(iext, dispo);
+    }
     VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ici.pApplicationInfo = &app;
-    ici.enabledExtensionCount = 2;
-    ici.ppEnabledExtensionNames = iext;
+    ici.enabledExtensionCount = (uint32_t)iext.size();
+    ici.ppEnabledExtensionNames = iext.data();
     VKCHK(vkCreateInstance(&ici, nullptr, &g.inst));
     if (!load_instance_fns()) return false;
     uint32_t n = 0;
     vkEnumeratePhysicalDevices(g.inst, &n, nullptr);
     std::vector<VkPhysicalDevice> pds(n);
     vkEnumeratePhysicalDevices(g.inst, &n, pds.data());
-    // GPU dédié de préférence. RECOMP_GPU=<partie du nom> (essais) : une autre carte, par exemple la carte AMD ou
-    // Intel intégrée d'un PC qui a aussi une carte dédiée ; sans correspondance, le choix habituel.
-    const char* voulu = getenv("RECOMP_GPU");
-    auto minuscules = [](std::string s) {
-        for (char& c : s) c = (char)tolower((unsigned char)c);
-        return s;
-    };
-    bool choisi = false;
-    for (auto p : pds) {
-        VkPhysicalDeviceProperties pr;
-        vkGetPhysicalDeviceProperties(p, &pr);
-        if (pds.size() > 1)
-            HLOG("vk", "GPU available: %s%s", pr.deviceName,
-                 pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? " (discrete)"
-                 : pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? " (integrated)" : "");
-        if (choisi) continue;
-        if (voulu && *voulu && minuscules(pr.deviceName).find(minuscules(voulu)) != std::string::npos) {
-            g.pd = p, g.props = pr;
-            choisi = true;
-        } else if (!g.pd || pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            g.pd = p, g.props = pr;
-        }
+    // carte : réglage gpu (page Graphismes du launcher, RECOMP_GPU), sinon la carte dédiée qui a le plus de mémoire
+    // (choisir_carte)
+    std::vector<CarteVue> cartes(n);
+    for (uint32_t i = 0; i < n; i++) {
+        cartes[i].pd = pds[i];
+        vkGetPhysicalDeviceProperties(pds[i], &cartes[i].pr);
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(pds[i], &mp);
+        cartes[i].memoire = memoire_locale(mp);
+        const VkPhysicalDeviceType t = cartes[i].pr.deviceType;
+        if (n > 1)
+            HLOG("vk", "GPU available: %s (%s, %.1f GB)%s", cartes[i].pr.deviceName,
+                 t == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU ? "discrete"
+                 : t == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU ? "integrated" : "other",
+                 cartes[i].memoire / 1073741824.0,
+                 carte_utilisable(cartes[i].pr) ? "" : ", set aside (Vulkan below 1.3, or the Direct3D 12 layer)");
     }
-    if (voulu && *voulu && !choisi) HLOG("vk", "RECOMP_GPU=%s: no GPU with that name, usual choice", voulu);
-    if (!g.pd) return false;
+    bool nommee = false;
+    const int choix = choisir_carte(cartes, &nommee);
+    if (choix < 0) return false;
+    g.pd = cartes[choix].pd, g.props = cartes[choix].pr;
+    if (settings().gpu != "auto" && !nommee)
+        HLOG("vk", "gpu = %s: no graphics card with that name, automatic choice", settings().gpu.c_str());
     vkGetPhysicalDeviceMemoryProperties(g.pd, &g.memprops);
-    HLOG("vk", "GPU: %s (Vulkan %u.%u)", g.props.deviceName, VK_API_VERSION_MAJOR(g.props.apiVersion),
-         VK_API_VERSION_MINOR(g.props.apiVersion));
+    HLOG("vk", "GPU: %s (Vulkan %u.%u, %s)", g.props.deviceName, VK_API_VERSION_MAJOR(g.props.apiVersion),
+         VK_API_VERSION_MINOR(g.props.apiVersion), nommee ? "chosen in the settings" : "automatic choice");
     if (hwnd) {   // sans fenêtre : précompilation des pipelines (recomp_main --precompile)
         VkWin32SurfaceCreateInfoKHR si{VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR};
         si.hinstance = GetModuleHandleW(nullptr);
@@ -829,6 +982,24 @@ bool init(HWND hwnd) {
     f2.features.multiViewport = VK_TRUE;
     f2.features.shaderStorageImageReadWithoutFormat = VK_TRUE;    // GL_EXT_shader_image_load_formatted
     f2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    if (hwnd && fsr::prevu()) {   // FSR d'AMD (fsr.cpp) : ses shaders prennent, si la carte les offre, les demi-flottants,
+        // les entiers courts et le produit scalaire entier (réseau de neurones du FSR 4)
+        VkPhysicalDeviceVulkan13Features q13{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+        VkPhysicalDeviceVulkan12Features q12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+        VkPhysicalDeviceVulkan11Features q11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        q12.pNext = &q13;
+        q11.pNext = &q12;
+        VkPhysicalDeviceFeatures2 q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        q.pNext = &q11;
+        vkGetPhysicalDeviceFeatures2(g.pd, &q);
+        f12.shaderFloat16 = q12.shaderFloat16;
+        f2.features.shaderInt16 = q.features.shaderInt16;
+        f11.storageBuffer16BitAccess = q11.storageBuffer16BitAccess;
+        f13.shaderIntegerDotProduct = q13.shaderIntegerDotProduct;
+        HLOG("vk", "FSR: half floats %s, 16-bit integers %s, 16-bit storage %s, integer dot product %s",
+             q12.shaderFloat16 ? "yes" : "no", q.features.shaderInt16 ? "yes" : "no",
+             q11.storageBuffer16BitAccess ? "yes" : "no", q13.shaderIntegerDotProduct ? "yes" : "no");
+    }
     // RECOMP_GPU_DIAG=1 : marqueurs NVIDIA (dernier dessin atteint par le GPU) et rapport de faute à la
     // perte du périphérique
     static const bool gpu_diag = getenv("RECOMP_GPU_DIAG") != nullptr;
@@ -874,6 +1045,7 @@ bool init(HWND hwnd) {
         f2.pNext = &qcf;
         HLOG("vk", "fragment shaders: full pixel quads (VK_KHR_shader_quad_control), helper pixels take part in votes");
     }
+    if (avec_dlss) dlss::extensions_peripherique(g.inst, g.pd, g.props, exts, dext);   // NGX : toutes ou aucune
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = g.qf;
@@ -888,6 +1060,8 @@ bool init(HWND hwnd) {
     VKCHK(vkCreateDevice(g.pd, &dci, nullptr, &g.dev));
     if (!load_device_fns()) return false;
     vkGetDeviceQueue(g.dev, g.qf, 0, &g.q);
+    if (avec_dlss) dlss::init(g.inst, g.pd, g.dev, vkGetInstanceProcAddr, vkGetDeviceProcAddr);
+    if (hwnd && !dlss::pret()) fsr::init(g.pd, g.dev, vkGetDeviceProcAddr);   // FSR d'AMD, s'il est demandé (fsr.cpp)
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT hp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
     VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
     p2.pNext = &hp;
@@ -1127,6 +1301,8 @@ bool find_pool(uint64_t addr, uint64_t size, VkBuffer* buf, uint64_t* off) {
 // lisait les nouveaux modèles à travers l'ancien import, donc dans les anciennes pages (modèles 3D faux dans
 // Météo, 2026-11-09). Les objets Vulkan sont détruits quand le GPU a fini le travail déjà enregistré.
 void end_render();
+void lie_raz();
+extern uint64_t g_lie_evt;   // cache des liaisons : événements qui font tomber une entrée (défini avec le cache)
 // Détruit des images (après la soumission qui peut encore les lire) et les retire de toutes les tables.
 // Rend la mémoire vidéo libérée.
 uint64_t drop_images(const std::vector<uint64_t>& dk) {
@@ -1155,6 +1331,7 @@ uint64_t drop_images(const std::vector<uint64_t>& dk) {
     // réattribuée à une nouvelle vue)
     g.tex_written.clear();
     g.img_written.clear();
+    lie_raz();   // cache des liaisons : toutes les entrées tombent (elles peuvent viser ces images)
     return bytes;
 }
 
@@ -1230,6 +1407,11 @@ void pools_released_locked(uint64_t addr, uint64_t size) {
              (unsigned long long)size, n);
 }
 
+// Génération des caches liés à l'enregistrement en cours (draw : jeux de descripteurs des banques, blocs écrits dans
+// l'anneau) : changée à chaque nouvel enregistrement (begin_frame : autre anneau, pools de descripteurs remis à zéro)
+// et quand l'anneau reboucle.
+uint64_t g_banques_gen = 1;
+
 // Place de n octets dans l'anneau des constantes (alignée sur 256, assez pour les tampons uniformes)
 uint64_t ring_take(uint64_t n) {
     uint64_t off = (g.ringoff + 255) & ~255ull;
@@ -1237,6 +1419,7 @@ uint64_t ring_take(uint64_t n) {
         static int nlog = 0;
         if (nlog++ < 4) HLOG("vk", "constants ring full (%llu MB): wrapping around to the start", (unsigned long long)(g.ringsize >> 20));
         off = 0;
+        g_banques_gen++;
     }
     g.ringoff = off + n;
     return off;
@@ -1628,8 +1811,14 @@ std::string ram_text() {
 // Un shader traduit qui boucle sans fin bloque le GPU : Windows le réinitialise au bout de ≈ 2 s (TDR)
 // et le périphérique Vulkan est perdu (toutes les images suivantes sont noires, les relectures nulles).
 // On le signale avec les shaders du lot fautif (* = jamais menés à terme auparavant : suspects).
+// Chaque shader porte le numéro du lot où il est déjà noté (ShaderMod::lot) : la recherche de son nom dans le lot, faite
+// deux fois par dessin jusqu'au 2026-11-12, ne se fait plus qu'à son premier dessin du lot. g_lot_gen change quand le lot
+// repart à vide (submit_cb).
+uint64_t g_lot_gen = 1;
 void note_shader(const ShaderMod* m) {
-    if (m && std::find(g.batch.begin(), g.batch.end(), m->hash) == g.batch.end()) g.batch.push_back(m->hash);
+    if (!m || m->lot == g_lot_gen) return;
+    m->lot = g_lot_gen;
+    if (std::find(g.batch.begin(), g.batch.end(), m->hash) == g.batch.end()) g.batch.push_back(m->hash);
 }
 uint64_t gpu_done_serial();
 std::string batch_desc() {   // shaders des soumissions pas encore terminées et de l'enregistrement en cours
@@ -1854,16 +2043,96 @@ void fill_dummy_descriptors() {   // dans un tampon de commandes en cours d'enre
 // un PC à court de mémoire, c'est là que le jeu s'arrêtait). Ils sont maintenant rendus dès que le GPU a fini la
 // soumission qui les lit, et borner_transit soumet et attend dès que l'enregistrement en cours en porte plus de
 // 256 Mo.
+std::atomic<uint64_t> g_transit_libre_ns{0};   // RECOMP_PERF : temps passé à rendre les tampons de transit
+
+// Réserve de tampons de transit des envois de textures (2026-11-12). Créer puis détruire un tampon par texture
+// envoyée coûtait ≈ 1 s sur 7 min de partie en 1440p (vkAllocateMemory, vkFreeMemory, en pics aux changements de
+// scène). Les tampons ont maintenant une taille en puissance de 2 (de 64 Ko à 64 Mo ; au-delà, un tampon à part,
+// détruit après usage), sont projetés une fois, et reviennent à la réserve quand le GPU a fini de les lire. La
+// réserve garde 128 Mo au plus (64 Mo sous 5 Go validables libres) ; un tampon qui n'a pas resservi depuis 600 images
+// est détruit, et toute la réserve quand Windows refuse de la mémoire au jeu ou que le PC a moins de 3 Go validables
+// libres (g_memoire_niveau). Essai du 2026-11-12 (1440p) : 1 574 tampons repris pour 1 602 créés.
+// RECOMP_NO_STAGING_POOL=1 : un tampon par envoi, comme avant.
+struct TransitLibre { Vk::Staging s; uint64_t vu; };
+std::vector<TransitLibre> g_transit_libres;
+uint64_t g_transit_reserve = 0, g_transit_crees = 0, g_transit_repris = 0;
+constexpr uint64_t TRANSIT_RESERVE_MAX = 128ull << 20, TRANSIT_CLASSE_MAX = 64ull << 20;
+// Mémoire validable libre du PC, relevée toutes les 60 images (memory_saver) : 0 au-delà de 5 Go, 1 sous 5 Go, 2 sous
+// 3 Go — les mêmes seuils que le cache des images sans objet. Les parties de l'utilisateur tournent souvent au niveau
+// 1 (≈ 2 à 3 Go libres en jeu) : à ce niveau, la réserve et la file des rendus différés sont réduites, pas vidées.
+int g_memoire_niveau = 0;
+uint64_t transit_reserve_max() { return g_memoire_niveau >= 2 ? 0 : g_memoire_niveau == 1 ? 64ull << 20 : TRANSIT_RESERVE_MAX; }
+
+bool transit_prendre(uint64_t octets, Vk::Staging* st) {
+    static const bool sans = getenv("RECOMP_NO_STAGING_POOL") != nullptr;
+    uint64_t taille = 64ull << 10;
+    while (taille < octets) taille <<= 1;
+    if (sans || taille > TRANSIT_CLASSE_MAX) taille = octets;   // tampon à part
+    else
+        for (size_t i = g_transit_libres.size(); i-- > 0;)
+            if (g_transit_libres[i].s.taille == taille) {
+                *st = g_transit_libres[i].s;
+                g_transit_reserve -= taille;
+                g_transit_libres[i] = g_transit_libres.back();
+                g_transit_libres.pop_back();
+                g_transit_repris++;
+                return true;
+            }
+    if (!make_buffer(taille, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &st->b, &st->m))
+        return false;
+    st->taille = taille;
+    st->p = nullptr;
+    if (vkMapMemory(g.dev, st->m, 0, VK_WHOLE_SIZE, 0, (void**)&st->p) != VK_SUCCESS || !st->p) {
+        vkDestroyBuffer(g.dev, st->b, nullptr);
+        vkFreeMemory(g.dev, st->m, nullptr);
+        return false;
+    }
+    g_transit_crees++;
+    return true;
+}
+
+// Tampon de transit que le GPU a fini de lire : à la réserve si c'en est un et qu'il y a la place, sinon détruit
+void transit_rendre(const Vk::Staging& x) {
+    static const bool sans = getenv("RECOMP_NO_STAGING_POOL") != nullptr;
+    if (!sans && x.taille && x.taille <= TRANSIT_CLASSE_MAX && (x.taille & (x.taille - 1)) == 0 &&
+        g_transit_reserve + x.taille <= transit_reserve_max()) {
+        g_transit_libres.push_back({x, g.cur_frame});
+        g_transit_reserve += x.taille;
+        return;
+    }
+    vkDestroyBuffer(g.dev, x.b, nullptr);
+    vkFreeMemory(g.dev, x.m, nullptr);
+}
+
+// Fin d'image affichée : tampons de la réserve inutilisés depuis 600 images détruits, et ceux qui dépassent la borne
+// du niveau de mémoire ; toute la réserve si Windows vient de refuser de la mémoire au jeu ou si le PC en manque.
+void transit_tailler() {
+    static int pression_vue = 0;
+    const int pression = mem_pression();
+    const bool tout = pression != pression_vue || g_memoire_niveau >= 2;
+    pression_vue = pression;
+    if (g_transit_libres.empty() || (!tout && g.cur_frame % 60)) return;
+    for (size_t i = g_transit_libres.size(); i-- > 0;) {
+        const TransitLibre& t = g_transit_libres[i];
+        if (!tout && g.cur_frame < t.vu + 600 && g_transit_reserve <= transit_reserve_max()) continue;
+        vkDestroyBuffer(g.dev, t.s.b, nullptr);
+        vkFreeMemory(g.dev, t.s.m, nullptr);
+        g_transit_reserve -= t.s.taille;
+        g_transit_libres[i] = g_transit_libres.back();
+        g_transit_libres.pop_back();
+    }
+}
+
 void free_done_staging() {
     const uint64_t done = gpu_done_serial();
+    const auto t0 = std::chrono::steady_clock::now();
     for (auto& s : g.slots) {
         if (s.staging.empty() || !s.serial || s.serial > done) continue;
-        for (auto& x : s.staging) {
-            vkDestroyBuffer(g.dev, x.b, nullptr);
-            vkFreeMemory(g.dev, x.m, nullptr);
-        }
+        for (auto& x : s.staging) transit_rendre(x);
         s.staging.clear();
     }
+    g_transit_libre_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // Écriture d'un emplacement du jeu de textures (jeu 2 : 16 384 images par type, 4 096 échantillonneurs, mis à jour
@@ -1888,7 +2157,9 @@ void flush_tex_writes() {
     g.tex_write_calls++;
     g.tex_pending.clear();
 }
+void lie_tombe(uint32_t binding, uint32_t element);
 void tex_write(uint32_t binding, uint32_t element, VkDescriptorType type, const VkDescriptorImageInfo& ii) {
+    lie_tombe(binding, element);   // cache des liaisons : ce descripteur change
     static const bool groupe = getenv("RECOMP_TEX_WRITE_BATCH") != nullptr;
     g.tex_writes++;
     g.tex_pending.push_back({binding, element, type, ii});
@@ -1929,20 +2200,20 @@ void begin_frame() {
             }
         }
     }
-    for (auto& x : s.staging) {
-        vkDestroyBuffer(g.dev, x.b, nullptr);
-        vkFreeMemory(g.dev, x.m, nullptr);
-    }
+    for (auto& x : s.staging) transit_rendre(x);
     s.staging.clear();
     vkResetCommandPool(g.dev, s.pool, 0);
     for (VkDescriptorPool p : s.dpools) vkResetDescriptorPool(g.dev, p, 0);
     s.dcur = 0;
+    dlss_emplacement(g.slot);
     g.cb = s.cb, g.ring = s.ring, g.ringptr = s.ringptr, g.ringoff = 0;
+    g_banques_gen++;
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(g.cb, &bi);
     g.dyn = Vk::Dyn{};    // état dynamique indéfini au début d'un tampon de commandes
     g.recording = true;   // compteurs de dessins : remis à zéro à la présentation (plusieurs vidages par image)
+    g.cb_draws = 0;
     // Les soumissions s'exécutaient une à une (attente du GPU entre elles) : une barrière complète en tête
     // garde cet ordre sur le GPU (sa première portée couvre tout le travail soumis avant sur la file).
     barrier_all();
@@ -2045,20 +2316,68 @@ uint64_t bl_level_size(uint32_t wbytes, uint32_t rows, uint32_t bh) {
     uint64_t ra = (rows + 8ull * bh - 1) / (8ull * bh) * (8ull * bh);
     return wg * 64 * ra;
 }
-// lignes [y0, y1) d'un niveau (y1 = 0 : jusqu'à la fin) ; les bandes de lignes sont indépendantes
-void deswizzle_level(const uint8_t* src, uint8_t* dst, uint32_t wbytes, uint32_t rows, uint32_t bh, uint32_t y0 = 0,
-                     uint32_t y1 = 0) {
+// Désentrelacement d'un niveau block-linear (GOB de 64 octets × 8 lignes, 512 octets ; blocs de bh GOB en hauteur)
+// vers des lignes contiguës. Une ligne y, octets [x, x + 16) : voir l'adresse o ci-dessous.
+// Lignes [y0, y1) une par une, par morceaux de 16 octets (bords d'une bande et fin de ligne de moins de 64 octets)
+void deswizzle_lignes(const uint8_t* src, uint8_t* dst, uint32_t wbytes, uint32_t bh, uint32_t y0, uint32_t y1) {
     const uint64_t wg = (wbytes + 63) / 64, col = 512ull * bh;
-    if (!y1 || y1 > rows) y1 = rows;
+    const uint32_t x64 = wbytes & ~63u;
     for (uint32_t y = y0; y < y1; y++) {
         const uint64_t rb = (uint64_t)(y / (8 * bh)) * wg * col + (uint64_t)((y % (8 * bh)) / 8) * 512;
         const uint32_t yo = ((y & 1) << 4) | (((y >> 1) & 1) << 5) | (((y >> 2) & 1) << 7);
         uint8_t* d = dst + (uint64_t)y * wbytes;
-        for (uint32_t x = 0; x < wbytes; x += 16) {
+        const uint8_t* s = src + rb + yo;
+        uint32_t x = 0;
+        for (; x < x64; x += 64, s += col) {   // 64 octets d'un GOB : 4 morceaux de taille fixe
+            memcpy(d + x, s, 16);
+            memcpy(d + x + 16, s + 64, 16);
+            memcpy(d + x + 32, s + 256, 16);
+            memcpy(d + x + 48, s + 320, 16);
+        }
+        for (; x < wbytes; x += 16) {
             const uint64_t o = rb + (uint64_t)(x >> 6) * col + yo + (((x >> 4) & 1) << 6) + (((x >> 5) & 1) << 8);
             memcpy(d + x, src + o, std::min<uint32_t>(16, wbytes - x));
         }
     }
+}
+// Lignes [y0, y1) d'un niveau (y1 = 0 : jusqu'à la fin) ; les bandes de lignes sont indépendantes. Par groupes de 8
+// lignes alignés, GOB par GOB dans l'ordre de la source (2026-11-12) : ≈ 3 fois plus rapide que l'ancienne version
+// ligne par ligne, dont chaque morceau de 16 octets passait par un memcpy de taille variable (essai : 0,93 → 2,9 Go/s
+// sur un cœur, mêmes octets sur 1 254 formes de niveaux et de bandes).
+void deswizzle_level(const uint8_t* src, uint8_t* dst, uint32_t wbytes, uint32_t rows, uint32_t bh, uint32_t y0 = 0,
+                     uint32_t y1 = 0) {
+    const uint64_t wg = (wbytes + 63) / 64, col = 512ull * bh;
+    if (!y1 || y1 > rows) y1 = rows;
+    const uint32_t x64 = wbytes & ~63u;
+    uint32_t y = y0;
+    const uint32_t ya = std::min(y1, (y0 + 7) & ~7u);
+    deswizzle_lignes(src, dst, wbytes, bh, y, ya);   // début d'une bande pas aligné sur 8 lignes
+    for (y = ya; y + 8 <= y1; y += 8) {
+        const uint8_t* s = src + (uint64_t)(y / (8 * bh)) * wg * col + (uint64_t)((y % (8 * bh)) / 8) * 512;
+        uint8_t* d = dst + (uint64_t)y * wbytes;
+        for (uint32_t x = 0; x < x64; x += 64, s += col) {
+            uint8_t* dd = d + x;
+            for (uint32_t r = 0; r < 8; r++, dd += wbytes) {
+                const uint32_t yo = ((r & 1) << 4) | (((r >> 1) & 1) << 5) | (((r >> 2) & 1) << 7);
+                memcpy(dd, s + yo, 16);
+                memcpy(dd + 16, s + yo + 64, 16);
+                memcpy(dd + 32, s + yo + 256, 16);
+                memcpy(dd + 48, s + yo + 320, 16);
+            }
+        }
+        if (x64 < wbytes)   // fin de ligne de moins de 64 octets
+            for (uint32_t r = 0; r < 8; r++) {
+                const uint32_t yy = y + r;
+                const uint64_t rb = (uint64_t)(yy / (8 * bh)) * wg * col + (uint64_t)((yy % (8 * bh)) / 8) * 512;
+                const uint32_t yo = ((yy & 1) << 4) | (((yy >> 1) & 1) << 5) | (((yy >> 2) & 1) << 7);
+                uint8_t* dl = dst + (uint64_t)yy * wbytes;
+                for (uint32_t x = x64; x < wbytes; x += 16) {
+                    const uint64_t o = rb + (uint64_t)(x >> 6) * col + yo + (((x >> 4) & 1) << 6) + (((x >> 5) & 1) << 8);
+                    memcpy(dl + x, src + o, std::min<uint32_t>(16, wbytes - x));
+                }
+            }
+    }
+    deswizzle_lignes(src, dst, wbytes, bh, std::max(y, ya), y1);   // fin d'une bande
 }
 
 // Captures de cibles de rendu (RECOMP_RT_SNAPSHOT) : relues après l'attente du GPU.
@@ -2075,6 +2394,8 @@ struct Readback {
     uint64_t dump3d = 0;                   // RECOMP_TEX3D_DUMP : octets bruts d'une texture 3D, écrits tels quels
     std::vector<std::array<uint64_t, 3>> audit;   // contrôle d'un pool importé : (adresse, taille, décalage dans b)
     uint64_t audit_frame = 0;
+    int nan_fmt = 0;                       // RECOMP_NAN_SCAN : 1 B10G11R11 flottant, 2 RGBA16 flottant
+    uint64_t nan_key = 0, nan_frame = 0;   // image relue et image affichée
 };
 std::vector<Readback> g_readbacks;
 void write_png(const char* path, const uint8_t* rgba, uint32_t w, uint32_t h);
@@ -2138,16 +2459,40 @@ void prof_frame(uint64_t frame) {
 }
 
 void free_staging() {   // après une attente de la barrière du GPU
-    for (auto& s : g.staging) {
-        vkDestroyBuffer(g.dev, s.b, nullptr);
-        vkFreeMemory(g.dev, s.m, nullptr);
-    }
+    for (auto& s : g.staging) transit_rendre(s);
     g.staging.clear();
     g.staging_bytes = 0;
     for (auto& r : g_readbacks) {
         uint8_t* p = nullptr;
         if (vkMapMemory(g.dev, r.m, 0, VK_WHOLE_SIZE, 0, (void**)&p) == VK_SUCCESS) {
-            if (r.dump3d) {   // RECOMP_TEX3D_DUMP : fichier brut
+            if (r.nan_fmt) {   // RECOMP_NAN_SCAN : pixels NaN ou infinis d'une image de rendu
+                uint64_t nans = 0, infs = 0;
+                uint32_t px = 0, py = 0;
+                bool vu = false;
+                const uint64_t total = (uint64_t)r.w * r.h;
+                for (uint64_t i = 0; i < total; i++) {
+                    bool nan = false, inf = false;
+                    if (r.nan_fmt == 1) {   // R : bits 0-10 (6 + 5), V : 11-21, B : 22-31 (5 + 5) ; exposant 31 : inf ou NaN
+                        const uint32_t v = ((const uint32_t*)p)[i];
+                        const uint32_t e[3] = {(v >> 6) & 31, (v >> 17) & 31, (v >> 27) & 31};
+                        const uint32_t m[3] = {v & 63, (v >> 11) & 63, (v >> 22) & 31};
+                        for (int c = 0; c < 3; c++)
+                            if (e[c] == 31) (m[c] ? nan : inf) = true;
+                    } else {
+                        const uint16_t* q = (const uint16_t*)p + i * 4;
+                        for (int c = 0; c < 4; c++)
+                            if (((q[c] >> 10) & 31) == 31) ((q[c] & 1023) ? nan : inf) = true;
+                    }
+                    if (nan) nans++;
+                    else if (inf) infs++;
+                    if ((nan || inf) && !vu) vu = true, px = (uint32_t)(i % r.w), py = (uint32_t)(i / r.w);
+                }
+                if (nans || infs)
+                    HLOG("nan", "frame %llu: image %llx %ux%u %s: %llu NaN pixels, %llu infinite pixels (first at %u,%u)",
+                         (unsigned long long)r.nan_frame, (unsigned long long)r.nan_key, r.w, r.h,
+                         r.nan_fmt == 1 ? "B10G11R11 float" : "RGBA16 float", (unsigned long long)nans,
+                         (unsigned long long)infs, px, py);
+            } else if (r.dump3d) {   // RECOMP_TEX3D_DUMP : fichier brut
                 if (FILE* f = fopen(r.path.c_str(), "wb")) {
                     fwrite(p, 1, r.dump3d, f);
                     fclose(f);
@@ -2222,10 +2567,77 @@ void free_staging() {   // après une attente de la barrière du GPU
     g_readbacks.clear();
 }
 
+// Fils de travail des envois de textures (désentrelacement, empreintes), créés une fois au premier gros envoi puis
+// réveillés à chaque lot (2026-11-12). Avant, chaque grosse texture créait puis attendait jusqu'à 7 fils, des
+// centaines de fois par changement de scène. lancer(n, f) exécute f(0) … f(n − 1) sur les fils et sur l'appelant et
+// rend la main quand tout est fait ; un lot à la fois, jamais depuis un travail d'un lot. Un fil qui se réveille en
+// retard ne peut prendre aucun travail d'un autre lot que le sien (numéro du lot dans le compteur des prises).
+struct Ouvriers {
+    std::mutex appel, mx;
+    std::condition_variable cv_lot, cv_fin;
+    std::atomic<uint64_t> prise{0};      // (numéro du lot << 32) | indice du prochain travail
+    std::atomic<uint32_t> restants{0};   // travaux du lot pas encore finis
+    const std::function<void(size_t)>* f = nullptr;
+    uint32_t n = 0, lot = 0;
+    bool partis = false;
+
+    void travailler(uint32_t lt, const std::function<void(size_t)>* fn, uint32_t nn) {
+        uint64_t v = prise.load();
+        for (;;) {
+            if ((uint32_t)(v >> 32) != lt || (uint32_t)v >= nn) return;
+            if (!prise.compare_exchange_weak(v, v + 1)) continue;
+            (*fn)((uint32_t)v);
+            if (restants.fetch_sub(1) == 1) {
+                std::lock_guard<std::mutex> lk(mx);
+                cv_fin.notify_all();
+            }
+            v = prise.load();
+        }
+    }
+    void boucle() {
+        uint32_t vu = 0;
+        for (;;) {
+            uint32_t lt, nn;
+            const std::function<void(size_t)>* fn;
+            {
+                std::unique_lock<std::mutex> lk(mx);
+                cv_lot.wait(lk, [&] { return lot != vu; });
+                vu = lt = lot, fn = f, nn = n;
+            }
+            travailler(lt, fn, nn);
+        }
+    }
+    void lancer(size_t nn, const std::function<void(size_t)>& fn) {
+        std::lock_guard<std::mutex> a(appel);
+        if (!partis) {
+            partis = true;
+            const unsigned nt = std::max(1u, std::min(8u, std::thread::hardware_concurrency() / 2));
+            for (unsigned t = 1; t < nt; t++) std::thread([this] { boucle(); }).detach();
+        }
+        uint32_t lt;
+        {
+            std::lock_guard<std::mutex> lk(mx);
+            lt = ++lot, f = &fn, n = (uint32_t)nn;
+            restants = (uint32_t)nn;
+            prise = (uint64_t)lt << 32;
+        }
+        cv_lot.notify_all();
+        travailler(lt, &fn, (uint32_t)nn);
+        std::unique_lock<std::mutex> lk(mx);
+        cv_fin.wait(lk, [&] { return restants.load() == 0; });
+    }
+};
+Ouvriers& ouvriers() {
+    static Ouvriers* o = new Ouvriers;   // jamais détruit : ses fils l'attendent jusqu'à la fin du processus
+    return *o;
+}
+
 // Empreinte 64 bits d'une plage de mémoire invitée (contenu d'une texture packagée) : par mots de 8 octets,
 // multiplication-décalage ; ≈ 10 Go/s, calculée à l'envoi et quand une nouvelle texture packagée reprend
-// l'adresse d'une image existante.
-uint64_t hash_mem(const uint8_t* p, uint64_t n) {
+// l'adresse d'une image existante. Au-delà de 1 Mo (2026-11-12) : empreintes des morceaux de 1 Mo, combinées dans
+// l'ordre, calculées en parallèle (avec le désentrelacement à l'envoi) ; jamais gardée hors de la partie.
+constexpr uint64_t HASH_MORCEAU = 1ull << 20;
+uint64_t hash_bloc(const uint8_t* p, uint64_t n) {
     uint64_t h = 0x9E3779B97F4A7C15ull ^ n, a, b, c, d;
     uint64_t i = 0;
     for (; i + 32 <= n; i += 32) {
@@ -2238,6 +2650,48 @@ uint64_t hash_mem(const uint8_t* p, uint64_t n) {
     }
     for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
     return h ^ (h >> 31);
+}
+size_t hash_morceaux(uint64_t n) { return n > HASH_MORCEAU ? (size_t)((n + HASH_MORCEAU - 1) / HASH_MORCEAU) : 0; }
+uint64_t hash_morceau(const uint8_t* p, uint64_t n, size_t k) {
+    return hash_bloc(p + k * HASH_MORCEAU, std::min(HASH_MORCEAU, n - k * HASH_MORCEAU));
+}
+uint64_t hash_combiner(const uint64_t* h, size_t nm, uint64_t n) {
+    uint64_t r = 0x9E3779B97F4A7C15ull ^ n;
+    for (size_t i = 0; i < nm; i++) {
+        r = (r ^ (h[i] * 0x87C37B91114253D5ull)) * 0x4CF5AD432745937Full;
+        r ^= r >> 29;
+    }
+    return r ^ (r >> 31);
+}
+uint64_t hash_mem(const uint8_t* p, uint64_t n) {
+    const size_t nm = hash_morceaux(n);
+    if (!nm) return hash_bloc(p, n);
+    std::vector<uint64_t> h(nm);
+    const std::function<void(size_t)> f = [&](size_t k) { h[k] = hash_morceau(p, n, k); };
+    if (nm >= 8) ouvriers().lancer(nm, f);
+    else
+        for (size_t k = 0; k < nm; k++) f(k);
+    return hash_combiner(h.data(), nm, n);
+}
+
+// Empreinte éparse d'une source : entière jusqu'à 64 Ko, sinon 64 échantillons de 64 octets répartis du début à la
+// fin (4 Ko lus). Sert à revoir à chaque image affichée une source restée en mémoire (flush_recheck) : un atlas réécrit
+// ou des niveaux de détail chargés après coup changent presque partout. Jamais 0 (0 : pas d'empreinte).
+constexpr uint64_t EPARSE_ENTIER = 64ull << 10;
+// Images affichées entre deux empreintes éparses d'une même source (flush_recheck, cas 5). À chaque image, le contrôle
+// de toutes les textures liées coûtait trop : mem_valid interroge Windows (≈ 25 µs par texture hors de son petit cache).
+constexpr uint64_t EPARSE_PERIODE = 30;
+uint64_t empreinte_eparse(uint64_t addr, uint64_t n) {
+    const uint8_t* p = (const uint8_t*)addr;
+    uint64_t h;
+    if (n <= EPARSE_ENTIER) {
+        h = hash_bloc(p, n);
+    } else {
+        uint8_t t[64 * 64];
+        for (uint64_t k = 0; k < 64; k++) memcpy(t + k * 64, p + (n - 64) * k / 63, 64);
+        h = hash_bloc(t, sizeof t);
+    }
+    return h ? h : 1;
 }
 
 // ---- données des textures rendues à Windows après l'envoi (recomp.ini : texture_release ; voir memory.cpp) ----
@@ -2269,6 +2723,104 @@ void tex_release(Image& im) {
     im.edge_hash = edges_hash(im.addr, im.src_bytes, d, f);
     g.tex_rel_rendus++;
     if (!im.refs) mem_release_vivant(d, f - d, id, false);
+}
+
+// Rendu différé (2026-11-12). Écrire la source dans le fichier temporaire juste après l'envoi coûtait jusqu'à 0,58 s
+// d'un coup aux changements de scène, où des centaines de textures sont envoyées dans la même image (partie d'essai
+// en 1440p : pire image 550 ms, dont l'essentiel en écritures). Les demandes attendent dans une file, traitée en fin
+// d'image affichée : 1 ms par image, plus quand la file s'allonge (5 ms à 384 Mo), et tout de suite ce qui dépasse la
+// borne (mémoire gardée bornée) : 384 Mo, 256 Mo sous 5 Go validables libres ; toute la file quand Windows refuse de
+// la mémoire au jeu ou que le PC a moins de 3 Go validables libres (g_memoire_niveau). Avant de rendre, l'empreinte de
+// la source est recomparée à celle de l'envoi : une source réécrite entre-temps n'est pas rendue (la mémoire vidéo ne
+// montre plus son contenu, le contrôle des sources s'en chargera). Une demande est oubliée si l'image a été détruite,
+// renvoyée ou recontrôlée depuis (rel_serie).
+// Essai du 2026-11-12 (1440p, 120 Hz, même partie) : pire image 249 ms au lieu de 559, 22 fenêtres de 120 images
+// avec une image de plus de 40 ms au lieu de 33 (avec la réserve de tampons et l'empreinte en parallèle). Une version
+// qui vidait toute la file sous 5 Go libres en perdait l'essentiel (27 fenêtres) : ce PC d'essai, comme celui de
+// l'utilisateur en jeu, passe sous 5 Go libres dès la première minute.
+// RECOMP_TEX_RELEASE_NOW=1 : ancien comportement, rendue tout de suite.
+// Toute la plage est engagée et lisible : la lire ne fait ni faute ni engagement (pages à la demande pas encore
+// touchées, pages rendues à Windows ou rangées dans le fichier temporaire : non)
+bool plage_engagee(uint64_t a, uint64_t n) {
+    uint64_t p = a & ~0xfffull;
+    const uint64_t f = a + n;
+    while (p < f) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((const void*)p, &mbi, sizeof mbi)) return false;
+        if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mbi.RegionSize) return false;
+        p = (uint64_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+    return true;
+}
+
+struct RenduDiffere { uint64_t addr, octets, serie; };
+std::deque<RenduDiffere> g_rendus;
+uint64_t g_rendus_octets = 0, g_rendus_serie = 0;
+uint64_t g_rendus_faits = 0, g_rendus_changes = 0, g_rendus_perdus = 0, g_rendus_ns = 0;
+constexpr uint64_t RENDUS_ATTENTE_MAX = 384ull << 20;
+uint64_t rendus_attente_max() { return g_memoire_niveau >= 2 ? 0 : g_memoire_niveau == 1 ? 256ull << 20 : RENDUS_ATTENTE_MAX; }
+void tex_release_pending(uint64_t budget_us = 1000);
+
+void tex_release_later(Image& im) {
+    static const bool maintenant = getenv("RECOMP_TEX_RELEASE_NOW") != nullptr;
+    if (maintenant) return tex_release(im);
+    im.rel_d = im.rel_f = im.rel_id = 0;   // la source vient d'être relue en entier : l'ancien rendu ne compte plus
+    im.rel_serie = 0;
+    if (!mem_release_actif() || !im.src_bytes || !im.addr || im.rel_n >= 3) return;
+    const uint64_t d = (im.addr + 0xfff) & ~0xfffull, f = (im.addr + im.src_bytes) & ~0xfffull;
+    if (f < d + (64ull << 10)) return;   // petite texture : rien à gagner
+    im.rel_serie = ++g_rendus_serie;
+    g_rendus.push_back({im.addr, im.src_bytes, im.rel_serie});
+    g_rendus_octets += im.src_bytes;
+    // deux fois la borne en attente sans image affichée pour la traiter : ramenée tout de suite sous la borne
+    if (g_rendus_octets > 2 * RENDUS_ATTENTE_MAX) tex_release_pending(0);
+}
+
+// Fin d'image affichée (fil du GPU, verrou pris) : demandes de rendu en attente, budget_us au plus (plus quand la file
+// s'allonge), ou plus longtemps tant que plus de RENDUS_ATTENTE_MAX attendent.
+void tex_release_pending(uint64_t budget_us) {
+    if (g_rendus.empty()) return;
+    // Windows vient de refuser de la mémoire au jeu (mem_pression), ou le PC en manque : toute la file d'un coup
+    static int pression_vue = 0;
+    const int pression = mem_pression();
+    const bool tout = pression != pression_vue || g_memoire_niveau >= 2;
+    pression_vue = pression;
+    const uint64_t borne = rendus_attente_max();
+    if (budget_us) budget_us += g_rendus_octets * 4000 / RENDUS_ATTENTE_MAX;
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!g_rendus.empty()) {
+        const auto ecoule = std::chrono::steady_clock::now() - t0;
+        if (!tout && g_rendus_octets <= borne && ecoule >= std::chrono::microseconds(budget_us)) break;
+        const RenduDiffere r = g_rendus.front();
+        g_rendus.pop_front();
+        g_rendus_octets -= r.octets;
+        Image* im = nullptr;
+        auto ba = g.by_addr.find(r.addr);
+        if (ba != g.by_addr.end())
+            for (uint64_t k : ba->second) {
+                auto it = g.images.find(k);
+                if (it != g.images.end() && it->second.rel_serie == r.serie) {
+                    im = &it->second;
+                    break;
+                }
+            }
+        // Source entièrement engagée, sinon oubliée : quand le jeu décharge un niveau puis remappe sa mémoire, la
+        // plage redevient « à la demande » ; la relire pour l'empreinte l'engageait (des dizaines de Mo de zéros) et
+        // prenait jusqu'à 0,4 s dans une image (partie d'essai du 2026-11-12, à 148 s).
+        if (!im || im->addr != r.addr || im->src_bytes != r.octets || !im->initialized ||
+            !plage_engagee(im->addr, im->src_bytes)) {
+            g_rendus_perdus++;
+            continue;
+        }
+        im->rel_serie = 0;
+        if (hash_mem((const uint8_t*)im->addr, im->src_bytes) != im->content_hash) {
+            g_rendus_changes++;
+            continue;
+        }
+        tex_release(*im);
+        g_rendus_faits++;
+    }
+    g_rendus_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
 }
 
 // ---- plages vidées par le jeu (nvnMemoryPoolFlushMappedRange) ----
@@ -2316,7 +2868,7 @@ bool source_changed(Image& o, uint64_t addr) {
     }
     mem_restore(addr, o.src_bytes);   // pages rendues : restaurées d'un bloc, plutôt qu'une faute par morceau
     const bool change = hash_mem((const uint8_t*)addr, o.src_bytes) != o.content_hash;
-    if (!change && addr == o.addr) tex_release(o);     // relue sans avoir changé : rendue de nouveau
+    if (!change && addr == o.addr) tex_release_later(o);   // relue sans avoir changé : rendue de nouveau
     return change;
 }
 
@@ -2333,6 +2885,17 @@ bool source_changed(Image& o, uint64_t addr) {
 //     Source rendue à Windows (tex_release) : comparée seulement si ses pages ont été retouchées, ce qui ne coûte
 //     qu'une recherche. Sinon (petite texture, memory_saver coupé) : empreinte refaite toutes les 30 images, à une
 //     image qui dépend de l'adresse pour étaler le coût.
+// Depuis le 2026-11-13 (artéfacts noirs sur les explosions vus par l'utilisateur, « de façon aléatoire », parfois
+// jusqu'à un game over). Mesuré avec RECOMP_TEX_AUDIT : le jeu réécrit en place 2 à 4 textures de 2048×2048 par
+// mission sans jamais vider de plage, et l'ancien contenu restait affiché jusqu'à 30 images, ou sans fin sous un objet
+// vivant. Deux cas de plus :
+//  4. l'image a un objet vivant et les pages rendues de sa source ont été retouchées : comparée ;
+//  5. la source n'est pas rendue à Windows (juste envoyée, petite, sous un import Vulkan) : son empreinte éparse
+//     (prise avant la lecture de l'envoi) est refaite toutes les 30 images affichées (EPARSE_PERIODE), objet vivant
+//     ou non ; différente, la source est comparée en entier. Refaite à chaque image, elle coûtait trop dès que
+//     beaucoup de sources restent en mémoire (texture_release = false : 120 → 81 img/s puis moins de 10 en mission,
+//     mesuré le 2026-11-13).
+// RECOMP_NO_TEX_RECHECK=1 : sans ces deux cas.
 // RECOMP_NO_FLUSH_CHECK=1 : ancien comportement (aucun contrôle). RECOMP_FLUSH_LOG=1 : chaque renvoi est noté.
 void flush_recheck(Image& im) {
     if (im.chk_frame == g.cur_frame) return;
@@ -2345,11 +2908,25 @@ void flush_recheck(Image& im) {
         if (im.rel_id) cause = mem_released_intact(im.rel_d, im.rel_f - im.rel_d, im.rel_id) ? 0 : 2;
         else if ((g.cur_frame + (im.addr >> 16)) % 30 == 0) cause = 3;
     }
+    static const bool sans_revue = getenv("RECOMP_NO_TEX_RECHECK") != nullptr;
+    if (!cause && !sans_revue) {
+        if (im.rel_id) {
+            if (im.refs && !mem_released_intact(im.rel_d, im.rel_f - im.rel_d, im.rel_id)) cause = 4;
+        } else if (im.eparse && g.cur_frame >= im.eparse_due) {
+            im.eparse_due = g.cur_frame + EPARSE_PERIODE;
+            if (mem_valid(im.addr, im.src_bytes) && empreinte_eparse(im.addr, im.src_bytes) != im.eparse) cause = 5;
+        }
+    }
     if (!cause) return;
     const uint64_t now = g_flush_serial.load();   // avant la lecture : un vidage pendant la lecture redemande un contrôle
     g.flush_checks[cause]++;
-    if (mem_valid(im.addr, im.src_bytes) && source_changed(im, im.addr)) {
+    const bool lisible = mem_valid(im.addr, im.src_bytes);
+    const bool change = lisible && source_changed(im, im.addr);
+    // empreinte éparse prise avant une écriture que l'envoi a déjà lue : refaite, pour ne pas recomparer à chaque image
+    if (cause == 5 && lisible && !change) im.eparse = empreinte_eparse(im.addr, im.src_bytes);
+    if (change) {
         im.initialized = false;   // renvoyé à cet usage (image_to_general)
+        g_lie_evt++;
         g.tex_reuploads++;
         g.flush_reuploads[cause]++;
         static const bool flog = getenv("RECOMP_FLUSH_LOG") != nullptr;
@@ -2358,7 +2935,8 @@ void flush_recheck(Image& im) {
                        "upload at frame %llu: sent again (%s)", (unsigned long long)g.cur_frame, (unsigned long long)im.addr,
                  im.w, im.h, im.nvnfmt, (unsigned long long)(im.src_bytes >> 10), im.refs, (unsigned long long)im.up_frame,
                  cause == 1 ? "range flushed by the game" : cause == 2 ? "no live object, released data touched"
-                                                                       : "no live object, periodic check");
+                 : cause == 3 ? "no live object, periodic check" : cause == 4 ? "live object, released data touched"
+                                                                              : "source kept in memory, sampled check");
     }
     im.chk_serial = now;
 }
@@ -2393,19 +2971,22 @@ void tex_audit(uint64_t frame, uint64_t every) {
         }
         if (fix) {
             im.initialized = false;   // renvoyé au prochain usage (image_to_general)
+            g_lie_evt++;
             g.tex_reuploads++;
         }
     }
     if (perimees || tours++ % 20 == 0)
         HLOG("vk", "tex audit frame %llu: %llu textures in use, %llu released and untouched, %llu KB hashed, %llu stale (%llu "
                    "reported so far); flushes: %llu (%llu MB); checks/re-uploads: flushed %llu/%llu, no object touched "
-                   "%llu/%llu, no object periodic %llu/%llu",
+                   "%llu/%llu, no object periodic %llu/%llu, live object touched %llu/%llu, kept source sampled %llu/%llu",
              (unsigned long long)frame, (unsigned long long)vues, (unsigned long long)intactes,
              (unsigned long long)(octets >> 10), (unsigned long long)perimees, (unsigned long long)total,
              (unsigned long long)g_flush_serial.load(), (unsigned long long)(g_flush_bytes.load() >> 20),
              (unsigned long long)g.flush_checks[1], (unsigned long long)g.flush_reuploads[1],
              (unsigned long long)g.flush_checks[2], (unsigned long long)g.flush_reuploads[2],
-             (unsigned long long)g.flush_checks[3], (unsigned long long)g.flush_reuploads[3]);
+             (unsigned long long)g.flush_checks[3], (unsigned long long)g.flush_reuploads[3],
+             (unsigned long long)g.flush_checks[4], (unsigned long long)g.flush_reuploads[4],
+             (unsigned long long)g.flush_checks[5], (unsigned long long)g.flush_reuploads[5]);
 }
 
 void tex_release_log(uint64_t frame) {
@@ -2423,10 +3004,27 @@ void tex_release_log(uint64_t frame) {
          (unsigned long long)s.n[2], s.octets[2] / 1048576.0, (unsigned long long)s.n[3], s.octets[3] / 1048576.0,
          (unsigned long long)s.n[5], s.octets[5] / 1048576.0, (unsigned long long)g.tex_rel_intactes, s.ns_ecrit / 1e6,
          s.ns_lu / 1e6);
+    HLOG("vk", "frame %llu, deferred texture releases: %llu done, %llu skipped (source rewritten), %llu dropped (image "
+               "gone or sent again), %zu waiting (%.0f MB), %.0f ms at frame ends",
+         (unsigned long long)frame, (unsigned long long)g_rendus_faits, (unsigned long long)g_rendus_changes,
+         (unsigned long long)g_rendus_perdus, g_rendus.size(), g_rendus_octets / 1048576.0, g_rendus_ns / 1e6);
 }
+
+// RECOMP_PERF : temps des étapes d'envoi des textures packagées (ns cumulés) : source (validité, restauration),
+// tampon de transit (création, projection), désentrelacement, copie, empreinte, libération de la source ; et le plus
+// gros total d'une seule image (les à-coups des changements de scène). Fil du GPU seulement.
+std::atomic<uint64_t> g_up_ns[6], g_up_n{0}, g_up_bytes{0}, g_up_pire{0};
+uint64_t g_up_image = 0, g_up_image_ns = 0;
 
 // Copie le contenu d'une texture packagée (mémoire invitée, block-linear) dans son image Vulkan.
 bool upload_packaged(Image& im) {
+    const auto t_debut = std::chrono::steady_clock::now();
+    auto t_pas = t_debut;
+    auto pas = [&](int k) {
+        const auto n = std::chrono::steady_clock::now();
+        g_up_ns[k] += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(n - t_pas).count();
+        t_pas = n;
+    };
     const bool bc = is_compressed(im.fmt);
     const uint32_t unit = bc ? 4 : 1;
     struct Lv { uint32_t wbytes, rows, bh, pw, ph; uint64_t soff, doff; };
@@ -2452,14 +3050,15 @@ bool upload_packaged(Image& im) {
         return false;
     }
     mem_restore(im.addr, src_total);   // source rendue après un envoi précédent : restaurée d'un bloc
+    // avant la lecture : une écriture du jeu pendant ou après elle changera l'empreinte, et l'image sera renvoyée
+    im.eparse = empreinte_eparse(im.addr, src_total);
+    im.eparse_due = g.cur_frame + 1 + (im.addr >> 16) % EPARSE_PERIODE;   // étalé d'une texture à l'autre
     im.chk_serial = g_flush_serial.load();   // avant la lecture : un vidage du jeu pendant l'envoi redemande un contrôle
-    VkBuffer b;
-    VkDeviceMemory m;
-    if (!make_buffer(doff * im.layers, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &b, &m))
-        return false;
-    uint8_t* p = nullptr;
-    vkMapMemory(g.dev, m, 0, VK_WHOLE_SIZE, 0, (void**)&p);
+    pas(0);
+    Vk::Staging st;   // tampon de transit, de la réserve (transit_prendre) et déjà projeté
+    if (!transit_prendre(doff * im.layers, &st)) return false;
+    uint8_t* p = st.p;
+    pas(1);
     std::vector<VkBufferImageCopy> regions;
     // Désentrelacement par bandes de lignes (≈ 1 Mo), réparties sur plusieurs cœurs pour les grosses textures :
     // les changements de scène en envoient des centaines de Mo d'un coup (pic de ≈ 200 ms sur un seul cœur).
@@ -2480,31 +3079,45 @@ bool upload_packaged(Image& im) {
             r.imageExtent = {v.pw, v.ph, 1};
             regions.push_back(r);
         }
-    auto run = [](const Job& j) { deswizzle_level(j.src, j.dst, j.wbytes, j.rows, j.bh, j.y0, j.y1); };
+    // L'empreinte de la source (hash_mem, par morceaux de 1 Mo au-delà de 1 Mo) se calcule avec le désentrelacement :
+    // travaux 0 … jobs − 1 : bandes ; suivants : morceaux de l'empreinte. Mêmes fils (ouvriers), créés une fois.
+    const uint8_t* src0 = (const uint8_t*)im.addr;
+    const size_t nm = hash_morceaux(src_total);
+    std::vector<uint64_t> hm(nm);
+    const std::function<void(size_t)> run = [&](size_t k) {
+        if (k < jobs.size()) {
+            const Job& j = jobs[k];
+            deswizzle_level(j.src, j.dst, j.wbytes, j.rows, j.bh, j.y0, j.y1);
+        } else {
+            hm[k - jobs.size()] = hash_morceau(src0, src_total, k - jobs.size());
+        }
+    };
     static const unsigned NT = std::max(1u, std::min(8u, std::thread::hardware_concurrency() / 2));
-    if (NT == 1 || jobs.size() < 4 || doff * im.layers < (4u << 20)) {
-        for (auto& j : jobs) run(j);
+    if (NT == 1 || jobs.size() + nm < 4 || doff * im.layers < (4u << 20)) {
+        for (size_t k = 0; k < jobs.size() + nm; k++) run(k);
     } else {
-        std::atomic<size_t> next{0};
-        auto worker = [&] {
-            for (size_t k; (k = next++) < jobs.size();) run(jobs[k]);
-        };
-        std::vector<std::thread> th;
-        for (unsigned t = 1; t < NT && t < jobs.size(); t++) th.emplace_back(worker);
-        worker();
-        for (auto& t : th) t.join();
+        ouvriers().lancer(jobs.size() + nm, run);
     }
-    vkUnmapMemory(g.dev, m);
-    vkCmdCopyBufferToImage(g.cb, b, im.img, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)regions.size(), regions.data());
+    pas(2);
+    vkCmdCopyBufferToImage(g.cb, st.b, im.img, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)regions.size(), regions.data());
     barrier_all();
-    g.staging.push_back({b, m});
-    g.staging_bytes += doff * im.layers;
+    g.staging.push_back(st);
+    g.staging_bytes += st.taille;
     g.tex_uploads++;
     g.tex_upload_bytes += src_total;
     im.src_bytes = src_total;
-    im.content_hash = hash_mem((const uint8_t*)im.addr, src_total);
+    pas(3);
+    im.content_hash = nm ? hash_combiner(hm.data(), nm, src_total) : hash_bloc(src0, src_total);
     im.up_frame = g.cur_frame;
-    tex_release(im);
+    pas(4);
+    tex_release_later(im);
+    pas(5);
+    const uint64_t tot = (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(t_pas - t_debut).count();
+    if (g.cur_frame != g_up_image) g_up_image = g.cur_frame, g_up_image_ns = 0;
+    g_up_image_ns += tot;
+    if (g_up_image_ns > g_up_pire) g_up_pire = g_up_image_ns;
+    g_up_n++;
+    g_up_bytes += src_total;
     return true;
 }
 
@@ -2576,6 +3189,68 @@ void dbg_tex(const char* what, int idx, uint64_t texkey) {
          ok ? t.b.w : 0, ok ? t.b.h : 0, ok ? t.b.format : 0);
 }
 
+// Diagnostic (RECOMP_VK_DEBUG=N avec RECOMP_DBG_TEX_DUMP=<morceau d'étiquette>) : mémoire source des textures
+// « packagées » liées par les dessins dont l'étiquette contient ce morceau, une fois par image et par texture, dans
+// tex_dump/ (données du jeu : dossier privé). Même nom et même contenu que tex_dump() : décodage par shaders/texview.py.
+void dbg_tex_dump(uint32_t tid, uint64_t texkey, Image* im) {
+    nvn::Tex t;
+    if (!texkey || !nvn::g_tex.find_key(texkey, &t) || !t.addr) return;
+    if (!t.b.packaged && !(im && im->layers > 1)) return;   // cibles de rendu simples : pas vidées
+    static std::set<std::pair<uint64_t, uint64_t>> faits;
+    if (!faits.insert({g.cur_frame, texkey}).second) return;
+    FmtInfo fi = nvn_format(t.b.format);
+    const bool bc = is_compressed(fi.vk);
+    const uint64_t bw = bc ? (uint64_t)(t.b.w + 3) / 4 : (uint64_t)t.b.w, bh = bc ? (uint64_t)(t.b.h + 3) / 4 : (uint64_t)t.b.h;
+    uint64_t sz = bw * bh * std::max<uint32_t>(fi.bpp, 1) * 2 + 0x40000;
+    if (im && im->layers > 1 && im->src_bytes) sz = im->src_bytes;   // tableau : toutes les couches
+    while (sz > 0x1000 && !mem_valid(t.addr, sz)) sz /= 2;
+    CreateDirectoryA("tex_dump", nullptr);
+    char path[200];
+    snprintf(path, sizeof path, "tex_dump/i%06llu_t%04u_%016llx_%dx%d_c%u_p%d_f%u_n%u_L%02x%02x%02x%02x%02x%02x%02x%02x.bin",
+             (unsigned long long)g.cur_frame + 1, tid, (unsigned long long)texkey, t.b.w, t.b.h, im ? im->layers : 1u,
+             t.b.packaged ? 1 : 0, t.b.format, t.b.levels,
+             t.b.layout[0], t.b.layout[1], t.b.layout[2], t.b.layout[3], t.b.layout[4], t.b.layout[5], t.b.layout[6],
+             t.b.layout[7]);
+    // source rendue à Windows : restaurée, puis copiée ici (fwrite lit depuis le noyau, où la faute de page d'une
+    // page rendue n'est pas rattrapée : le fichier sortait vide)
+    if (t.b.packaged && mem_valid(t.addr, sz)) {
+        mem_restore(t.addr, sz);
+        std::vector<uint8_t> copie((const uint8_t*)t.addr, (const uint8_t*)t.addr + sz);
+        if (FILE* f = fopen(path, "wb")) {
+            fwrite(copie.data(), 1, copie.size(), f);
+            fclose(f);
+        }
+    }
+    // niveau 0 de l'image Vulkan, relu depuis le GPU après la soumission (octets linéaires : blocs compressés tels
+    // quels) : <nom>.gpu.bin, à comparer hors ligne avec la source désentrelacée
+    if (im && im->img && im->initialized && im->aspect == VK_IMAGE_ASPECT_COLOR_BIT && im->target != 2) {
+        const uint32_t unite = bc ? 4 : 1;
+        // tableau : niveau 0 de toutes les couches ; sinon tous les niveaux, à la suite
+        const uint32_t nniv = im->layers > 1 ? 1 : im->levels;
+        std::vector<VkBufferImageCopy> regions;
+        uint64_t n = 0;
+        for (uint32_t l = 0; l < nniv; l++) {
+            const uint32_t lw = std::max(1u, im->w >> l), lh = std::max(1u, im->h >> l);
+            VkBufferImageCopy c{};
+            c.bufferOffset = n;
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, im->layers};
+            c.imageExtent = {lw, lh, 1};
+            regions.push_back(c);
+            n += (uint64_t)((lw + unite - 1) / unite) * ((lh + unite - 1) / unite) * im->bpu * im->layers;
+        }
+        Readback r{};
+        if (make_buffer(n, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r.b, &r.m)) {
+            end_render();
+            vkCmdCopyImageToBuffer(g.cb, im->img, VK_IMAGE_LAYOUT_GENERAL, r.b, (uint32_t)regions.size(), regions.data());
+            barrier_all();
+            r.dump3d = n;
+            r.path = std::string(path) + ".gpu.bin";
+            g_readbacks.push_back(r);
+        }
+    }
+}
+
 Image* get_image(uint64_t texkey) {
     if (!texkey) return nullptr;
     auto it = g.images.find(texkey);
@@ -2624,6 +3299,7 @@ Image* get_image(uint64_t texkey) {
                 if (o.initialized && o.src_bytes && mem_valid(t.addr, o.src_bytes) && source_changed(o, t.addr)) {
                     memcpy(o.swz, t.b.swizzle, 4);
                     o.initialized = false;   // renvoyé au prochain usage (image_to_general)
+                    g_lie_evt++;
                     g.tex_reuploads++;
                 }
                 return &o;
@@ -2872,14 +3548,15 @@ VkSampler get_sampler(const nvn::SamplerInfo& s) {
     return g.samplers[h] = smp;
 }
 
-// Écrit dans le jeu de textures les descripteurs des poignées liées (texture et échantillonneur).
-void bind_tex_id(uint32_t tid, uint64_t texpool, const std::vector<std::string>& types, uint64_t handle);
+// Écrit dans le jeu de textures les descripteurs des poignées liées (texture et échantillonneur). bind_tex_id rend
+// l'image de la texture (nullptr : aucune).
+Image* bind_tex_id(uint32_t tid, uint64_t texpool, const std::vector<std::string>& types, uint64_t handle);
 void bind_samp_id(uint32_t sid, uint64_t samppool);
 void bind_handle(uint64_t handle, uint64_t texpool, uint64_t samppool, const std::vector<std::string>& types) {
     bind_tex_id(handle & 0xfffff, texpool, types, handle);
     bind_samp_id((handle >> 20) & 0xfff, samppool);
 }
-void bind_tex_id(uint32_t tid, uint64_t texpool, const std::vector<std::string>& types, uint64_t handle) {
+Image* bind_tex_id(uint32_t tid, uint64_t texpool, const std::vector<std::string>& types, uint64_t handle) {
     nvn::TexDesc td;
     bool have_t = false;
     {
@@ -2899,6 +3576,15 @@ void bind_tex_id(uint32_t tid, uint64_t texpool, const std::vector<std::string>&
     if (have_t && tid < TEX_MAX) {
         Image* im = get_image(td.tex);
         dbg_tex("tex", (int)tid, td.tex);
+        if (g.dbg) {
+            HLOG("vkdbg", "    view flags %u format %u target %u levels %u+%u layers %u+%u swizzle %u %u %u %u; image levels %u "
+                          "layers %u target %u swizzle %u %u %u %u%s",
+                 td.view.flags, td.view.format, td.view.target, td.view.base_level, td.view.num_levels, td.view.min_layer,
+                 td.view.num_layers, td.view.swizzle[0], td.view.swizzle[1], td.view.swizzle[2], td.view.swizzle[3],
+                 im ? im->levels : 0, im ? im->layers : 0, im ? im->target : 0, im ? im->swz[0] : 0, im ? im->swz[1] : 0,
+                 im ? im->swz[2] : 0, im ? im->swz[3] : 0, im && im->rel_id ? ", source released" : "");
+            if (g.dbg_dump) dbg_tex_dump(tid, td.tex, im);
+        }
         if (im) {
             flush_recheck(*im);   // données réécrites par le jeu depuis l'envoi : renvoyées
             image_to_general(*im);
@@ -2928,7 +3614,9 @@ void bind_tex_id(uint32_t tid, uint64_t texpool, const std::vector<std::string>&
                         tex_write(k, tid, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, {VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL});
                     }
         }
+        return im;
     }
+    return nullptr;
 }
 void bind_samp_id(uint32_t sid, uint64_t samppool) {
     nvn::SamplerInfo si;
@@ -2940,6 +3628,10 @@ void bind_samp_id(uint32_t sid, uint64_t samppool) {
             if (it != p.desc.end()) si = it->second, have_s = true;
         });
     }
+    if (g.dbg)
+        HLOG("vkdbg", "    sampler %u%s: min %u mag %u wrap %u %u %u lod %g..%g bias %g aniso %g", sid,
+             have_s ? "" : " (missing from the pool)", si.min, si.mag, si.wrap[0], si.wrap[1], si.wrap[2], si.min_lod,
+             si.max_lod, si.lod_bias, si.max_aniso);
     if (sid < SAMP_MAX) {
         {   // RECOMP_SAMP_WATCH=id : paramètres NVN d'un échantillonneur
             static const long sw = getenv("RECOMP_SAMP_WATCH") ? atol(getenv("RECOMP_SAMP_WATCH")) : -1;
@@ -2964,6 +3656,100 @@ void bind_samp_id(uint32_t sid, uint64_t samppool) {
             tex_write(8, sid, VK_DESCRIPTOR_TYPE_SAMPLER, {smp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED});
         }
     }
+}
+
+// Cache des liaisons (2026-11-12). Chaque dessin relie toutes les poignées de son état (jusqu'à 64 par étage) : deux
+// verrous, quatre recherches et la copie des descripteurs du jeu par poignée, ≈ 2,8 µs par dessin. Dans les scènes à
+// 2 000 dessins par image, c'était 5,9 ms par image, la plus grosse part du fil du GPU (12,5 ms : ≈ 75 img/s au lieu
+// de 120, partie d'essai en 1440p). Une liaison complète est maintenant retenue, par descripteur (texture × type) et
+// par échantillonneur, avec le pool, sa génération (enregistrements du jeu) et l'image affichée en cours ; tant que
+// rien de cela ne change, la même poignée ne refait rien. Une entrée tombe quand son descripteur est réécrit
+// (tex_write), quand des images sont détruites (drop_images : g_lie_raz), et quand son image doit être renvoyée
+// (initialized). La première liaison de chaque image affichée reste complète : contrôle des sources (flush_recheck)
+// et dernière utilisation (last_use) comme avant. RECOMP_NO_BIND_CACHE=1 : sans cache. Rien n'est retenu pendant
+// l'image détaillée de RECOMP_VK_DEBUG.
+struct LieTex { uint64_t pool = 0, gen = 0, tampon = 0; Image* im = nullptr; };
+struct LieSamp { uint64_t pool = 0, gen = 0, tampon = 0; };
+std::vector<LieTex> g_lie_tex;     // tid * 8 + type
+std::vector<LieSamp> g_lie_samp;   // sid
+uint64_t g_lie_raz = 0;            // destructions d'images (drop_images) : toutes les entrées tombent
+// Événements qui font tomber une entrée sans changer les tampons : descripteur réécrit (lie_tombe), image à renvoyer
+// (initialized = false). Sert au saut d'un étage entier dans draw (LieEtage).
+uint64_t g_lie_evt = 0;
+std::atomic<uint64_t> g_lie_etages{0};   // RECOMP_PERF : étages sautés en entier
+std::atomic<uint64_t> g_lie_evites{0}, g_lie_faits{0};   // RECOMP_PERF : liaisons évitées, liaisons complètes
+// tampon de validité : image affichée en cours et nombre de destructions d'images
+uint64_t lie_tampon() { return ((g.cur_frame + 1) << 16) ^ (g_lie_raz & 0xffff); }
+void lie_raz() { g_lie_raz++; }
+// un descripteur du jeu de textures est réécrit (tex_write) : son entrée tombe
+void lie_tombe(uint32_t binding, uint32_t element) {
+    g_lie_evt++;
+    if (binding < 8 && element < TEX_MAX && !g_lie_tex.empty()) g_lie_tex[element * 8 + binding].tampon = 0;
+    else if (binding == 8 && element < SAMP_MAX && !g_lie_samp.empty()) g_lie_samp[element].tampon = 0;
+}
+
+// Générations des pools de l'état, lues une fois par dessin ou calcul
+struct LieGens { uint64_t texpool = 0, texgen = 0, samppool = 0, sampgen = 0, tampon = 0; bool actif = false; };
+LieGens lie_gens(uint64_t texpool, uint64_t samppool) {
+    static const bool sans = getenv("RECOMP_NO_BIND_CACHE") != nullptr;
+    LieGens l;
+    l.texpool = texpool, l.samppool = samppool;
+    if (sans || g.dbg) return l;
+    {
+        std::lock_guard<std::mutex> lk(nvn::g_desc_lk);
+        nvn::g_texpool.with_key(texpool, [&](const nvn::TexPool& p) { l.texgen = p.gen; });
+        nvn::g_samppool.with_key(samppool, [&](const nvn::SampPool& p) { l.sampgen = p.gen; });
+    }
+    if (g_lie_tex.empty()) g_lie_tex.resize((size_t)TEX_MAX * 8), g_lie_samp.resize(SAMP_MAX);
+    l.tampon = lie_tampon();
+    l.actif = true;
+    return l;
+}
+
+// Types d'échantillonnage d'un shader (bits de 0 à 6 dans l'ordre de bind_tex_id), calculés une fois
+uint32_t tex_mask(ShaderMod& sm) {
+    if (sm.tex_mask >= 0) return (uint32_t)sm.tex_mask;
+    static const char* names[] = {"1d", "2d", "3d", "cube", "1darray", "2darray", "cubearray"};
+    uint32_t m = 0;
+    for (auto& ty : sm.tex)
+        for (uint32_t k = 0; k < 7; k++)
+            if (ty == names[k]) m |= 1u << k;
+    sm.tex_mask = (int)m;
+    return m;
+}
+
+void bind_tex_c(uint32_t tid, const LieGens& l, const ShaderMod& sm, uint32_t mask, uint64_t handle) {
+    if (l.actif && tid < TEX_MAX && mask && l.tampon == lie_tampon()) {
+        bool ok = true;
+        for (uint32_t k = 0; k < 7 && ok; k++)
+            if (mask >> k & 1) {
+                const LieTex& e = g_lie_tex[tid * 8 + k];
+                ok = e.tampon == l.tampon && e.pool == l.texpool && e.gen == l.texgen && (!e.im || e.im->initialized);
+            }
+        if (ok) {
+            g_lie_evites++;
+            return;
+        }
+    }
+    g_lie_faits++;
+    Image* im = bind_tex_id(tid, l.texpool, sm.tex, handle);
+    // retenue avec le tampon d'après la liaison : une image détruite pendant celle-ci (drop_images) l'a changé
+    if (l.actif && tid < TEX_MAX && l.tampon == lie_tampon())
+        for (uint32_t k = 0; k < 7; k++)
+            if (mask >> k & 1) g_lie_tex[tid * 8 + k] = {l.texpool, l.texgen, l.tampon, im};
+}
+
+void bind_samp_c(uint32_t sid, const LieGens& l) {
+    if (l.actif && sid < SAMP_MAX && l.tampon == lie_tampon()) {
+        const LieSamp& e = g_lie_samp[sid];
+        if (e.tampon == l.tampon && e.pool == l.samppool && e.gen == l.sampgen) {
+            g_lie_evites++;
+            return;
+        }
+    }
+    g_lie_faits++;
+    bind_samp_id(sid, l.samppool);
+    if (l.actif && sid < SAMP_MAX && l.tampon == lie_tampon()) g_lie_samp[sid] = {l.samppool, l.sampgen, l.tampon};
 }
 
 // ================================================================ shaders
@@ -3014,6 +3800,38 @@ void spirv_sans_quad_control(std::vector<char>& code) {
     if (!change) return;
     code.resize(out.size() * 4);
     memcpy(code.data(), out.data(), code.size());
+}
+// ESSAI, désactivé par défaut (RECOMP_NAN_MINMAX=1 l'active) : min, max et clamp qui éliminent les NaN, comme sur la
+// console (2026-11-13). Mesuré le jour même : RECOMP_NAN_SCAN=30 ne trouve aucun pixel NaN ni infini sur une mission
+// entière sans cette réécriture (1 000 relectures de ≈ 15 images), et l'artéfact noir candidat (débris d'un arbre
+// détruit) a été capturé avec elle. Rien ne montre donc qu'elle corrige quelque chose : gardée pour un essai futur.
+// glslang traduit min(), max() et clamp()
+// du GLSL en FMin, FMax et FClamp de GLSL.std.450, dont le résultat est indéfini quand un opérande est un NaN. Les
+// instructions du GPU de la console rendent alors l'autre opérande (IEEE 754-2008, minNum / maxNum), et les shaders du
+// jeu s'en servent pour nettoyer leurs couleurs avant de les écrire (max(0, x) puis min(x, 65 000) à la fin de chaque
+// matériau). Un NaN qui passe s'affiche en noir et reste dans l'historique de l'anticrénelage temporel jusqu'au
+// changement de plan : c'est l'hypothèse retenue pour les artéfacts noirs des explosions vus par l'utilisateur. NMin,
+// NMax et NClamp ont la sémantique voulue : seul le numéro de l'instruction étendue change, au chargement du module
+// (le cache de shaders n'est pas à refaire). Rend le nombre d'instructions changées.
+size_t spirv_minmax_nan(std::vector<char>& code) {
+    if (code.size() < 20 || code.size() % 4) return 0;
+    uint32_t* w = (uint32_t*)code.data();
+    const size_t n = code.size() / 4;
+    uint32_t jeu = 0;   // identifiant de l'import « GLSL.std.450 »
+    size_t changes = 0;
+    for (size_t i = 5; i < n;) {
+        const uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || i + wc > n) return changes;   // module mal formé : arrêt
+        if (op == 11 && wc >= 3 && !strncmp((const char*)&w[i + 2], "GLSL.std.450", (wc - 2) * 4)) jeu = w[i + 1];
+        else if (op == 12 && wc >= 5 && jeu && w[i + 3] == jeu) {   // OpExtInst type, résultat, jeu, instruction, …
+            uint32_t& ins = w[i + 4];
+            if (ins == 37) ins = 79, changes++;        // FMin → NMin
+            else if (ins == 40) ins = 80, changes++;   // FMax → NMax
+            else if (ins == 43) ins = 81, changes++;   // FClamp → NClamp
+        }
+        i += wc;
+    }
+    return changes;
 }
 namespace {
 
@@ -3066,6 +3884,15 @@ ShaderMod* get_shader(const std::string& hash) {
             }
     }
     if (!g.quad_control) spirv_sans_quad_control(code);
+    {
+        static const bool sans_nan = getenv("RECOMP_NAN_MINMAX") != nullptr;   // essai, désactivé par défaut
+        static bool dit = false;
+        if (sans_nan && !dit) {
+            dit = true;
+            HLOG("vk", "shaders: min, max and clamp return the operand that is not a NaN (RECOMP_NAN_MINMAX)");
+        }
+        if (sans_nan) spirv_minmax_nan(code);
+    }
     sm.model = spirv_model(code);
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = code.size();
@@ -4137,9 +4964,19 @@ int precompile() {
 // RECOMP_PERF : temps CPU par étape de draw (µs cumulés)
 std::atomic<uint64_t> g_dt[6], g_dn{0};
 struct DrawTimer {
-    std::chrono::steady_clock::time_point t = std::chrono::steady_clock::now();
+    // Sans RECOMP_PERF : rien. Jusqu'au 2026-11-12, chaque dessin lisait sept fois l'horloge, mesure demandée ou non
+    // (profil d'une mission : ≈ 5 % des relevés du fil du GPU, soit ≈ 0,5 ms par image à 2 700 dessins).
+    static bool actif() {
+        static const bool a = getenv("RECOMP_PERF") != nullptr;
+        return a;
+    }
+    std::chrono::steady_clock::time_point t;
     int k = 0;
+    DrawTimer() {
+        if (actif()) t = std::chrono::steady_clock::now();
+    }
     void mark() {
+        if (!actif()) return;
         auto n = std::chrono::steady_clock::now();
         g_dt[k++] += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(n - t).count();
         t = n;
@@ -4177,6 +5014,7 @@ uint64_t submit_cb(const char* where, VkSemaphore wait_bin = VK_NULL_HANDLE, VkS
     g.staging_bytes = 0;
     s.batch = std::move(g.batch);
     g.batch.clear();
+    g_lot_gen++;
     g.ring_peak = std::max(g.ring_peak, g.ringoff);
     if (!g_readbacks.empty()) {
         wait_serial(val, where);
@@ -4206,6 +5044,29 @@ void borner_transit() {
     flush_locked("texture uploads");
     free_done_staging();
 }
+// Soumissions partielles (soir du 2026-11-12). Le jeu attend la fin de l'image sur le GPU avant de soumettre la
+// suivante, et tout le travail Vulkan d'une image n'était soumis qu'à son dernier FenceSync : le GPU restait sans rien
+// faire pendant que le fil du GPU traduisait les dessins (≈ 9 ms à 2 600 dessins), puis dessinait tout d'un coup ;
+// les deux durées s'ajoutaient. Entre deux dessins, dès que l'enregistrement en cours en compte `seuil`, il est soumis
+// sans attendre : le GPU commence l'image pendant que la suite se traduit. Même mécanisme que les vidages existants
+// (submit_locked, emplacement suivant, anneau et pools de descripteurs à part) ; les images légères ne changent pas.
+// Mesuré à 512 dessins sur la mission de Corneria : 9,62 → 9,36 ms dans les fenêtres de 2 000 à 3 000 dessins, rien
+// au-delà de 3 000 (le jeu garde deux images en vol : le GPU travaillait déjà pendant la traduction). Gain trop faible
+// pour changer le rythme des soumissions de tous les joueurs : désactivé par défaut.
+// RECOMP_PARTIAL_SUBMIT=<dessins> : seuil (0 par défaut : jamais).
+bool soumettre_morceau() {
+    static const uint32_t seuil = [] {
+        const char* e = getenv("RECOMP_PARTIAL_SUBMIT");
+        const int v = e ? atoi(e) : 0;
+        if (v > 0) HLOG("vk", "partial submissions: every %d draws, the frame's work so far is sent to the GPU", v);
+        return (uint32_t)(v < 0 ? 0 : v);
+    }();
+    if (!seuil || !g.async || g.cb_draws < seuil) return false;
+    submit_locked("partial frame");
+    g.morceaux++;
+    return true;
+}
+
 // RECOMP_SYNC_FROM=N : à partir de l'image N, chaque dessin et chaque calcul est soumis et attendu seul
 // (diagnostic : le lot qui bloque le GPU ne contient alors que le shader fautif)
 bool sync_each() {
@@ -4244,10 +5105,717 @@ bool user_skip(const std::string& label, const ShaderMod* a, const ShaderMod* b 
     return false;
 }
 
+// RECOMP_DLSS_PROBE=1 (2026-11-12) : entrées de la passe taa_resolve (fragment 7d70390948abb483), point de branchement
+// prévu d'un DLSS réel : textures de la banque 2 (+0x70 profondeur, +0x78 couleur, +0x80 historique, +0x88 vecteurs de
+// mouvement : poignées 10 à 13 de l'étage des fragments), cibles, et mots 2-5, 10-11 et 19 de la banque 6 (taille d'un
+// pixel, bornes UV, gigue, seuil). Une fois toutes les 60 images, dans le journal (« dlss »). Ne change rien au rendu.
+void dlss_sonde(const nvn::GfxState& s, Image* const* rts, int nrt) {
+    static const char* noms[4] = {"depth", "color", "history", "motion"};
+    std::string l;
+    char b[200];
+    for (int k = 0; k < 4; k++) {
+        const uint64_t h = s.tex[1][10 + k];
+        const uint32_t tid = h & 0xfffff;
+        nvn::TexDesc td;
+        bool have = false;
+        {
+            std::lock_guard<std::mutex> lk(nvn::g_desc_lk);
+            nvn::g_texpool.with_key(s.texpool, [&](const nvn::TexPool& p) {
+                auto it = p.desc.find(tid);
+                if (it != p.desc.end()) td = it->second, have = true;
+            });
+        }
+        Image* im = have ? get_image(td.tex) : nullptr;
+        if (im) snprintf(b, sizeof b, " %s %ux%u fmt %u (vk %d)", noms[k], im->w, im->h, im->nvnfmt, (int)im->fmt);
+        else snprintf(b, sizeof b, " %s ? (handle %llx)", noms[k], (unsigned long long)h);
+        l += b;
+    }
+    for (int i = 0; i < nrt && i < 2; i++)
+        if (rts[i]) {
+            snprintf(b, sizeof b, " | target %d %ux%u fmt %u", i, rts[i]->w, rts[i]->h, rts[i]->nvnfmt);
+            l += b;
+        }
+    const nvn::Range& u = s.ubo[1][3];   // banque 6 = emplacement 3 de l'étage des fragments
+    if (u.addr && u.size >= 80 && mem_valid(u.addr, 80)) {
+        const float* f = (const float*)u.addr;
+        snprintf(b, sizeof b, " | bank 6: texel %g %g, uv max %g %g, jitter %g %g, w19 %g", f[2], f[3], f[4], f[5], f[10],
+                 f[11], f[19]);
+        l += b;
+    }
+    HLOG("dlss", "taa_resolve frame %llu:%s", (unsigned long long)g.cur_frame + 1, l.c_str());
+}
+
+// ================================================================ DLSS à la place de taa_resolve (2026-11-12)
+// Avec dlss = dlss4 ou dlss45 (recomp.ini) sur une carte NVIDIA RTX, le dessin de taa_resolve (fragment
+// 7d70390948abb483) est remplacé par :
+//  1. passe avant (dlss_avant.comp) : couleur YCoCg du moteur → RVB (compressé), vecteurs de mouvement NDC → pixels ;
+//  2. évaluation du DLSS (dlss.cpp) : RVB, profondeur matérielle de la passe qui a écrit les vecteurs (D32F_S8,
+//     inversée), vecteurs, gigue de la banque 6 ; sortie RGBA16F à la taille des cibles ;
+//  3. passe après (dlss_apres.comp) : historique du moteur (cible 1) et couleur linéaire, copiée dans la cible 0.
+// La texture « profondeur » de taa_resolve n'est pas celle du matériel mais une distance linéaire (ssao_sao_z_input,
+// R32F) : elle ne convient pas au DLSS. Si quelque chose ne colle pas (formats, tailles, profondeur introuvable) ou
+// si NGX refuse, le dessin d'origine reste et le journal dit pourquoi (« dlss », une fois par raison).
+struct DlssImage {
+    VkImage img = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkImageView vue = VK_NULL_HANDLE;
+    uint32_t w = 0, h = 0;
+    VkFormat fmt = VK_FORMAT_UNDEFINED;
+};
+struct DlssPasses {
+    bool tente = false, ok = false;
+    VkDescriptorSetLayout dsl[3] = {};   // passes : 0 avant, 1 après, 2 recomposition (dlss_composer.comp)
+    VkPipelineLayout pl[3] = {};
+    VkPipeline pipe[3] = {};
+    VkSampler lineaire = VK_NULL_HANDLE;   // échantillonneur bilinéaire de la recomposition (comme upsample.frag)
+    VkDescriptorPool pools[Vk::NSLOT] = {};   // jeux de descripteurs des deux passes, par emplacement de soumission
+    DlssImage rvb, mv, sortie, lin;
+    DlssImage hist;              // historique écrit par la passe après quand la cible 1 ne convient pas (voir dlss_taa)
+    DlssImage base;              // super résolution : copie de la cible 0 de taa_resolve telle que dlss_taa l'a laissée
+    bool dans_partage = false;   // RECOMP_DLSS_SPLIT : dessin d'origine en cours (pas de DLSS)
+    // Super résolution : cible de upsample.frag (agrandissement du moteur) et taille de l'image qu'il agrandit, relevées à
+    // son dernier dessin ; image (g.cur_frame + 1) du dernier DLSS en super résolution, dont lin garde la sortie.
+    uint32_t up_w = 0, up_h = 0, up_src_w = 0, up_src_h = 0;
+    uint64_t sr_image = 0, sr_copies = 0, up_image = 0;   // up_image : g.cur_frame + 1 du dernier relevé
+    uint64_t base_image = 0, recompositions = 0;           // image de la dernière copie dans base ; recompositions
+    // Caméra de chaque vue, relevée à la passe qui écrit ses vecteurs de mouvement (banque 7 du fragment du prepass,
+    // f14dbbfacf9715f3) : matrice vue-projection de l'image (mots 32-47, par colonnes), celle que le jeu donne pour
+    // l'image précédente (mots 96-111, base des vecteurs de mouvement), et la nôtre de l'image précédente. image :
+    // g.cur_frame + 1 du relevé. Mot 434 : 1 si l'image précédente vaut (le prepass multiplie ses vecteurs de mouvement
+    // par ce booléen), 0 au premier dessin d'un nouveau plan (vecteurs nuls). Une caméra par image de vecteurs de
+    // mouvement : le jeu peut rendre plusieurs vues par image (Area 6 : une petite vue de 306×265 en plus de la scène).
+    struct Camera {
+        uint64_t image = 0, prec_image = 0;
+        float vp[16] = {}, vp_jeu_prec[16] = {}, vp_prec[16] = {};
+        uint32_t mot434 = 1;
+        bool mot434_lu = false;
+    };
+    std::unordered_map<VkImage, Camera> cameras;
+    // Vue principale : la plus grande des cibles de taa_resolve vues récemment (aire, image où elle a été vue). Le DLSS
+    // ne prend qu'elle ; les vues plus petites gardent l'anticrénelage du jeu (une fonction DLSS par vue serait
+    // recréée à chaque changement de vue).
+    uint64_t vue_aire = 0, vue_image = 0;
+    // images remplacées, détruites quand le GPU a fini la soumission indiquée (dlss_emplacement)
+    std::vector<std::pair<uint64_t, DlssImage>> morts;
+    uint64_t derniere = 0;   // g.cur_frame + 1 de la dernière évaluation (0 : aucune)
+    int echecs = 0;          // évaluations ratées d'affilée
+    uint64_t evals = 0, coupes = 0;   // évaluations ; historiques remis à zéro par le jeu (changements de plan)
+    // image des vecteurs de mouvement → clé de la profondeur de la même passe ; taille → dernière profondeur D32F
+    std::unordered_map<VkImage, uint64_t> mv_prof;
+    std::unordered_map<uint64_t, uint64_t> prof_taille;
+};
+DlssPasses g_dl;
+std::set<uint64_t> g_snap_coupes;   // RECOMP_DLSS_SNAP_CUTS : images à capturer après un changement de plan
+
+// Matrices de la caméra d'une vue, au premier dessin de l'image dans sa passe des vecteurs de mouvement (image `mv`).
+void dlss_camera(const nvn::GfxState& s, VkImage mv) {
+    const uint64_t image = g.cur_frame + 1;
+    DlssPasses::Camera& k = g_dl.cameras[mv];
+    if (k.image == image) return;
+    const nvn::Range& u = s.ubo[1][4];   // banque 7 de l'étage des fragments
+    if (!u.addr || u.size < 112 * 4 || !mem_valid(u.addr, 112 * 4)) return;
+    const float* f = (const float*)u.addr;
+    if (k.image) memcpy(k.vp_prec, k.vp, sizeof k.vp), k.prec_image = k.image;
+    memcpy(k.vp, f + 32, sizeof k.vp);
+    memcpy(k.vp_jeu_prec, f + 96, sizeof k.vp_jeu_prec);
+    k.mot434 = 1;
+    k.mot434_lu = u.size >= 435 * 4 && mem_valid(u.addr, 435 * 4);
+    if (k.mot434_lu) memcpy(&k.mot434, f + 434, 4);
+    k.image = image;
+}
+
+// Changement de plan (nouveau plan d'une cinématique, téléportation de la caméra) à cette image, d'après la caméra
+// relevée par dlss_camera. Signal du jeu lui-même, relevé le 2026-11-12 sur 7 048 images de la cinématique d'ouverture
+// (RECOMP_DLSS_PROBE=2) : le mot 434 tombe à 0 exactement aux 13 changements de plan (1 partout ailleurs), et la
+// matrice « précédente » donnée par le jeu cesse alors d'être celle de l'image d'avant (identique au bit près sinon).
+// Le prepass écrit alors des vecteurs de mouvement nuls : le DLSS, qui croyait l'image immobile, reprenait le plan
+// précédent (images fantômes). Mesures journalisées en plus avec RECOMP_DLSS_PROBE=2 (matrices par colonnes : élément
+// [colonne × 4 + ligne]) : rotation de la visée (ligne w) et saut du centre de la caméra (point que les lignes x, y et
+// w envoient sur 0), comparé à son pas moyen récent.
+bool dlss_coupe_camera(uint64_t image, const float* c, VkImage mv) {
+    auto it = g_dl.cameras.find(mv);
+    if (it == g_dl.cameras.end() || it->second.image != image) return false;   // caméra pas relevée à cette image
+    const DlssPasses::Camera& cam = it->second;
+    if (cam.prec_image + 1 != image) return cam.mot434_lu && cam.mot434 == 0;
+    const float* m = cam.vp;
+    const float* p = cam.vp_prec;
+    float dp = 0, n = 1e-30f;
+    for (int k = 0; k < 16; k++)
+        dp = std::max(dp, fabsf(cam.vp_jeu_prec[k] - p[k])), n = std::max(n, fabsf(m[k]));
+    dp /= n;
+    auto visee = [](const float* v, float* f) {
+        const float l = sqrtf(v[3] * v[3] + v[7] * v[7] + v[11] * v[11]) + 1e-30f;
+        f[0] = v[3] / l, f[1] = v[7] / l, f[2] = v[11] / l;
+    };
+    float a[3], b[3];
+    visee(m, a), visee(p, b);
+    const float angle = acosf(std::clamp(a[0] * b[0] + a[1] * b[1] + a[2] * b[2], -1.f, 1.f)) * 57.29578f;
+    auto centre = [](const float* v, double* o) {   // A · C = −t, lignes x, y, w
+        const double A[3][3] = {{v[0], v[4], v[8]}, {v[1], v[5], v[9]}, {v[3], v[7], v[11]}};
+        const double t[3] = {-(double)v[12], -(double)v[13], -(double)v[15]};
+        const double det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) -
+                           A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) +
+                           A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+        if (fabs(det) < 1e-30) return false;
+        for (int k = 0; k < 3; k++) {
+            double B[3][3];
+            memcpy(B, A, sizeof B);
+            for (int r = 0; r < 3; r++) B[r][k] = t[r];
+            o[k] = (B[0][0] * (B[1][1] * B[2][2] - B[1][2] * B[2][1]) - B[0][1] * (B[1][0] * B[2][2] - B[1][2] * B[2][0]) +
+                    B[0][2] * (B[1][0] * B[2][1] - B[1][1] * B[2][0])) / det;
+        }
+        return true;
+    };
+    double cc[3], cp[3];
+    double saut = 0;
+    const bool centres = centre(m, cc) && centre(p, cp);
+    if (centres) saut = sqrt((cc[0] - cp[0]) * (cc[0] - cp[0]) + (cc[1] - cp[1]) * (cc[1] - cp[1]) + (cc[2] - cp[2]) * (cc[2] - cp[2]));
+    static double pas = 0;   // pas moyen récent du centre (moyenne glissante sur ≈ 16 images, hors coupes)
+    const bool coupe = (cam.mot434_lu && cam.mot434 == 0) || dp > 1e-4f;
+    static const bool sonde = getenv("RECOMP_DLSS_PROBE") && atoi(getenv("RECOMP_DLSS_PROBE")) == 2;
+    if (sonde)
+        HLOG("dlss", "camera frame %llu: rotation %.2f deg, jump %.4g (recent step %.4g), game prev vs our last %.3g, "
+             "center %.4g %.4g %.4g, w13 %.3g, w434 0x%x%s", (unsigned long long)image, angle, saut, pas, dp,
+             centres ? cc[0] : 0.0, centres ? cc[1] : 0.0, centres ? cc[2] : 0.0, c[13], cam.mot434, coupe ? " CUT" : "");
+    if (centres && !coupe) pas = pas * (15.0 / 16.0) + saut / 16.0;
+    return coupe;
+}
+
+// Plans proche et lointain et angle de vue vertical d'une matrice vue-projection du jeu (par colonnes, profondeur
+// inversée : 1 au plan proche, 0 au plan lointain), pour le FSR d'AMD. La ligne w est l'axe de visée (longueur λ) ; la
+// ligne z vaut k × ligne w + (0, 0, 0, B) : à la distance d de la caméra, z = k + B / (λ d). Rien d'écrit si la
+// matrice ne se lit pas ainsi (projection orthographique, valeurs aberrantes) ; lointain infini si k est nul.
+void dlss_plans_camera(const float* v, float* proche, float* loin, float* fov) {
+    const double wx = v[3], wy = v[7], wz = v[11], ww = v[15];
+    const double l2 = wx * wx + wy * wy + wz * wz;
+    const double ly = sqrt((double)v[1] * v[1] + (double)v[5] * v[5] + (double)v[9] * v[9]);
+    if (!(l2 > 1e-12) || !(ly > 1e-12)) return;
+    const double l = sqrt(l2);
+    const double k = (v[2] * wx + v[6] * wy + v[10] * wz) / l2;
+    const double b = (v[14] - k * ww) / l;
+    const double n = b / (1.0 - k);
+    if (!(n > 1e-6) || !std::isfinite(n) || !(k < 0.5)) return;
+    *proche = (float)n;
+    *loin = k < -1e-9 ? (float)(-b / k) : INFINITY;
+    *fov = (float)(2.0 * atan(l / ly));
+}
+
+void dlss_detruire(DlssImage& d) {
+    if (d.vue) vkDestroyImageView(g.dev, d.vue, nullptr);
+    if (d.img) vkDestroyImage(g.dev, d.img, nullptr);
+    if (d.mem) vkFreeMemory(g.dev, d.mem, nullptr);
+    d = DlssImage{};
+}
+
+// Début d'un enregistrement (begin_frame) : jeux de descripteurs de l'emplacement remis à zéro, et ménage de ce que le
+// DLSS a remplacé (images, fonctions NGX) une fois que le GPU a fini les soumissions qui pouvaient encore s'en servir.
+void dlss_emplacement(int slot) {
+    if (g_dl.pools[slot]) vkResetDescriptorPool(g.dev, g_dl.pools[slot], 0);
+    if (g_dl.morts.empty() && !dlss::pret()) return;
+    const uint64_t fini = gpu_done_serial();
+    if (fini == ~0ull) return;   // périphérique perdu : ne plus rien libérer
+    for (size_t i = 0; i < g_dl.morts.size();) {
+        if (g_dl.morts[i].first > fini) {
+            i++;
+            continue;
+        }
+        dlss_detruire(g_dl.morts[i].second);
+        g_dl.morts.erase(g_dl.morts.begin() + (std::ptrdiff_t)i);
+    }
+    dlss::menage(fini);
+}
+
+bool dlss_passes() {
+    if (g_dl.tente) return g_dl.ok;
+    g_dl.tente = true;
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = si.minFilter = VK_FILTER_LINEAR;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(g.dev, &si, nullptr, &g_dl.lineaire) != VK_SUCCESS) return false;
+    for (int k = 0; k < 3; k++) {
+        // avant : 2 textures + 2 images ; après : 1 texture + 2 images ; recomposition : 2 textures échantillonnées + 1 image
+        const int n = k == 0 ? 4 : 3, ntex = k == 0 ? 2 : k == 1 ? 1 : 2;
+        const VkDescriptorType tex = k == 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        VkDescriptorSetLayoutBinding b[4] = {};
+        for (int i = 0; i < n; i++)
+            b[i] = {(uint32_t)i, i < ntex ? tex : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        li.bindingCount = (uint32_t)n;
+        li.pBindings = b;
+        if (vkCreateDescriptorSetLayout(g.dev, &li, nullptr, &g_dl.dsl[k]) != VK_SUCCESS) return false;
+        VkPushConstantRange pc{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+        VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        pli.setLayoutCount = 1;
+        pli.pSetLayouts = &g_dl.dsl[k];
+        pli.pushConstantRangeCount = 1;
+        pli.pPushConstantRanges = &pc;
+        if (vkCreatePipelineLayout(g.dev, &pli, nullptr, &g_dl.pl[k]) != VK_SUCCESS) return false;
+        VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        mi.codeSize = k == 0 ? sizeof DLSS_AVANT_SPV : k == 1 ? sizeof DLSS_APRES_SPV : sizeof DLSS_COMPOSER_SPV;
+        mi.pCode = k == 0 ? DLSS_AVANT_SPV : k == 1 ? DLSS_APRES_SPV : DLSS_COMPOSER_SPV;
+        VkShaderModule m = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(g.dev, &mi, nullptr, &m) != VK_SUCCESS) return false;
+        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+        ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main",
+                    nullptr};
+        ci.layout = g_dl.pl[k];
+        const VkResult r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &ci, nullptr, &g_dl.pipe[k]);
+        vkDestroyShaderModule(g.dev, m, nullptr);
+        if (r != VK_SUCCESS) return false;
+    }
+    for (auto& p : g_dl.pools) {
+        VkDescriptorPoolSize ps[3] = {{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 12}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 20},
+                                      {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8}};
+        VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        pci.maxSets = 12;
+        pci.poolSizeCount = 3;
+        pci.pPoolSizes = ps;
+        if (vkCreateDescriptorPool(g.dev, &pci, nullptr, &p) != VK_SUCCESS) return false;
+    }
+    g_dl.ok = true;
+    return true;
+}
+
+// Numéro de la soumission qui contiendra les commandes enregistrées maintenant (voir drop_images).
+uint64_t dlss_serie() { return g.submitted + (g.recording ? 1 : 0); }
+
+bool dlss_image(DlssImage& d, uint32_t w, uint32_t h, VkFormat f, VkImageUsageFlags u) {
+    if (d.img && d.w == w && d.h == h && d.fmt == f) return true;
+    if (d.img) {   // des commandes enregistrées mais pas encore exécutées peuvent encore s'en servir : plus tard
+        g_dl.morts.emplace_back(dlss_serie(), d);
+        d = DlssImage{};
+    }
+    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ci.imageType = VK_IMAGE_TYPE_2D;
+    ci.format = f;
+    ci.extent = {w, h, 1};
+    ci.mipLevels = 1;
+    ci.arrayLayers = 1;
+    ci.samples = VK_SAMPLE_COUNT_1_BIT;
+    ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ci.usage = u;
+    if (vkCreateImage(g.dev, &ci, nullptr, &d.img) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(g.dev, d.img, &mr);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = mr.size;
+    ai.memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(g.dev, &ai, nullptr, &d.mem) != VK_SUCCESS) {
+        vkDestroyImage(g.dev, d.img, nullptr);
+        d.img = VK_NULL_HANDLE;
+        return false;
+    }
+    vkBindImageMemory(g.dev, d.img, d.mem, 0);
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = d.img;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vi.format = f;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(g.dev, &vi, nullptr, &d.vue) != VK_SUCCESS) return false;
+    d.w = w, d.h = h, d.fmt = f;
+    return true;
+}
+
+// image Vulkan d'une poignée de texture du jeu (pool de textures de l'état)
+Image* image_poignee(const nvn::GfxState& s, uint64_t h) {
+    const uint32_t tid = h & 0xfffff;
+    nvn::TexDesc td;
+    bool have = false;
+    {
+        std::lock_guard<std::mutex> lk(nvn::g_desc_lk);
+        nvn::g_texpool.with_key(s.texpool, [&](const nvn::TexPool& p) {
+            auto it = p.desc.find(tid);
+            if (it != p.desc.end()) td = it->second, have = true;
+        });
+    }
+    return have ? get_image(td.tex) : nullptr;
+}
+
+VkImageMemoryBarrier2 barriere_image(VkImage img, VkImageAspectFlags asp, VkPipelineStageFlags2 ss, VkAccessFlags2 sa,
+                                     VkPipelineStageFlags2 ds, VkAccessFlags2 da, VkImageLayout avant,
+                                     VkImageLayout apres) {
+    VkImageMemoryBarrier2 ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+    ib.srcStageMask = ss, ib.srcAccessMask = sa, ib.dstStageMask = ds, ib.dstAccessMask = da;
+    ib.oldLayout = avant, ib.newLayout = apres;
+    ib.srcQueueFamilyIndex = ib.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ib.image = img;
+    ib.subresourceRange = {asp, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
+    return ib;
+}
+// barrières d'images, plus (memoire) une barrière mémoire : toutes les écritures précédentes → lectures du calcul
+void barrieres_images(const VkImageMemoryBarrier2* b, uint32_t n, bool memoire = false) {
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT;
+    VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    di.memoryBarrierCount = memoire ? 1 : 0;
+    di.pMemoryBarriers = &mb;
+    di.imageMemoryBarrierCount = n;
+    di.pImageMemoryBarriers = b;
+    vkCmdPipelineBarrier2(g.cb, &di);
+}
+
+void draw_verrouille(const DrawCall& d, DrawTimer& dtm);
+
+// Remplace le dessin de taa_resolve par le DLSS. Faux : le dessin d'origine suit (le jeu garde son anticrénelage).
+// RECOMP_DLSS_SPLIT=1 (essais) : écran partagé sur la même image, anticrénelage du jeu à gauche (son dessin d'origine,
+// avec son propre historique), DLSS à droite (moitié droite de sa sortie copiée par-dessus).
+bool dlss_taa(const DrawCall& d, const nvn::GfxState& s, Image* const* rts, int nrt) {
+    static const bool partage = getenv("RECOMP_DLSS_SPLIT") != nullptr;
+    if (!dlss_passes()) {
+        dlss::couper("compute passes not created");
+        return false;
+    }
+    auto refus = [](const char* raison) {
+        static std::set<std::string> vus;
+        if (vus.size() < 16 && vus.insert(raison).second) HLOG("dlss", "taa_resolve kept: %s", raison);
+        return false;
+    };
+    if (nrt < 2 || !rts[0] || !rts[1]) return refus("targets missing");
+    Image* coul = image_poignee(s, s.tex[1][11]);   // poignées de la banque 2 : +0x78 couleur, +0x88 vecteurs
+    Image* mv = image_poignee(s, s.tex[1][13]);
+    if (!coul || !mv) return refus("color or motion vectors not found");
+    Image* prof = nullptr;
+    if (auto it = g_dl.mv_prof.find(mv->img); it != g_dl.mv_prof.end()) prof = get_image(it->second);
+    if (!prof || !is_depth(prof->fmt) || prof->w != mv->w || prof->h != mv->h) {
+        prof = nullptr;
+        if (auto it = g_dl.prof_taille.find((uint64_t)mv->w << 32 | mv->h); it != g_dl.prof_taille.end())
+            prof = get_image(it->second);
+    }
+    if (!prof || !is_depth(prof->fmt) || prof->w != mv->w || prof->h != mv->h)
+        return refus("hardware depth of the motion vectors' pass not found");
+    if (coul->fmt != VK_FORMAT_R16G16B16A16_UNORM || mv->fmt != VK_FORMAT_R16G16_SNORM ||
+        rts[1]->fmt != VK_FORMAT_R16G16B16A16_UNORM || !rts[1]->storage || is_depth(rts[0]->fmt) ||
+        is_compressed(rts[0]->fmt) || coul->layers != 1 || mv->layers != 1 || rts[0]->layers != 1 ||
+        rts[1]->layers != 1 || s.rt_level[0] || s.rt_level[1] || s.rt_layer[0] || s.rt_layer[1])
+        return refus("unexpected formats");
+    const uint32_t ow = rts[0]->w, oh = rts[0]->h;   // cibles de taa_resolve : taille du rendu 3D
+    if (rts[1]->w != ow || rts[1]->h != oh) return refus("targets of different sizes");
+    // Super résolution (rendu 3D sous 100 %) : quand upsample.frag agrandit ensuite cette sortie (relevé à son dernier
+    // dessin), le DLSS sort directement à la taille de sa cible, et dlss_agrandir remplace ce dessin par une copie.
+    const bool sr = g_dl.up_src_w == ow && g_dl.up_src_h == oh && g_dl.up_w > ow && g_dl.up_h > oh;
+    const uint32_t sw = sr ? g_dl.up_w : ow, sh = sr ? g_dl.up_h : oh;   // taille de sortie du DLSS
+    // Vue principale seulement (DlssPasses::vue_aire) : la plus grande cible de taa_resolve vue dans les 300 dernières
+    // images. Une vue de moins de la moitié de cette aire (Area 6 : 306×265 en plus de la scène) garde l'anticrénelage
+    // du jeu : avec une seule fonction DLSS, elle était recréée à chaque changement de vue, deux fois par image.
+    const uint64_t aire = (uint64_t)ow * oh;
+    if (aire > g_dl.vue_aire || g.cur_frame + 1 > g_dl.vue_image + 300) g_dl.vue_aire = aire;
+    if (aire * 2 < g_dl.vue_aire) return refus("smaller secondary view: the game's anti-aliasing is kept for it");
+    g_dl.vue_image = g.cur_frame + 1;
+    // Super résolution demandée (Qualité à Ultra performances) : attendre de connaître l'agrandissement du moteur
+    // (upsample.frag, relevé à son premier dessin) plutôt que de créer une fonction DLAA remplacée aussitôt.
+    if (dlss::echelle_dlss() > 0 && !sr) return refus("super resolution: the game's upscale pass not seen yet");
+    // banque 6 : bornes UV de la zone rendue dans les entrées (mots 4-5), gigue en UV des entrées (10-11, y de signe
+    // opposé), compression de la couleur (mot 14, bit 0 : x / (1 + x), sinon racine carrée)
+    const nvn::Range& u = s.ubo[1][3];
+    if (!u.addr || u.size < 80 || !mem_valid(u.addr, 80)) return refus("constants (bank 6) not readable");
+    float c[20];
+    memcpy(c, (const void*)u.addr, sizeof c);
+    uint32_t mot14;
+    memcpy(&mot14, (const uint8_t*)u.addr + 56, 4);
+    if (!(c[4] > 0 && c[4] <= 1.0001f && c[5] > 0 && c[5] <= 1.0001f)) return refus("UV bounds invalid");
+    const uint32_t rw = std::min<uint32_t>((uint32_t)lroundf(c[4] * coul->w), std::min(coul->w, mv->w));
+    const uint32_t rh = std::min<uint32_t>((uint32_t)lroundf(c[5] * coul->h), std::min(coul->h, mv->h));
+    if (rw > ow || rh > oh || rw < 32 || rh < 32) return refus("render size larger than the output or too small");
+    // RECOMP_DLSS_JITTER_FLIP, RECOMP_DLSS_MV_FLIP (essais) : 1 inverse x, 2 inverse y
+    static const int inv_gigue = getenv("RECOMP_DLSS_JITTER_FLIP") ? atoi(getenv("RECOMP_DLSS_JITTER_FLIP")) : 0;
+    static const int inv_mv = getenv("RECOMP_DLSS_MV_FLIP") ? atoi(getenv("RECOMP_DLSS_MV_FLIP")) : 0;
+    end_render();
+    const VkImageUsageFlags u_es = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (!dlss_image(g_dl.rvb, rw, rh, VK_FORMAT_R16G16B16A16_SFLOAT, u_es) ||
+        !dlss_image(g_dl.mv, rw, rh, VK_FORMAT_R16G16_SFLOAT, u_es) ||
+        !dlss_image(g_dl.sortie, sw, sh, VK_FORMAT_R16G16B16A16_SFLOAT, u_es) ||
+        !dlss_image(g_dl.lin, sw, sh, VK_FORMAT_R16G16B16A16_SFLOAT,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT) ||
+        ((partage || sr) && !dlss_image(g_dl.hist, sw, sh, VK_FORMAT_R16G16B16A16_UNORM, VK_IMAGE_USAGE_STORAGE_BIT))) {
+        dlss::couper("video memory refused for its images");
+        return false;
+    }
+    // Historique écrit par la passe après : dans la cible 1 du jeu (son anticrénelage peut reprendre à tout moment), ou
+    // dans une image à part en écran partagé (le jeu garde le sien) et en super résolution (cible 1 plus petite).
+    const bool hist_a_part = partage || sr;
+    const VkImage hist_img = hist_a_part ? g_dl.hist.img : rts[1]->img;
+    const VkImageView hist_vue = hist_a_part ? g_dl.hist.vue : rts[1]->view;
+    VkDescriptorSet sets[2] = {};
+    VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    dai.descriptorPool = g_dl.pools[g.slot];
+    dai.descriptorSetCount = 2;
+    dai.pSetLayouts = g_dl.dsl;
+    if (vkAllocateDescriptorSets(g.dev, &dai, sets) != VK_SUCCESS) return refus("descriptor sets exhausted");
+    const VkDescriptorImageInfo ii[7] = {
+        {VK_NULL_HANDLE, coul->view, VK_IMAGE_LAYOUT_GENERAL},     {VK_NULL_HANDLE, mv->view, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_dl.rvb.vue, VK_IMAGE_LAYOUT_GENERAL},   {VK_NULL_HANDLE, g_dl.mv.vue, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_dl.sortie.vue, VK_IMAGE_LAYOUT_GENERAL}, {VK_NULL_HANDLE, hist_vue, VK_IMAGE_LAYOUT_GENERAL},
+        {VK_NULL_HANDLE, g_dl.lin.vue, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet w[7];
+    for (int i = 0; i < 7; i++) {
+        const bool avant = i < 4;
+        w[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w[i].dstSet = sets[avant ? 0 : 1];
+        w[i].dstBinding = (uint32_t)(avant ? i : i - 4);
+        w[i].descriptorCount = 1;
+        w[i].descriptorType = (avant ? i < 2 : i == 4) ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        w[i].pImageInfo = &ii[i];
+    }
+    vkUpdateDescriptorSets(g.dev, 7, w, 0, nullptr);
+    constexpr VkImageAspectFlags COUL = VK_IMAGE_ASPECT_COLOR_BIT;
+    constexpr VkPipelineStageFlags2 CALCUL = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, TOUT = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                    COPIE = VK_PIPELINE_STAGE_2_TRANSFER_BIT, RIEN = VK_PIPELINE_STAGE_2_NONE;
+    constexpr VkAccessFlags2 ECRIT = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT, LIT = VK_ACCESS_2_SHADER_READ_BIT,
+                             MEM = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    // 1. passe avant
+    VkImageMemoryBarrier2 b[4];
+    b[0] = barriere_image(g_dl.rvb.img, COUL, RIEN, 0, CALCUL, ECRIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    b[1] = barriere_image(g_dl.mv.img, COUL, RIEN, 0, CALCUL, ECRIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    barrieres_images(b, 2, true);
+    vkCmdBindPipeline(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_dl.pipe[0]);
+    vkCmdBindDescriptorSets(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_dl.pl[0], 0, 1, &sets[0], 0, nullptr);
+    const struct {
+        float echelle_mv[2];
+        int32_t taille[2];
+    } pc0 = {{-0.5f * (float)rw * (inv_mv & 1 ? -1.f : 1.f), 0.5f * (float)rh * (inv_mv & 2 ? -1.f : 1.f)},
+             {(int32_t)rw, (int32_t)rh}};
+    vkCmdPushConstants(g.cb, g_dl.pl[0], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc0, &pc0);
+    vkCmdDispatch(g.cb, (rw + 7) / 8, (rh + 7) / 8, 1);
+    // 2. DLSS : entrées en lecture, sortie en écriture (états demandés par NGX)
+    b[0] = barriere_image(g_dl.rvb.img, COUL, CALCUL, ECRIT, CALCUL, LIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    b[1] = barriere_image(g_dl.mv.img, COUL, CALCUL, ECRIT, CALCUL, LIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    b[2] = barriere_image(prof->img, prof->aspect, TOUT, VK_ACCESS_2_MEMORY_WRITE_BIT, CALCUL, LIT,
+                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    b[3] = barriere_image(g_dl.sortie.img, COUL, RIEN, 0, CALCUL, LIT | ECRIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                          VK_IMAGE_LAYOUT_GENERAL);
+    barrieres_images(b, 4);
+    dlss::Evaluation e;
+    e.couleur = {g_dl.rvb.img, g_dl.rvb.vue, VK_FORMAT_R16G16B16A16_SFLOAT, COUL, rw, rh};
+    e.vecteurs = {g_dl.mv.img, g_dl.mv.vue, VK_FORMAT_R16G16_SFLOAT, COUL, rw, rh};
+    e.profondeur = {prof->img, prof->view, prof->fmt, VK_IMAGE_ASPECT_DEPTH_BIT, prof->w, prof->h};
+    e.sortie = {g_dl.sortie.img, g_dl.sortie.vue, VK_FORMAT_R16G16B16A16_SFLOAT, COUL, sw, sh};
+    e.rw = rw, e.rh = rh;
+    // gigue : la couleur rendue est décalée de (c10, −c11) en UV des entrées (taa_resolve la relit à uv + ce décalage)
+    e.gigue[0] = c[10] * (float)coul->w * (inv_gigue & 1 ? -1.f : 1.f);
+    e.gigue[1] = -c[11] * (float)coul->h * (inv_gigue & 2 ? -1.f : 1.f);
+    const uint64_t image = g.cur_frame + 1;
+    e.compression = mot14 & 1 ? 1 : 2;
+    if (auto it = g_dl.cameras.find(mv->img); it != g_dl.cameras.end() && it->second.image == image)
+        dlss_plans_camera(it->second.vp, &e.proche, &e.loin, &e.fov);
+    const bool creation = !dlss::fonction_prete(rw, rh, sw, sh);
+    // Remise à zéro de l'historique : création, reprise après une pause du rendu 3D, ou changement de plan (caméra qui
+    // saute d'une image à l'autre, dlss_coupe_camera). Le TAA du jeu s'en passe (il borne l'historique au voisinage de
+    // l'image courante) ; sans elle, le DLSS mélangeait quelques images le plan précédent au suivant (images fantômes).
+    // RECOMP_DLSS_NO_CUT_RESET=1 (essais) : sans cette remise à zéro, comme avant ; RECOMP_DLSS_SNAP_CUTS=n : instantanés
+    // des images 0, 1, 2 et 4 après chacun des n premiers changements de plan (avec RECOMP_SNAPSHOT_DIR).
+    static const bool sans_coupe = getenv("RECOMP_DLSS_NO_CUT_RESET") != nullptr;
+    static const long snap_coupes = getenv("RECOMP_DLSS_SNAP_CUTS") ? atol(getenv("RECOMP_DLSS_SNAP_CUTS")) : 0;
+    const bool coupe = dlss_coupe_camera(image, c, mv->img);
+    e.reset = creation || !g_dl.derniere || image > g_dl.derniere + 4 || (coupe && !sans_coupe);
+    if (coupe) {
+        if (g_dl.coupes < 12) HLOG("dlss", "camera cut: history reset (frame %llu)", (unsigned long long)image);
+        if ((long)g_dl.coupes < snap_coupes)
+            for (uint64_t k : {0, 1, 2, 4}) g_snap_coupes.insert(image + k);
+        g_dl.coupes++;
+    }
+    if (creation) rt_stall_begin();   // création : quelques centaines de ms, hors du temps du jeu
+    const bool ok = dlss::evaluer(g.cb, e, dlss_serie());
+    if (creation) rt_stall_end();
+    g.dyn = Vk::Dyn{};   // NGX et le FSR enregistrent leurs propres commandes : état dynamique des dessins à redonner
+    b[0] = barriere_image(prof->img, prof->aspect, CALCUL, LIT, TOUT, MEM, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                          VK_IMAGE_LAYOUT_GENERAL);
+    if (!ok) {
+        barrieres_images(b, 1);
+        if (++g_dl.echecs >= 3) dlss::couper("3 evaluations failed in a row");
+        return false;
+    }
+    // 3. passe après : historique (cible 1) et couleur linéaire
+    b[1] = barriere_image(g_dl.sortie.img, COUL, CALCUL, ECRIT | VK_ACCESS_2_SHADER_WRITE_BIT, CALCUL, LIT,
+                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    b[2] = barriere_image(g_dl.lin.img, COUL, RIEN, 0, CALCUL, ECRIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    b[3] = barriere_image(hist_img, COUL, hist_a_part ? RIEN : TOUT, hist_a_part ? 0 : MEM, CALCUL, ECRIT,
+                          hist_a_part ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    barrieres_images(b, 4);
+    vkCmdBindPipeline(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_dl.pipe[1]);
+    vkCmdBindDescriptorSets(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_dl.pl[1], 0, 1, &sets[1], 0, nullptr);
+    const struct {
+        int32_t taille[2];
+        uint32_t reinhard, rien;
+    } pc1 = {{(int32_t)sw, (int32_t)sh}, mot14 & 1u, 0};
+    vkCmdPushConstants(g.cb, g_dl.pl[1], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc1, &pc1);
+    vkCmdDispatch(g.cb, (sw + 7) / 8, (sh + 7) / 8, 1);
+    if (partage) {   // écran partagé : dessin d'origine (anticrénelage du jeu) dans les deux cibles, DLSS à droite
+        g_dl.dans_partage = true;
+        DrawTimer dtm;
+        draw_verrouille(d, dtm);
+        g_dl.dans_partage = false;
+        end_render();
+    }
+    // 4. couleur linéaire → cible 0 (RGBA8 sRGB, sans écriture possible par un shader de calcul) : copie qui encode. En
+    // super résolution, réduite à la taille du rendu (filtre linéaire) pour qui relirait la cible 0 ; c'est upsample.frag,
+    // remplacé par dlss_agrandir, qui reçoit la sortie pleine taille. En écran partagé et super résolution, la cible 0
+    // garde l'anticrénelage du jeu : le partage se fait à l'agrandissement.
+    b[0] = barriere_image(g_dl.lin.img, COUL, CALCUL, ECRIT, COPIE, VK_ACCESS_2_TRANSFER_READ_BIT,
+                          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+    b[1] = barriere_image(rts[0]->img, COUL, TOUT, MEM, COPIE, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_GENERAL);
+    barrieres_images(b, 2);
+    if (!(sr && partage)) {
+        VkImageBlit bl{};
+        const int32_t x0 = partage ? (int32_t)(ow / 2) : 0;
+        bl.srcSubresource = {COUL, 0, 0, 1};
+        bl.srcOffsets[0] = {x0, 0, 0};   // écran partagé : seulement sans super résolution (mêmes tailles)
+        bl.srcOffsets[1] = {(int32_t)sw, (int32_t)sh, 1};
+        bl.dstSubresource = {COUL, 0, 0, 1};
+        bl.dstOffsets[0] = {x0, 0, 0};
+        bl.dstOffsets[1] = {(int32_t)ow, (int32_t)oh, 1};
+        vkCmdBlitImage(g.cb, g_dl.lin.img, VK_IMAGE_LAYOUT_GENERAL, rts[0]->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                       sr ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    }
+    // 5. super résolution : copie de la cible 0 telle qu'elle est maintenant (sortie du DLSS réduite, ou anticrénelage
+    // du jeu en écran partagé), pour que dlss_agrandir reconnaisse ce que le jeu y dessinera encore d'ici
+    // l'agrandissement (le viseur) et le reprenne de son image (dlss_composer.comp).
+    bool base_ok = false;
+    if (sr && dlss_image(g_dl.base, ow, oh, rts[0]->fmt, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
+        b[0] = barriere_image(rts[0]->img, COUL, TOUT, MEM, COPIE, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                              VK_IMAGE_LAYOUT_GENERAL);
+        b[1] = barriere_image(g_dl.base.img, COUL, RIEN, 0, COPIE, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                              VK_IMAGE_LAYOUT_GENERAL);
+        barrieres_images(b, 2);
+        VkImageCopy cp{};
+        cp.srcSubresource = cp.dstSubresource = {COUL, 0, 0, 1};
+        cp.extent = {ow, oh, 1};
+        vkCmdCopyImage(g.cb, rts[0]->img, VK_IMAGE_LAYOUT_GENERAL, g_dl.base.img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+        base_ok = true;
+    }
+    barrier_all();
+    g_dl.base_image = base_ok ? image : 0;
+    g_dl.sr_image = sr ? image : 0;
+    g_dl.derniere = image;
+    g_dl.echecs = 0;
+    if (g_dl.evals++ == 0)
+        HLOG("dlss", "first frame through %s: %s (color compression: %s)", dlss::technique(), dlss::description(),
+             (mot14 & 1) ? "x/(1+x)" : "square root");
+    return true;
+}
+
+// upsample.frag (fragment 45f8409ea692850d), rendu 3D sous 100 % : un seul échantillon bilinéaire de la sortie de
+// taa_resolve (poignée +0x70 de la banque 2, coordonnées × mots 8-9 de la banque 6), vers la cible de la taille de
+// l'écran, avant l'interface ; avec le bit 0x80 du mot 10, le shader encode lui-même en sRGB. Sa cible et sa source sont
+// relevées pour dlss_taa (taille de sortie de la super résolution) ; quand le DLSS vient de produire cette image en
+// super résolution, le dessin est remplacé par la copie de sa sortie (en écran partagé : moitié droite par-dessus le
+// dessin d'origine). Faux : le dessin d'origine suit.
+bool dlss_agrandir(const DrawCall& d, const nvn::GfxState& s, Image* const* rts, int nrt) {
+    static const bool partage = getenv("RECOMP_DLSS_SPLIT") != nullptr;
+    if (nrt < 1 || !rts[0]) return false;
+    Image* src = image_poignee(s, s.tex[1][10]);
+    if (!src) return false;
+    // une petite vue agrandie à part ne remplace pas le relevé de l'agrandissement de la scène (vue principale)
+    const uint64_t aire = (uint64_t)rts[0]->w * rts[0]->h, aire_up = (uint64_t)g_dl.up_w * g_dl.up_h;
+    if (aire * 2 < aire_up && g.cur_frame + 1 <= g_dl.up_image + 300) return false;
+    g_dl.up_w = rts[0]->w, g_dl.up_h = rts[0]->h, g_dl.up_src_w = src->w, g_dl.up_src_h = src->h;
+    g_dl.up_image = g.cur_frame + 1;
+    if (g_dl.sr_image != g.cur_frame + 1 || g_dl.lin.w != rts[0]->w || g_dl.lin.h != rts[0]->h) return false;
+    const nvn::Range& u = s.ubo[1][3];
+    uint32_t mot10 = 0;
+    if (u.addr && u.size >= 44 && mem_valid(u.addr, 44)) memcpy(&mot10, (const uint8_t*)u.addr + 40, 4);
+    if ((mot10 & 0x80) || rts[0]->fmt != VK_FORMAT_R8G8B8A8_SRGB || s.rt_level[0] || s.rt_layer[0] ||
+        rts[0]->layers != 1) {
+        static bool dit = false;
+        if (!dit) dit = true, HLOG("dlss", "upsample kept (target format %d, word 10 = 0x%x)", (int)rts[0]->fmt, mot10);
+        return false;
+    }
+    if (partage) {
+        g_dl.dans_partage = true;
+        DrawTimer dtm;
+        draw_verrouille(d, dtm);
+        g_dl.dans_partage = false;
+    }
+    end_render();
+    constexpr VkImageAspectFlags COUL = VK_IMAGE_ASPECT_COLOR_BIT;
+    constexpr VkPipelineStageFlags2 TOUT = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, COPIE = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+    constexpr VkAccessFlags2 MEM = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+    VkImageMemoryBarrier2 b[2];
+    // Recomposition (dlss_composer.comp) : ce que le jeu a encore dessiné dans la cible de taa_resolve depuis le DLSS
+    // (le viseur de l'Arwing…) est repris de son image agrandie en bilinéaire, comme upsample.frag le ferait.
+    float echelle[2] = {1.f, 1.f};   // mots 8-9 de la banque 6 : bornes UV de la source (1 avec le bit 0x100 du mot 10)
+    if (!(mot10 & 0x100) && u.addr && u.size >= 40 && mem_valid(u.addr, 40)) memcpy(echelle, (const uint8_t*)u.addr + 32, 8);
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (g_dl.base_image == g.cur_frame + 1 && g_dl.base.w == src->w && g_dl.base.h == src->h && echelle[0] > 0 &&
+        echelle[0] <= 1.0001f && echelle[1] > 0 && echelle[1] <= 1.0001f) {
+        VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        dai.descriptorPool = g_dl.pools[g.slot];
+        dai.descriptorSetCount = 1;
+        dai.pSetLayouts = &g_dl.dsl[2];
+        if (vkAllocateDescriptorSets(g.dev, &dai, &set) != VK_SUCCESS) set = VK_NULL_HANDLE;
+    }
+    if (set) {
+        const VkDescriptorImageInfo ii[3] = {{g_dl.lineaire, src->view, VK_IMAGE_LAYOUT_GENERAL},
+                                             {g_dl.lineaire, g_dl.base.vue, VK_IMAGE_LAYOUT_GENERAL},
+                                             {VK_NULL_HANDLE, g_dl.lin.vue, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet wr[3];
+        for (int i = 0; i < 3; i++) {
+            wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            wr[i].dstSet = set;
+            wr[i].dstBinding = (uint32_t)i;
+            wr[i].descriptorCount = 1;
+            wr[i].descriptorType = i < 2 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            wr[i].pImageInfo = &ii[i];
+        }
+        vkUpdateDescriptorSets(g.dev, 3, wr, 0, nullptr);
+        b[0] = barriere_image(g_dl.lin.img, COUL, TOUT, MEM, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                              VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                              VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL);
+        barrieres_images(b, 1, true);   // + toutes les écritures (cible du jeu, copie base) → lectures du calcul
+        vkCmdBindPipeline(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_dl.pipe[2]);
+        vkCmdBindDescriptorSets(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_dl.pl[2], 0, 1, &set, 0, nullptr);
+        const struct {
+            int32_t taille[2];
+            float echelle_uv[2];
+        } pc = {{(int32_t)g_dl.lin.w, (int32_t)g_dl.lin.h}, {echelle[0], echelle[1]}};
+        vkCmdPushConstants(g.cb, g_dl.pl[2], VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+        vkCmdDispatch(g.cb, (g_dl.lin.w + 7) / 8, (g_dl.lin.h + 7) / 8, 1);
+        if (g_dl.recompositions++ == 0)
+            HLOG("dlss", "what the game draws after taa_resolve (crosshair...) is taken back from its image");
+    }
+    b[0] = barriere_image(g_dl.lin.img, COUL, TOUT, MEM, COPIE, VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_GENERAL);
+    b[1] = barriere_image(rts[0]->img, COUL, TOUT, MEM, COPIE, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                          VK_IMAGE_LAYOUT_GENERAL);
+    barrieres_images(b, 2);
+    const uint32_t w = rts[0]->w, h = rts[0]->h;
+    const int32_t x0 = partage ? (int32_t)(w / 2) : 0;
+    VkImageBlit bl{};
+    bl.srcSubresource = bl.dstSubresource = {COUL, 0, 0, 1};
+    bl.srcOffsets[0] = bl.dstOffsets[0] = {x0, 0, 0};
+    bl.srcOffsets[1] = bl.dstOffsets[1] = {(int32_t)w, (int32_t)h, 1};
+    vkCmdBlitImage(g.cb, g_dl.lin.img, VK_IMAGE_LAYOUT_GENERAL, rts[0]->img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl,
+                   VK_FILTER_NEAREST);
+    barrier_all();
+    if (g_dl.sr_copies++ == 0)
+        HLOG("dlss", "the game's upscale (upsample.frag) replaced by the %s output: %s", dlss::technique(),
+             dlss::description());
+    return true;
+}
+
+// Programmes résolus par clé de programme NVN (voir draw) : version, copie du programme, shaders trouvés
+struct ProgResolu {
+    uint32_t version = 0;
+    nvn::ProgramInfo info;
+    ShaderMod* vs = nullptr;
+    ShaderMod* fs = nullptr;
+};
+std::unordered_map<uint64_t, ProgResolu> g_progs;
+
 void draw(const DrawCall& d) {
     DrawTimer dtm;
     g_dn++;
     std::lock_guard<std::mutex> lk(g_vk_lk);
+    draw_verrouille(d, dtm);
+}
+// corps de draw, verrou pris (rappelé aussi par dlss_taa pour la comparaison en écran partagé)
+void draw_verrouille(const DrawCall& d, DrawTimer& dtm) {
     ensure_init();
     if (!g.ok) return;
     begin_frame();
@@ -4255,29 +5823,46 @@ void draw(const DrawCall& d) {
     // les effacements ne dépendent pas du programme lié (souvent un programme de calcul à ce moment :
     // ils étaient alors ignorés, et les cibles gardaient le contenu de l'image précédente)
     const bool clear = d.kind == DrawCall::ClearColor || d.kind == DrawCall::ClearDepth;
-    nvn::ProgramInfo prog;
+    // Programme résolu (2026-11-12) : retenu par clé de programme et version (nvnProgramSetShaders), avec ses shaders.
+    // Copier le ProgramInfo à chaque dessin (vecteur, chaînes) puis chercher ses shaders par nom coûtait ≈ 0,3 µs par
+    // dessin. Seuls les programmes complets sont retenus ; les autres passent par la copie comme avant.
+    static const nvn::ProgramInfo prog_vide;
+    const nvn::ProgramInfo* pp = &prog_vide;
+    nvn::ProgramInfo prog_copie;
     ShaderMod* vs = nullptr;
     ShaderMod* fs = nullptr;
     if (!clear) {
-        if (!nvn::g_prog.find_key(s.program, &prog)) return;
-        for (auto& st : prog.stages) {
-            if (st.stage == 0) vs = get_shader(st.hash);
-            else if (st.stage == 1) fs = get_shader(st.hash);
-            else { skip(st.stage == 5 ? "compute program bound" : "geometry/tessellation stage", prog.label); return; }
-            if ((st.stage == 0 && !vs) || (st.stage == 1 && !fs)) {
-                skip(st.stage == 0 ? "missing vertex shader" : "missing fragment shader", prog.label);
+        uint32_t version = 0;
+        if (!nvn::g_prog.with_key(s.program, [&](const nvn::ProgramInfo& p) { version = p.version; })) return;
+        auto pr = g_progs.find(s.program);
+        if (pr != g_progs.end() && pr->second.version == version) {
+            pp = &pr->second.info, vs = pr->second.vs, fs = pr->second.fs;
+        } else {
+            if (!nvn::g_prog.find_key(s.program, &prog_copie)) return;
+            pp = &prog_copie;
+            for (auto& st : prog_copie.stages) {
+                if (st.stage == 0) vs = get_shader(st.hash);
+                else if (st.stage == 1) fs = get_shader(st.hash);
+                else { skip(st.stage == 5 ? "compute program bound" : "geometry/tessellation stage", prog_copie.label); return; }
+                if ((st.stage == 0 && !vs) || (st.stage == 1 && !fs)) {
+                    skip(st.stage == 0 ? "missing vertex shader" : "missing fragment shader", prog_copie.label);
+                    return;
+                }
+            }
+            if (!vs) {
+                skip("no vertex shader", prog_copie.label);
                 return;
             }
+            ProgResolu& r = g_progs[s.program];
+            r.version = prog_copie.version, r.info = prog_copie, r.vs = vs, r.fs = fs;
+            pp = &r.info;
         }
-        if (!vs) {
-            skip("no vertex shader", prog.label);
-            return;
-        }
-        if (user_skip(prog.label, vs, fs)) {
-            skip("RECOMP_SKIP", prog.label);
+        if (user_skip(pp->label, vs, fs)) {
+            skip("RECOMP_SKIP", pp->label);
             return;
         }
     }
+    const nvn::ProgramInfo& prog = *pp;
     // cibles
     Image* rts[8] = {};
     VkFormat rtf[8] = {};
@@ -4299,11 +5884,56 @@ void draw(const DrawCall& d) {
                      rts[i]->h, rts[i]->nvnfmt, s.rt_level[i], s.rt_layer[i], (int)d.kind,
                      (unsigned long long)g.cur_frame + 1, prog.label.c_str(), fs ? fs->hash.c_str() : "-");
         }
+    if (dlss::pret()) {   // DLSS (dlss_taa) : profondeur des passes de vecteurs de mouvement, puis taa_resolve remplacé
+        if (ds && (ds->fmt == VK_FORMAT_D32_SFLOAT_S8_UINT || ds->fmt == VK_FORMAT_D32_SFLOAT)) {
+            static uint64_t dern_cle = 0, dern_taille = 0;   // la plupart des dessins gardent la profondeur du précédent
+            const uint64_t taille = (uint64_t)ds->w << 32 | ds->h;
+            if (s.depth != dern_cle || taille != dern_taille)
+                g_dl.prof_taille[taille] = s.depth, dern_cle = s.depth, dern_taille = taille;
+            for (int i = 0; i < nrt; i++)
+                if (rts[i] && rts[i]->fmt == VK_FORMAT_R16G16_SNORM) {
+                    g_dl.mv_prof[rts[i]->img] = s.depth;
+                    if (fs && fs->hash == "f14dbbfacf9715f3") dlss_camera(s, rts[i]->img);
+                }
+        }
+        if (fs && fs->hash == "7d70390948abb483" && !g_dl.dans_partage && dlss_taa(d, s, rts, nrt)) return;
+        if (fs && fs->hash == "45f8409ea692850d" && !g_dl.dans_partage && dlss_agrandir(d, s, rts, nrt)) return;
+    }
     if (g.dbg) {
+        static const std::vector<std::string> vider = [] {   // RECOMP_DBG_TEX_DUMP=morceau1,morceau2,…
+            std::vector<std::string> v;
+            const char* e = getenv("RECOMP_DBG_TEX_DUMP");
+            for (std::string reste = e ? e : ""; !reste.empty();) {
+                const size_t c = reste.find(',');
+                if (c) v.push_back(reste.substr(0, c));
+                reste = c == std::string::npos ? "" : reste.substr(c + 1);
+            }
+            return v;
+        }();
+        g.dbg_dump = false;
+        for (auto& m : vider)
+            if (prog.label.find(m) != std::string::npos) g.dbg_dump = true;
         HLOG("vkdbg", "draw %d '%s' vs %s fs %s", (int)d.kind, prog.label.c_str(), vs ? vs->hash.c_str() : "-",
              fs ? fs->hash.c_str() : "-");
         for (int i = 0; i < s.nrt; i++) dbg_tex("rt", i, s.rt[i]);
         if (s.depth) dbg_tex("ds", 0, s.depth);
+    }
+    {   // RECOMP_SHADER_WATCH=hash,hash : où ces shaders sont employés (diagnostic)
+        static const std::string suivis = getenv("RECOMP_SHADER_WATCH") ? std::string(",") + getenv("RECOMP_SHADER_WATCH") + "," : std::string();
+        if (!suivis.empty()) {
+            static std::map<std::string, uint64_t> dit;
+            for (ShaderMod* sm : {vs, fs})
+                if (sm && suivis.find("," + sm->hash + ",") != std::string::npos) {
+                    uint64_t& quand = dit[sm->hash + prog.label];
+                    if (!quand || g.cur_frame >= quand + 600) {
+                        quand = g.cur_frame + 1;
+                        HLOG("watch", "frame %llu: shader %s used by '%s' (targets %d, %s%s)", (unsigned long long)g.cur_frame + 1,
+                             sm->hash.c_str(), prog.label.c_str(), s.nrt, rts[0] ? "first target " : "no colour target",
+                             rts[0] ? (std::to_string(rts[0]->w) + "x" + std::to_string(rts[0]->h) + " fmt " +
+                                       std::to_string(rts[0]->nvnfmt)).c_str() : "");
+                    }
+                }
+        }
     }
     // zone de rendu : taille du niveau de mipmap visé par la vue de la première cible
     const uint32_t lv0 = rts[0] ? s.rt_level[0] : s.depth_level;
@@ -4376,19 +6006,54 @@ void draw(const DrawCall& d) {
         }
     }
     dtm.mark();   // 0 : programme, shaders, cibles
-    // textures liées : images créées et initialisées avant d'ouvrir la passe de rendu
-    if (d.kind != DrawCall::ClearColor && d.kind != DrawCall::ClearDepth)
+    // textures liées : images créées et initialisées avant d'ouvrir la passe de rendu (cache des liaisons : bind_tex_c)
+    if (d.kind != DrawCall::ClearColor && d.kind != DrawCall::ClearDepth) {
+        const LieGens lg = lie_gens(s.texpool, s.samppool);
+        // Étage sauté en entier (soir du 2026-11-12) : même shader, mêmes poignées, mêmes générations et même tampon
+        // qu'à son dessin précédent, où chaque liaison était déjà retenue (aucune liaison complète), et aucune entrée
+        // tombée depuis (g_lie_evt) : repasser les 192 poignées ne ferait que retrouver les mêmes entrées.
+        // RECOMP_NO_BIND_SKIP=1 : comme avant.
+        struct LieEtage {
+            const ShaderMod* sm = nullptr;
+            LieGens lg;
+            uint64_t evt = 0;
+            bool propre = false;   // dernier passage : toutes les liaisons étaient retenues
+            uint64_t tex[64], sep[64], samp[64];
+        };
+        static LieEtage dern[2];
+        static const bool sans_saut = getenv("RECOMP_NO_BIND_SKIP") != nullptr;
         for (int si = 0; si < 2; si++) {
             ShaderMod* sm = si == 0 ? vs : fs;
             if (!sm || std::find(sm->banks.begin(), sm->banks.end(), 2) == sm->banks.end()) continue;
+            LieEtage& de = dern[si];
+            if (!sans_saut && lg.actif && de.propre && de.sm == sm && de.evt == g_lie_evt && de.lg.texpool == lg.texpool &&
+                de.lg.texgen == lg.texgen && de.lg.samppool == lg.samppool && de.lg.sampgen == lg.sampgen &&
+                de.lg.tampon == lg.tampon && lg.tampon == lie_tampon() && !memcmp(de.tex, s.tex[si], sizeof de.tex) &&
+                !memcmp(de.sep, s.septex[si], sizeof de.sep) && !memcmp(de.samp, s.sepsamp[si], sizeof de.samp)) {
+                g_lie_etages++;
+                continue;
+            }
+            const uint64_t faits_avant = g_lie_faits.load(std::memory_order_relaxed);
+            const uint32_t mask = tex_mask(*sm);
             for (int k = 0; k < 64; k++)
-                if (uint64_t h = s.tex[si][k]) bind_handle(h, s.texpool, s.samppool, sm->tex);
+                if (uint64_t h = s.tex[si][k]) {
+                    bind_tex_c(h & 0xfffff, lg, *sm, mask, h);
+                    bind_samp_c((h >> 20) & 0xfff, lg);
+                }
             // poignées séparées (BindSeparateTextures / Samplers) : combinées par le shader (TEX bindless)
             for (int k = 0; k < 64; k++) {
-                if (uint64_t h = s.septex[si][k]) bind_tex_id(h & 0xfffff, s.texpool, sm->tex, h);
-                if (uint64_t h = s.sepsamp[si][k]) bind_samp_id((h >> 20) & 0xfff, s.samppool);
+                if (uint64_t h = s.septex[si][k]) bind_tex_c(h & 0xfffff, lg, *sm, mask, h);
+                if (uint64_t h = s.sepsamp[si][k]) bind_samp_c((h >> 20) & 0xfff, lg);
             }
+            de.sm = sm, de.lg = lg, de.evt = g_lie_evt;
+            de.propre = lg.actif && g_lie_faits.load(std::memory_order_relaxed) == faits_avant;
+            memcpy(de.tex, s.tex[si], sizeof de.tex);
+            memcpy(de.sep, s.septex[si], sizeof de.sep);
+            memcpy(de.samp, s.sepsamp[si], sizeof de.samp);
         }
+        static const bool sonde = getenv("RECOMP_DLSS_PROBE") != nullptr;   // entrées de taa_resolve (dlss_sonde)
+        if (sonde && fs && fs->hash == "7d70390948abb483" && g.cur_frame % 60 == 0) dlss_sonde(s, rts, nrt);
+    }
     dtm.mark();   // 1 : liaison des textures
     // rendu dynamique (recommencé quand les cibles changent)
     uint64_t rtkey[18];   // cibles, puis niveau | couche << 16 de chaque vue
@@ -4479,10 +6144,18 @@ void draw(const DrawCall& d) {
     for (int i = 0; i < 16 && i < s.nstream; i++) key.streams[i][0] = s.streams[i][0], key.streams[i][1] = s.streams[i][1];
     key.topo = (uint32_t)d.prim;
     key.origin = nvn::g_depth_zero_one;   // convention de profondeur : bibliothèque de sommets
-    uint64_t kh = fnv(&key, sizeof key);
-    VkPipeline pipe = VK_NULL_HANDLE;
-    auto pit = g.pipelines.find(kh);
-    if (pit != g.pipelines.end()) {
+    // Clé identique à celle du dessin précédent : même pipeline, sans empreinte ni recherche ; sinon empreinte par
+    // mots de 8 octets (hash_bloc). L'empreinte FNV octet par octet de cette clé de ≈ 600 octets coûtait ≈ 0,5 µs par
+    // dessin, ≈ 1 ms par image dans les scènes à 2 000 dessins (2026-11-12). Les pipelines ne sont jamais détruits ;
+    // l'empreinte ne sert qu'à la table en mémoire (g.pipelines).
+    static Key cle_prec;
+    static VkPipeline pipe_prec = VK_NULL_HANDLE;
+    const bool meme_cle = pipe_prec && !memcmp(&key, &cle_prec, sizeof key);
+    const uint64_t kh = meme_cle ? 0 : hash_bloc((const uint8_t*)&key, sizeof key);
+    VkPipeline pipe = meme_cle ? pipe_prec : VK_NULL_HANDLE;
+    auto pit = meme_cle ? g.pipelines.end() : g.pipelines.find(kh);
+    if (meme_cle) {
+    } else if (pit != g.pipelines.end()) {
         pipe = pit->second;
     } else {
         VkPipelineShaderStageCreateInfo stg[2] = {{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},
@@ -4608,6 +6281,7 @@ void draw(const DrawCall& d) {
         skip("pipeline not created", prog.label);
         return;
     }
+    cle_prec = key, pipe_prec = pipe;
     vkCmdBindPipeline(g.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     {   // ---- états dynamiques du pipeline, réglés quand ils changent dans ce tampon de commandes
         static const bool no_bias = getenv("RECOMP_NO_DEPTH_BIAS") != nullptr, no_cull = getenv("RECOMP_NO_CULL") != nullptr;
@@ -4650,21 +6324,46 @@ void draw(const DrawCall& d) {
     note_shader(fs);
     dtm.mark();   // 3 : pipeline
     // ---- descripteurs : banques de constantes (sommets → jeu 0, fragments → jeu 1)
+    // Cache par étage (soir du 2026-11-12) : quand le même shader retrouve exactement les mêmes tampons qu'au dessin
+    // précédent (courant pour l'étage des fragments), son jeu de descripteurs est repris tel quel, sans allocation ni
+    // écriture. Les blocs de la banque 2 (poignées des textures, 0x680 octets) et de la banque 0x18 ne sont réécrits
+    // dans l'anneau que si leur contenu change. Tout cela vaut le temps d'un enregistrement (anneau et pools de
+    // descripteurs de l'emplacement) : g_banques_gen. RECOMP_NO_BANK_CACHE=1 : comme avant (tout refait à chaque dessin).
+    constexpr int NBQ = 40;   // banques par étage (35 au plus : 0x18, 2 et les 32 tampons uniformes)
+    struct CacheEtage {
+        uint64_t gen = 0;                // enregistrement où set vaut (0 : jamais)
+        const ShaderMod* sm = nullptr;   // nullptr : jeu sans contenu utile (étage absent)
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        int n = 0;
+        int banques[NBQ];
+        VkDescriptorBufferInfo infos[NBQ];
+        uint64_t b2_gen = 0, b2_off = 0;   // dernier bloc de banque 2 écrit dans l'anneau, et ses sources
+        uint64_t b2_tex[32], b2_img[8], b2_sep[64], b2_samp[32];
+        uint64_t p_gen = 0, p_off = 0;     // dernier bloc de banque 0x18
+        uint32_t p_wh[2];
+        int32_t p_vp[4];
+    };
+    static CacheEtage cache[2];
+    static const bool sans_cache = getenv("RECOMP_NO_BANK_CACHE") != nullptr;
+    static const char* const watch = getenv("RECOMP_DRAW_WATCH");
+    static const bool dbg_ssbo = getenv("RECOMP_DBG_SSBO") != nullptr;
+    const bool surveille = watch && fs && fs->hash == watch;   // dessin surveillé : blocs et jeu des fragments neufs
     VkDescriptorSet sets[2] = {};
-    if (!alloc_bank_sets(2, sets)) {
-        skip("descriptors exhausted", prog.label);
-        return;
-    }
-    std::vector<VkDescriptorBufferInfo> infos;
-    std::vector<VkWriteDescriptorSet> writes;
-    infos.reserve(64);
+    VkDescriptorBufferInfo infos[2][NBQ];
+    int banques[2][NBQ];
+    int nb[2] = {0, 0};
+    bool repris[2] = {false, false};
     uint64_t watch_ring = ~0ull;   // RECOMP_DRAW_WATCH : banque 2 (fragments) du dessin surveillé
-    auto ring_alloc = [&](uint64_t n) -> uint64_t { return ring_take(n); };
     for (int si = 0; si < 2; si++) {
         ShaderMod* sm = si == 0 ? vs : fs;
-        if (!sm) continue;
-        int nvst = si == 0 ? 0 : 1;   // étage NVN
+        CacheEtage& ce = cache[si];
+        if (!sm) {   // étage absent : n'importe quel jeu de cet enregistrement convient (aucun shader ne le lit)
+            if (!sans_cache && ce.gen == g_banques_gen && ce.set) sets[si] = ce.set, repris[si] = true;
+            continue;
+        }
+        const int nvst = si;   // étage NVN
         for (int bank : sm->banks) {
+            if (nb[si] >= NBQ) break;
             VkDescriptorBufferInfo bi{g.ring, 0, 256};
             if (bank == 2) {
                 // banque 2 (établie sur les lectures des shaders et les liaisons du jeu) :
@@ -4674,24 +6373,45 @@ void draw(const DrawCall& d) {
                 // principal tombe sur une texture du bon type — carte d'ombre D16 pour la comparaison,
                 // tableaux 2D, volumes 3D — et sur un échantillonneur lié, ss10-12)
                 constexpr uint32_t SZ = 0x680;
-                uint64_t off = ring_alloc(SZ);
-                uint8_t* p = g.ringptr + off;
-                memset(p, 0, SZ);
-                for (int k = 0; k < 32; k++) memcpy(p + 0x20 + 8 * k, &s.tex[nvst][k], 8);
-                for (int k = 0; k < 8; k++) memcpy(p + 0x120 + 8 * k, &s.img[nvst][k], 8);
-                for (int k = 0; k < 64; k++) memcpy(p + 0x168 + 8 * k, &s.septex[nvst][k], 8);
-                for (int k = 0; k < 32; k++) memcpy(p + 0x568 + 8 * k, &s.sepsamp[nvst][k], 8);
+                const bool meme = !sans_cache && !surveille && ce.b2_gen == g_banques_gen &&
+                                  !memcmp(ce.b2_tex, s.tex[nvst], sizeof ce.b2_tex) &&
+                                  !memcmp(ce.b2_img, s.img[nvst], sizeof ce.b2_img) &&
+                                  !memcmp(ce.b2_sep, s.septex[nvst], sizeof ce.b2_sep) &&
+                                  !memcmp(ce.b2_samp, s.sepsamp[nvst], sizeof ce.b2_samp);
+                uint64_t off = ce.b2_off;
+                if (!meme) {
+                    off = ring_take(SZ);
+                    uint8_t* p = g.ringptr + off;
+                    memset(p, 0, SZ);
+                    memcpy(p + 0x20, s.tex[nvst], sizeof ce.b2_tex);
+                    memcpy(p + 0x120, s.img[nvst], sizeof ce.b2_img);
+                    memcpy(p + 0x168, s.septex[nvst], sizeof ce.b2_sep);
+                    memcpy(p + 0x568, s.sepsamp[nvst], sizeof ce.b2_samp);
+                    memcpy(ce.b2_tex, s.tex[nvst], sizeof ce.b2_tex);
+                    memcpy(ce.b2_img, s.img[nvst], sizeof ce.b2_img);
+                    memcpy(ce.b2_sep, s.septex[nvst], sizeof ce.b2_sep);
+                    memcpy(ce.b2_samp, s.sepsamp[nvst], sizeof ce.b2_samp);
+                    ce.b2_gen = g_banques_gen, ce.b2_off = off;
+                }
                 bi = {g.ring, off, SZ};
-                static const char* watch = getenv("RECOMP_DRAW_WATCH");
-                if (watch && nvst == 1 && fs && fs->hash == watch) watch_ring = off;   // relu après le dessin
+                if (surveille && nvst == 1) watch_ring = off;   // relu après le dessin
             } else if (bank == 0x18) {   // constantes pilote : taille de cible, viewport
-                uint64_t off = ring_alloc(0x100);
-                float* f = (float*)(g.ringptr + off);
-                int32_t* i = (int32_t*)f;
-                memset(f, 0, 0x100);
-                f[0] = 1.0f / W, f[1] = 1.0f / H, f[2] = (float)W, f[3] = (float)H;
-                i[0x50 / 4] = s.vp[0], i[0x54 / 4] = s.vp[1];
-                i[0x58 / 4] = std::max(0, s.vp[2] - 1), i[0x5c / 4] = std::max(0, s.vp[3] - 1);
+                const int32_t vpl[4] = {(int32_t)s.vp[0], (int32_t)s.vp[1], (int32_t)s.vp[2], (int32_t)s.vp[3]};
+                const bool meme = !sans_cache && ce.p_gen == g_banques_gen && ce.p_wh[0] == (uint32_t)W &&
+                                  ce.p_wh[1] == (uint32_t)H && !memcmp(ce.p_vp, vpl, sizeof vpl);
+                uint64_t off = ce.p_off;
+                if (!meme) {
+                    off = ring_take(0x100);
+                    float* f = (float*)(g.ringptr + off);
+                    int32_t* i = (int32_t*)f;
+                    memset(f, 0, 0x100);
+                    f[0] = 1.0f / W, f[1] = 1.0f / H, f[2] = (float)W, f[3] = (float)H;
+                    i[0x50 / 4] = s.vp[0], i[0x54 / 4] = s.vp[1];
+                    i[0x58 / 4] = std::max(0, s.vp[2] - 1), i[0x5c / 4] = std::max(0, s.vp[3] - 1);
+                    ce.p_wh[0] = (uint32_t)W, ce.p_wh[1] = (uint32_t)H;
+                    memcpy(ce.p_vp, vpl, sizeof vpl);
+                    ce.p_gen = g_banques_gen, ce.p_off = off;
+                }
                 bi = {g.ring, off, 0x100};
             } else if (bank >= 3 && bank - 3 < 32 && s.ubo[nvst][bank - 3].addr) {
                 // tampon uniforme de l'emplacement k → banque k + 3 (comme en calcul) ; établi en
@@ -4699,46 +6419,104 @@ void draw(const DrawCall& d) {
                 // dans le mauvais tampon : positions nulles, aucune géométrie)
                 auto& u = s.ubo[nvst][bank - 3];
                 bank_from_guest(u.addr, u.size, &bi);
+                if (g.dbg && g.dbg_dump && nvst == 1 && mem_valid(u.addr, 96)) {   // RECOMP_DBG_TEX_DUMP : constantes
+                    const uint32_t* w = (const uint32_t*)u.addr;
+                    char b[320];
+                    int n = 0;
+                    for (int i = 0; i < 24; i++) n += snprintf(b + n, sizeof b - n, " %08x", w[i]);
+                    HLOG("vkdbg", "    ubo bank %d @%llx +%llu:%s", bank, (unsigned long long)u.addr,
+                         (unsigned long long)u.size, b);
+                    // RECOMP_DBG_UBO_DUMP=11,16 : contenu entier de ces banques (une fois par image, banque et adresse)
+                    static const std::string voulues =
+                        getenv("RECOMP_DBG_UBO_DUMP") ? std::string(",") + getenv("RECOMP_DBG_UBO_DUMP") + "," : std::string();
+                    static std::set<std::pair<uint64_t, uint64_t>> faits;
+                    if (!voulues.empty() && voulues.find("," + std::to_string(bank) + ",") != std::string::npos &&
+                        u.size && u.size <= (64ull << 20) && mem_valid(u.addr, u.size) &&
+                        faits.insert({(uint64_t)g.cur_frame * 64 + (uint64_t)bank, u.addr}).second) {
+                        CreateDirectoryA("tex_dump", nullptr);
+                        char nom[160];
+                        snprintf(nom, sizeof nom, "tex_dump/i%06llu_ubo%02d_%llx_%llu.bin", (unsigned long long)g.cur_frame + 1,
+                                 bank, (unsigned long long)u.addr, (unsigned long long)u.size);
+                        std::vector<uint8_t> copie((const uint8_t*)u.addr, (const uint8_t*)u.addr + u.size);
+                        if (FILE* fu = fopen(nom, "wb")) {
+                            fwrite(copie.data(), 1, copie.size(), fu);
+                            fclose(fu);
+                        }
+                    }
+                }
             }
-            infos.push_back(bi);
-            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            banques[si][nb[si]] = bank;
+            infos[si][nb[si]++] = bi;
+        }
+        if (!sans_cache && !(surveille && si == 1) && ce.gen == g_banques_gen && ce.sm == sm && ce.n == nb[si] &&
+            !memcmp(ce.banques, banques[si], (size_t)nb[si] * sizeof(int)) &&
+            !memcmp(ce.infos, infos[si], (size_t)nb[si] * sizeof(VkDescriptorBufferInfo)))
+            sets[si] = ce.set, repris[si] = true;
+    }
+    {
+        VkDescriptorSet neufs[2] = {};
+        const uint32_t besoin = (repris[0] ? 0u : 1u) + (repris[1] ? 0u : 1u);
+        if (besoin && !alloc_bank_sets(besoin, neufs)) {
+            skip("descriptors exhausted", prog.label);
+            return;
+        }
+        uint32_t k = 0;
+        for (int si = 0; si < 2; si++)
+            if (!repris[si]) sets[si] = neufs[k++];
+    }
+    VkWriteDescriptorSet writes[2 * NBQ + 1];
+    uint32_t nw = 0;
+    for (int si = 0; si < 2; si++) {
+        if (repris[si]) continue;
+        for (int k = 0; k < nb[si]; k++) {
+            VkWriteDescriptorSet& w = writes[nw++];
+            w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             w.dstSet = sets[si];
-            w.dstBinding = bank;
+            w.dstBinding = (uint32_t)banques[si][k];
             w.descriptorCount = 1;
             w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            w.pBufferInfo = &infos.back();
-            writes.push_back(w);
+            w.pBufferInfo = &infos[si][k];
         }
+        CacheEtage& ce = cache[si];
+        ce.gen = surveille && si == 1 ? 0 : g_banques_gen;   // jeu du dessin surveillé : jamais repris
+        ce.sm = si == 0 ? vs : fs;
+        ce.set = sets[si];
+        ce.n = nb[si];
+        memcpy(ce.banques, banques[si], (size_t)nb[si] * sizeof(int));
+        memcpy(ce.infos, infos[si], (size_t)nb[si] * sizeof(VkDescriptorBufferInfo));
     }
-    {   // RECOMP_DBG_SSBO (avec RECOMP_DRAW_WATCH) : tampon de débogage inscriptible en jeu 1, liaison 31,
+    VkDescriptorBufferInfo dbg_info{};
+    if (dbg_ssbo && surveille) {
+        // RECOMP_DBG_SSBO (avec RECOMP_DRAW_WATCH) : tampon de débogage inscriptible en jeu 1, liaison 31,
         // pour un shader modifié à la main qui y range des valeurs de registres (lues après chaque image)
-        static const char* watch = getenv("RECOMP_DRAW_WATCH");
-        static const bool dbg_ssbo = getenv("RECOMP_DBG_SSBO") != nullptr;
-        if (dbg_ssbo && watch && fs && fs->hash == watch) {
-            if (!g.dbgbuf) {
-                make_buffer(65536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            &g.dbgbuf, &g.dbgmem);
-                vkMapMemory(g.dev, g.dbgmem, 0, VK_WHOLE_SIZE, 0, (void**)&g.dbgptr);
-                memset(g.dbgptr, 0, 65536);
-            }
-            infos.push_back({g.dbgbuf, 0, 65536});
-            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = sets[1];
-            w.dstBinding = 31;
-            w.descriptorCount = 1;
-            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w.pBufferInfo = &infos.back();
-            writes.push_back(w);
+        if (!g.dbgbuf) {
+            make_buffer(65536, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        &g.dbgbuf, &g.dbgmem);
+            vkMapMemory(g.dev, g.dbgmem, 0, VK_WHOLE_SIZE, 0, (void**)&g.dbgptr);
+            memset(g.dbgptr, 0, 65536);
         }
+        dbg_info = {g.dbgbuf, 0, 65536};
+        VkWriteDescriptorSet& w = writes[nw++];
+        w = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = sets[1];
+        w.dstBinding = 31;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = &dbg_info;
     }
-    if (!writes.empty()) vkUpdateDescriptorSets(g.dev, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+    if (nw) vkUpdateDescriptorSets(g.dev, nw, writes, 0, nullptr);
+    g.banques_repris += (repris[0] ? 1 : 0) + (repris[1] ? 1 : 0);
+    g.banques_faits += (repris[0] ? 0 : 1) + (repris[1] ? 0 : 1);
     VkDescriptorSet all[3] = {sets[0], sets[1], g.texset};
     vkCmdBindDescriptorSets(g.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 3, all, 0, nullptr);
     dtm.mark();   // 4 : descripteurs
-    // ---- tampons de sommets
+    // ---- tampons de sommets (chaque flux une fois par dessin : plusieurs attributs lisent souvent le même)
+    uint32_t flux_lies = 0;
     for (int loc : vs->vin) {
         uint32_t a = loc < s.nattr ? s.attribs[loc] : 0;
         uint32_t st = (a >> 10) & 0x1f;
+        if (flux_lies & (1u << st)) continue;
+        flux_lies |= 1u << st;
         VkBuffer b = g.ring;
         uint64_t o = 0;
         if (st < 32 && s.vb[st].addr && !find_pool(s.vb[st].addr, std::max<uint64_t>(s.vb[st].size, 1), &b, &o)) {
@@ -4763,7 +6541,10 @@ void draw(const DrawCall& d) {
     } else {   // origine bas-gauche : y retourné
         vp = {vx, (float)H - vy, vw, -vh, s.dr[0], s.dr[1]};
     }
-    vkCmdSetViewport(g.cb, 0, 1, &vp);
+    static const bool sans_dyn = getenv("RECOMP_NO_DYN_CACHE") != nullptr;
+    Vk::Dyn& ye = g.dyn;
+    if (sans_dyn) ye.vp_ok = ye.sc_ok = ye.st_ok = ye.bl_ok = ye.db_ok = false;
+    if (!ye.vp_ok || memcmp(&ye.vp, &vp, sizeof vp)) vkCmdSetViewport(g.cb, 0, 1, &vp), ye.vp = vp, ye.vp_ok = true;
     VkRect2D sc;
     if (s.sc[2] > 0 && s.sc[3] > 0) {
         int sy = nvn::g_origin_upper_left ? s.sc[1] : (int)H - (s.sc[1] + s.sc[3]);
@@ -4771,12 +6552,25 @@ void draw(const DrawCall& d) {
     } else {
         sc = {{0, 0}, {W, H}};
     }
-    vkCmdSetScissor(g.cb, 0, 1, &sc);
-    vkCmdSetStencilReference(g.cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_ref);
-    vkCmdSetStencilCompareMask(g.cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_vmask);
-    vkCmdSetStencilWriteMask(g.cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_wmask);
-    vkCmdSetBlendConstants(g.cb, s.blend_color);
-    vkCmdSetDepthBias(g.cb, s.poly_offset[1], s.poly_offset[2], s.poly_offset[0]);
+    if (!ye.sc_ok || memcmp(&ye.sc, &sc, sizeof sc)) vkCmdSetScissor(g.cb, 0, 1, &sc), ye.sc = sc, ye.sc_ok = true;
+    if (!ye.st_ok || ye.sref != (uint32_t)s.stencil_ref || ye.svm != (uint32_t)s.stencil_vmask ||
+        ye.swm != (uint32_t)s.stencil_wmask) {
+        vkCmdSetStencilReference(g.cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_ref);
+        vkCmdSetStencilCompareMask(g.cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_vmask);
+        vkCmdSetStencilWriteMask(g.cb, VK_STENCIL_FACE_FRONT_AND_BACK, s.stencil_wmask);
+        ye.sref = (uint32_t)s.stencil_ref, ye.svm = (uint32_t)s.stencil_vmask, ye.swm = (uint32_t)s.stencil_wmask;
+        ye.st_ok = true;
+    }
+    if (!ye.bl_ok || memcmp(ye.blend, s.blend_color, sizeof ye.blend)) {
+        vkCmdSetBlendConstants(g.cb, s.blend_color);
+        memcpy(ye.blend, s.blend_color, sizeof ye.blend);
+        ye.bl_ok = true;
+    }
+    if (!ye.db_ok || memcmp(ye.dbias, s.poly_offset, sizeof ye.dbias)) {
+        vkCmdSetDepthBias(g.cb, s.poly_offset[1], s.poly_offset[2], s.poly_offset[0]);
+        memcpy(ye.dbias, s.poly_offset, sizeof ye.dbias);
+        ye.db_ok = true;
+    }
     // ---- dessin
     std::string mk;
     if (g.checkpoints) {
@@ -4830,9 +6624,10 @@ void draw(const DrawCall& d) {
     static const bool serial = getenv("RECOMP_GPU_SERIAL") != nullptr;
     if (serial) end_render();
     g.frame_draws++;
+    g.cb_draws++;
     g.last_label = prog.label;
     if (sync_each()) flush_locked("isolated draw");
-    else borner_transit();
+    else if (!soumettre_morceau()) borner_transit();
     dtm.mark();   // 5 : sommets, état dynamique, dessin
 }
 
@@ -4930,7 +6725,10 @@ void dispatch(const nvn::GfxState& s, uint32_t gx, uint32_t gy, uint32_t gz) {
                  prog.label.c_str(), gx, gy, gz, cs->c0[0], cs->c0[4], cs->c0[3], cs->glob ? ", global memory" : "");
     }
     end_render();
-    if (g.dbg) HLOG("vkdbg", "dispatch %ux%ux%u '%s'", gx, gy, gz, prog.label.c_str());
+    if (g.dbg) {
+        g.dbg_dump = false;
+        HLOG("vkdbg", "dispatch %ux%ux%u '%s'", gx, gy, gz, prog.label.c_str());
+    }
     // Banque 0 du calcul : en-tête 0x10, puis 16 o par tampon uniforme, 8 o par texture combinée k,
     // 8 o par image k. Les nombres viennent de la section de contrôle (ligne « c0 » des métadonnées) ;
     // règle vérifiée sur 10 étages (taille totale = mot 0xb8). Ex. : SDF du texte (2 tampons, 0 texture)
@@ -5271,6 +7069,16 @@ void copy_buffer_to_texture(uint64_t src, uint64_t texkey, uint32_t level, uint3
         if (n++ < 20) HLOG("vk", "CopyBufferToTexture: source 0x%llx +0x%llx outside the pools", (unsigned long long)src, (unsigned long long)size);
         return;
     }
+    {   // RECOMP_COPY_ARRAY_LOG=1 (diagnostic) : chaque copie vers une texture en tableau
+        static const bool tab = getenv("RECOMP_COPY_ARRAY_LOG") != nullptr;
+        static int nt = 0;
+        if (tab && im->layers > 1 && nt++ < 4000)
+            HLOG("vk", "frame %llu: array copy to %ux%ux%u fmt %u (key %llx): level %u layer %u +%u, %llu bytes from 0x%llx, "
+                       "hash %016llx", (unsigned long long)g.cur_frame + 1, im->w, im->h, im->layers, im->nvnfmt,
+                 (unsigned long long)texkey, c.imageSubresource.mipLevel, c.imageSubresource.baseArrayLayer,
+                 c.imageSubresource.layerCount, (unsigned long long)size, (unsigned long long)src,
+                 (unsigned long long)hash_bloc((const uint8_t*)src, std::min<uint64_t>(size, 4096)));
+    }
     {   // une ligne par type de texture cible (taille, couches, format)
         static std::set<std::array<uint32_t, 4>> seen;
         if (seen.size() < 64 && seen.insert({im->w, im->h, im->layers, im->nvnfmt}).second)
@@ -5556,6 +7364,38 @@ void tex3d_dump(uint64_t frame) {
         r.dump3d = size;
         g_readbacks.push_back(r);
     }
+}
+
+// RECOMP_NAN_SCAN=n (diagnostic) : toutes les n images affichées, chaque image de rendu en virgule flottante d'au
+// moins 640 pixels de large est relue et ses pixels NaN ou infinis sont comptés (ligne [nan] du journal, seulement s'il
+// y en a ; le compte des images contrôlées est donné toutes les 50 relectures). Un NaN s'affiche en noir et se propage
+// par l'anticrénelage temporel et le flou lumineux.
+void nan_scan(uint64_t frame) {
+    begin_frame();
+    end_render();
+    static uint64_t tours = 0, relues = 0;
+    for (auto& [key, im] : g.images) {
+        const int f = im.fmt == VK_FORMAT_B10G11R11_UFLOAT_PACK32 ? 1 : im.fmt == VK_FORMAT_R16G16B16A16_SFLOAT ? 2 : 0;
+        if (!f || im.target != 1 || im.layers != 1 || !im.initialized || im.packaged || im.w < 640) continue;
+        const uint64_t size = (uint64_t)im.w * im.h * (f == 1 ? 4 : 8);
+        Readback r{};
+        if (!make_buffer(size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &r.b, &r.m))
+            continue;
+        barrier_all();
+        VkBufferImageCopy c{};
+        c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        c.imageExtent = {im.w, im.h, 1};
+        vkCmdCopyImageToBuffer(g.cb, im.img, VK_IMAGE_LAYOUT_GENERAL, r.b, 1, &c);
+        barrier_all();
+        r.w = im.w, r.h = im.h;
+        r.nan_fmt = f, r.nan_key = key, r.nan_frame = frame;
+        g_readbacks.push_back(r);
+        relues++;
+    }
+    if (++tours % 50 == 0)
+        HLOG("nan", "frame %llu: %llu float render images checked so far in %llu passes", (unsigned long long)frame,
+             (unsigned long long)relues, (unsigned long long)tours);
 }
 
 void capture(uint64_t texkey, uint64_t frame, const char* label) {
@@ -5850,12 +7690,38 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
             HLOG("perf", "draw: %.1f calls/frame, ms/frame: prog %.3f textures %.3f pass %.3f pipeline %.3f descriptors %.3f end %.3f",
                  g_dn.exchange(0) / 120.0, g_dt[0].exchange(0) / 120e6, g_dt[1].exchange(0) / 120e6, g_dt[2].exchange(0) / 120e6,
                  g_dt[3].exchange(0) / 120e6, g_dt[4].exchange(0) / 120e6, g_dt[5].exchange(0) / 120e6);
+            HLOG("perf", "bind cache: %.0f texture/sampler bindings avoided, %.0f done, %.0f whole stages skipped per frame",
+                 g_lie_evites.exchange(0) / 120.0, g_lie_faits.exchange(0) / 120.0, g_lie_etages.exchange(0) / 120.0);
+            HLOG("perf", "bank sets: %.0f reused, %.0f written per frame; partial submissions: %.2f per frame",
+                 g.banques_repris / 120.0, g.banques_faits / 120.0, g.morceaux / 120.0);
+            g.banques_repris = g.banques_faits = g.morceaux = 0;
+            static uint64_t rendus_vu = 0;
+            const uint64_t rendus_ns = g_rendus_ns - rendus_vu;
+            rendus_vu = g_rendus_ns;
+            if (const uint64_t nu = g_up_n.exchange(0))
+                HLOG("perf", "texture uploads: %llu (%.1f MB), ms/frame: source %.3f buffer %.3f deswizzle %.3f copy %.3f "
+                     "hash %.3f release %.3f, staging free %.3f; worst frame %.1f ms; staging pool: %llu reused, %llu "
+                     "created, %.0f MB kept; deferred releases: %.3f ms/frame, %zu waiting (%.0f MB)",
+                     (unsigned long long)nu, g_up_bytes.exchange(0) / 1048576.0, g_up_ns[0].exchange(0) / 120e6,
+                     g_up_ns[1].exchange(0) / 120e6, g_up_ns[2].exchange(0) / 120e6, g_up_ns[3].exchange(0) / 120e6,
+                     g_up_ns[4].exchange(0) / 120e6, g_up_ns[5].exchange(0) / 120e6, g_transit_libre_ns.exchange(0) / 120e6,
+                     g_up_pire.exchange(0) / 1e6, (unsigned long long)g_transit_repris, (unsigned long long)g_transit_crees,
+                     g_transit_reserve / 1048576.0, rendus_ns / 120e6, g_rendus.size(), g_rendus_octets / 1048576.0);
             g_perf = PerfAcc();
             g_perf.last = now;
         }
     }
-    static const long dbg_frame = getenv("RECOMP_VK_DEBUG") ? atol(getenv("RECOMP_VK_DEBUG")) : -1;
-    g.dbg = (long)frame + 1 == dbg_frame;
+    // RECOMP_VK_DEBUG=N ou N1,N2,… : journal détaillé de ces images (le moment d'une scène varie d'une partie à l'autre)
+    static const char* dbg_env = getenv("RECOMP_VK_DEBUG");
+    g.dbg = false;
+    for (const char* q = dbg_env; q && *q;) {
+        char* fin = nullptr;
+        const uint64_t n = strtoull(q, &fin, 10);
+        if (fin == q) break;
+        if (n == frame + 1) g.dbg = true;
+        if (*fin != ',') break;
+        q = fin + 1;
+    }
     static const long texdump_frame = getenv("RECOMP_TEX_DUMP") ? atol(getenv("RECOMP_TEX_DUMP")) : -1;
     if ((long)frame == texdump_frame) tex_dump();
     static const long taudit_every = getenv("RECOMP_TEX_AUDIT") ? atol(getenv("RECOMP_TEX_AUDIT")) : 0;
@@ -5863,9 +7729,12 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
     if (taudit_every > 0 && (long)frame >= audit_from && frame % (uint64_t)taudit_every == 0) tex_audit(frame, (uint64_t)taudit_every);
     static const long tex3d_frame = getenv("RECOMP_TEX3D_DUMP") ? atol(getenv("RECOMP_TEX3D_DUMP")) : -1;
     if ((long)frame == tex3d_frame) tex3d_dump(frame);
+    static const long nan_every = getenv("RECOMP_NAN_SCAN") ? atol(getenv("RECOMP_NAN_SCAN")) : 0;
+    if (nan_every > 0 && frame % (uint64_t)nan_every == 0) nan_scan(frame);
     // RECOMP_SNAPSHOT_EVERY=n : un instantané toutes les n images (aperçu vidéo, voir RECOMP_SNAPSHOT_DIR)
     static const long snap_every = getenv("RECOMP_SNAPSHOT_EVERY") ? atol(getenv("RECOMP_SNAPSHOT_EVERY")) : 0;
     if (snap_every > 0 && src && frame % (uint64_t)snap_every == 0) snapshot(*src, frame, crop);
+    if (src && !g_snap_coupes.empty() && g_snap_coupes.erase(frame)) snapshot(*src, frame, crop);
     static const char* snap_env = getenv("RECOMP_SNAPSHOT");
     if (snap_env && src) {
         for (const char* q = snap_env; *q;) {
@@ -5893,6 +7762,8 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
             uint64_t used = 0, budget = 0;
             const bool video_pleine = vram_usage(&used, &budget) && used > budget / 100 * 85;
             niveau = libre < 3.0 ? 2 : libre < 5.0 || video_pleine ? 1 : 0;
+            // rendus des textures en attente et réserve de tampons : réduits sous 5 Go, vidés sous 3 Go
+            g_memoire_niveau = libre < 3.0 ? 2 : libre < 5.0 ? 1 : 0;
             static int niveau_vu = 0;
             if (niveau != niveau_vu) {
                 HLOG("vk", "orphaned-image cache: %s (%.1f GB available commit, video memory %.0f / %.0f MB)",
@@ -5927,6 +7798,8 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
              g.unref_bytes / 1048576.0, (unsigned long long)g.unref_reuses, g.unref_reuse_bytes / 1048576.0,
              vram_text().c_str());
     if (frame == 1 || frame % 600 == 0) HLOG("vk", "frame %llu, memory: %s", (unsigned long long)frame, ram_text().c_str());
+    tex_release_pending();   // sources des textures envoyées : rendues peu à peu (voir tex_release_later)
+    transit_tailler();       // réserve des tampons de transit
     if (frame % 1800 == 0) tex_release_log(frame);
     if (g.libs_sur_demande && frame % 1800 == 0)
         HLOG("vk", "frame %llu, shader libraries created at first use so far: %llu", (unsigned long long)frame,

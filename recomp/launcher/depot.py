@@ -18,7 +18,8 @@ DEPOT = os.path.join(RECOMP, "depot")
 
 SOURCES = {   # dossier (relatif à recomp/) → extensions
     "a64": (".py",),
-    "runtime": (".cpp", ".h", ".hpp", ".c", ".inl"),
+    # .comp, .py : passes du DLSS (os/dlss_spirv.py) ; .md, .txt : licence et notice des en-têtes du FSR (third_party/ffx)
+    "runtime": (".cpp", ".h", ".hpp", ".c", ".inl", ".comp", ".py", ".md", ".txt"),
     "shaders": (".py",),
     "bench": (".py",),
     "licences": (".txt",),   # avis et licences des outils fournis dans le paquet (THIRD_PARTY_NOTICES.txt)

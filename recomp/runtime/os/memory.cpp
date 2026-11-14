@@ -224,7 +224,8 @@ std::map<uint64_t, Rendu> g_rel;                // début → plage rendue (page
 std::map<uint64_t, uint64_t> g_rel_libres;      // fichier : début → longueur des zones libres
 uint64_t g_rel_taille = 0, g_rel_id = 0;        // taille du fichier ; numéro du dernier rendu
 HANDLE g_rel_fichier = INVALID_HANDLE_VALUE;
-constexpr uint64_t REL_TAMPON = 1ull << 20;
+constexpr uint64_t REL_TAMPON = 4ull << 20;   // 1 Mo jusqu'au 2026-11-13 : un arrêt des fils par tampon
+constexpr uint64_t REL_AVANCE = 1ull << 20;   // ramené d'un coup par une lecture fautive (64 Ko avant)
 uint8_t* g_rel_tampon = nullptr;                // lectures du fichier, sous le verrou
 uint64_t g_rel_morceau = 64ull << 10;           // restauration à l'accès, par morceaux (RECOMP_TEX_MORCEAU_KO)
 constexpr uint64_t REL_MAX = 6ull << 30;        // taille maximale du fichier
@@ -315,10 +316,130 @@ void rel_retirer(uint64_t a, uint64_t b) {
     }
 }
 
+// ---------------------------------------------------------------- restauration atomique (issue GitHub n° 17)
+// Jusqu'à la 1.0.3, une page relue du fichier était engagée puis remplie : pendant le remplissage (moins d'une
+// microseconde), un autre fil qui y accédait sans fauter lisait des zéros, ou voyait son écriture recouverte par la
+// copie. Jugé improbable, puis vu chez un joueur : pointeur nul lu par le jeu pendant le combat contre Andross, après
+// une heure de partie. Windows ne sait pas faire apparaître d'un coup une page privée déjà remplie : les autres fils du
+// processus sont donc suspendus le temps d'engager et de copier le morceau, puis repris. Pendant l'arrêt, ce fil ne
+// prend aucun verrou, n'écrit rien dans le journal et n'alloue rien sur le tas (un fil suspendu peut tenir ces
+// verrous) : seulement des appels du noyau et memcpy. Un seul arrêt à la fois : rel_restaurer tient g_rel_lock en
+// exclusif. RECOMP_NO_ATOMIC_RESTORE=1 (essais) : restauration d'avant.
+using FilSuivant = LONG(__stdcall*)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);   // NtGetNextThread (ntdll)
+FilSuivant g_fil_suivant = nullptr;
+bool g_arret_actif = false;
+std::atomic<uint64_t> g_arrets{0}, g_arrets_ns{0}, g_arret_max_ns{0}, g_arret_fils{0};
+
+void arret_init() {
+    if (getenv("RECOMP_NO_ATOMIC_RESTORE")) {
+        HLOG("mem", "atomic page restore: off (RECOMP_NO_ATOMIC_RESTORE)");
+        return;
+    }
+    if (HMODULE nt = GetModuleHandleW(L"ntdll.dll"))
+        g_fil_suivant = reinterpret_cast<FilSuivant>(reinterpret_cast<void*>(GetProcAddress(nt, "NtGetNextThread")));
+    g_arret_actif = g_fil_suivant != nullptr;
+    if (!g_arret_actif) HLOG("mem", "atomic page restore unavailable (NtGetNextThread missing): pages restored as before");
+}
+
+// Tous les autres fils du processus suspendus, de la construction à la destruction. SuspendThread ne fait que demander
+// l'arrêt : GetThreadContext ne rend la main qu'une fois le fil vraiment arrêté. Un fil créé pendant l'énumération par
+// un fil pas encore suspendu est pris par la passe suivante.
+struct MondeArrete {
+    static constexpr int MAX = 1024;
+    static inline HANDLE fils[MAX];
+    static inline DWORD ids[MAX];
+    int n = 0;
+    uint64_t t0 = 0;
+    MondeArrete() {
+        if (!g_arret_actif) return;
+        t0 = maintenant_ns();
+        const DWORD moi = GetCurrentThreadId();
+        const HANDLE proc = GetCurrentProcess();
+        constexpr ACCESS_MASK acces = THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_LIMITED_INFORMATION;
+        for (int passe = 0; passe < 4; passe++) {
+            int nouveaux = 0;
+            HANDLE h = nullptr;
+            bool garde = true;   // curseur gardé dans fils[] (ou nul) : pas à fermer ici
+            for (;;) {
+                HANDLE suiv = nullptr;
+                const LONG etat = g_fil_suivant(proc, h, acces, 0, 0, &suiv);
+                if (h && !garde) CloseHandle(h);
+                if (etat < 0) break;
+                h = suiv, garde = false;
+                const DWORD id = GetThreadId(h);
+                if (!id || id == moi || n >= MAX) continue;
+                bool connu = false;
+                for (int i = 0; i < n; i++) connu |= ids[i] == id;
+                if (connu || SuspendThread(h) == (DWORD)-1) continue;   // déjà arrêté, ou fil en train de finir
+                CONTEXT c;
+                c.ContextFlags = CONTEXT_CONTROL;
+                GetThreadContext(h, &c);
+                fils[n] = h, ids[n] = id, n++, garde = true, nouveaux++;
+            }
+            if (!nouveaux) break;
+        }
+    }
+    ~MondeArrete() {
+        for (int i = 0; i < n; i++) {
+            ResumeThread(fils[i]);
+            CloseHandle(fils[i]);
+        }
+        if (!t0) return;
+        const uint64_t d = maintenant_ns() - t0;
+        g_arrets++;
+        g_arrets_ns += d;
+        if (d > g_arret_max_ns.load(std::memory_order_relaxed)) g_arret_max_ns.store(d, std::memory_order_relaxed);
+        g_arret_fils.store((uint64_t)n, std::memory_order_relaxed);
+    }
+    MondeArrete(const MondeArrete&) = delete;
+    MondeArrete& operator=(const MondeArrete&) = delete;
+};
+
+// Engage [p, p+n) et y copie src sans qu'un autre fil puisse voir la plage entre les deux (verrou exclusif tenu).
+// Mémoire refusée par Windows : la place est d'abord obtenue ailleurs par engager (qui rend la réserve, attend et
+// l'écrit dans le journal, les autres fils en marche), puis échangée contre la plage pendant l'arrêt.
+bool engager_copier(uint64_t p, uint64_t n, const uint8_t* src) {
+    {
+        MondeArrete arret;
+        if (VirtualAlloc((void*)p, n, MEM_COMMIT, PAGE_READWRITE)) {
+            memcpy((void*)p, src, n);
+            return true;
+        }
+    }
+    void* ailleurs = VirtualAlloc(nullptr, n, MEM_RESERVE, PAGE_READWRITE);
+    if (!ailleurs) return false;
+    if (!engager((uint64_t)ailleurs, n)) {
+        VirtualFree(ailleurs, 0, MEM_RELEASE);
+        return false;
+    }
+    MondeArrete arret;
+    VirtualFree(ailleurs, 0, MEM_RELEASE);
+    if (!VirtualAlloc((void*)p, n, MEM_COMMIT, PAGE_READWRITE)) return false;
+    memcpy((void*)p, src, n);
+    return true;
+}
+
+// Copie src dans une page qui vient d'être engagée, donc à zéro, mot par mot et seulement là où elle est encore à
+// zéro : ce qu'un autre fil y a écrit depuis l'engagement n'est jamais recouvert. Pour l'écriture fautive dans
+// d'anciennes données de texture (cause 4) : le jeu réutilise cette mémoire, son ancien contenu ne vaut que comme fond
+// d'une réécriture partielle, et un arrêt des fils à chacune de ces fautes (plus de cent par seconde chez un joueur)
+// coûterait trop cher. Avant, memcpy pouvait recouvrir par ces vieilles données l'écriture d'un autre fil dans la même
+// page.
+void copier_sans_recouvrir(uint64_t p, const uint8_t* src, uint64_t n) {
+    auto* d = (volatile LONG64*)p;
+    for (uint64_t i = 0; i < n / 8; i++) {
+        LONG64 v;
+        memcpy(&v, src + i * 8, 8);
+        if (v) InterlockedCompareExchange64(&d[i], v, 0);
+    }
+}
+
 // Restaure la partie rendue de [a, b) (verrou exclusif tenu) : lue dans un tampon à part, par morceaux d'au plus
-// 1 Mo, puis remise en place. par_page (accès fautif du jeu) : chaque page est engagée puis remplie aussitôt ; un
-// autre fil qui touche une page encore désengagée faute et attend le verrou. Sinon (lecture en nombre par le runtime,
-// appel système) : le morceau est engagé puis copié d'un bloc.
+// 1 Mo, puis remise en place. Pages oubliées et données de texture relues (causes 0 à 3) : engagées et copiées les
+// autres fils arrêtés (engager_copier) ; un fil qui touche une page encore désengagée faute et attend le verrou, aucun
+// ne peut la voir engagée et pas encore remplie. Écriture fautive dans d'anciennes données de texture (cause 4) : page
+// par page, sans arrêt (copier_sans_recouvrir). Si la lecture du fichier échoue, ou avec RECOMP_NO_ATOMIC_RESTORE :
+// chemin d'avant (par_page, accès fautif du jeu : page par page ; sinon d'un bloc).
 // Faux : Windows refuse la mémoire. cause : 0 lecture fautive, 1 écriture fautive dans une texture en service,
 // 2 runtime, 3 avant un appel système, 4 écriture fautive dans une texture sans objet.
 bool rel_restaurer(uint64_t a, uint64_t b, int cause, bool par_page = false) {
@@ -334,13 +455,16 @@ bool rel_restaurer(uint64_t a, uint64_t b, int cause, bool par_page = false) {
             HLOG("mem", "%s not read back (error %lu): 0x%llx +0x%llx",
                  it->second.froid ? "forgotten game pages" : "released texture data", GetLastError(),
                  (unsigned long long)p, (unsigned long long)n);
-        if (par_page) {
+        if (lu && g_arret_actif && (it->second.froid || cause != 4)) {
+            if (!engager_copier(p, n, g_rel_tampon)) return false;
+        } else if (par_page) {
             for (uint64_t q = 0; q < n; q += 0x1000) {
                 if (!engager(p + q, 0x1000)) {
                     if (q) rel_retirer(p, p + q);
                     return false;
                 }
-                if (lu) memcpy((void*)(p + q), g_rel_tampon + q, 0x1000);
+                if (lu && g_arret_actif) copier_sans_recouvrir(p + q, g_rel_tampon + q, 0x1000);
+                else if (lu) memcpy((void*)(p + q), g_rel_tampon + q, 0x1000);
             }
         } else {
             if (!engager(p, n)) return false;
@@ -472,6 +596,7 @@ void mem_release_init() {
     }
     g_rel_max = std::min<uint64_t>(REL_MAX, libre.QuadPart - REL_DISQUE_MIN);
     g_rel_tampon = (uint8_t*)VirtualAlloc(nullptr, REL_TAMPON, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    arret_init();
     if (!g_rel_tampon) return;
     _snwprintf(chemin, MAX_PATH + 63, L"%lsrecomp_textures_%lu.tmp", g_rel_dossier, (unsigned long)GetCurrentProcessId());
     chemin[MAX_PATH + 63] = 0;
@@ -657,8 +782,16 @@ int mem_fault(uint64_t addr, bool ecriture) {
                     }
                     for (auto a = std::next(it); a != g_rel.end() && a->second.id == id; ++a) a->second.entame = true;
                 }
-                const uint64_t m0 = std::max(it->first, page & ~(g_rel_morceau - 1));
-                const uint64_t m1 = std::min(it->second.fin, (page & ~(g_rel_morceau - 1)) + g_rel_morceau);
+                // Pages oubliées : la suite rangée ensemble (2 Mo au plus) revient en entier, en un ou deux arrêts des
+                // autres fils au lieu d'un par morceau de 64 Ko ; ses voisines sont en général touchées juste après.
+                // Données de texture relues ou réécrites en service (causes 0 et 1) : REL_AVANCE d'un coup à partir du
+                // morceau fautif, le jeu les lit à la suite ; sinon ces fautes arrivent par rafales de plus de mille
+                // arrêts (à-coups des changements de scène allongés de ≈ 100 ms, mesuré le 2026-11-13).
+                const bool suite = it->second.froid && g_arret_actif;
+                const uint64_t avance = !sans_objet && g_arret_actif ? std::max(REL_AVANCE, g_rel_morceau) : g_rel_morceau;
+                const uint64_t m0 = suite ? it->first : std::max(it->first, page & ~(g_rel_morceau - 1));
+                const uint64_t m1 = suite ? it->second.fin
+                                          : std::min(it->second.fin, (page & ~(g_rel_morceau - 1)) + avance);
                 if (rel_restaurer(m0, m1, sans_objet ? 4 : ecriture ? 1 : 0, true)) return sans_objet ? 5 : ecriture ? 3 : 2;
                 if (!g_manque_memoire.exchange(true))
                     HLOG("mem", "released game page 0x%llx not restored (error %lu): the PC is low on memory (%.1f GB "
@@ -950,10 +1083,9 @@ bool epingle(const std::vector<std::pair<uint64_t, uint64_t>>& v, uint64_t a, ui
 // 2 ms de pause tous les 8), à partir du 4e balayage (le premier niveau est chargé) ; un morceau trouvé touché attend
 // 4, 8 puis 16 balayages avant d'être retiré de nouveau, un morceau relu du fichier 16. Rangement par suites de 2 Mo
 // au plus, 1 ms de pause avant chacune : un fil du jeu qui attend le verrou de mem_fault passe.
-// Limite connue, la même que pour les textures (plus haut) : pendant la restauration d'une page (moins d'une
-// microseconde entre son engagement et sa copie), un autre fil qui y accède sans fauter lit des zéros ou voit son
-// écriture recouverte ; il faudrait que deux fils se mettent à toucher la même page oubliée depuis des minutes dans la
-// même microseconde.
+// Jusqu'à la 1.0.3, limite connue, la même que pour les textures : pendant la restauration d'une page (moins d'une
+// microseconde entre son engagement et sa copie), un autre fil qui y accédait sans fauter lisait des zéros ou voyait son
+// écriture recouverte. Vu chez un joueur (issue GitHub n° 17) : la restauration est maintenant atomique (MondeArrete).
 constexpr uint64_t FROID_RETRAIT_MAX = 128ull << 20;   // retirés de l'ensemble de travail par balayage
 constexpr unsigned FROID_APPELS_MAX = 64;              // appels de VirtualUnlock par balayage (un par bloc de 2 Mo)
 constexpr uint64_t FROID_SUITE_MAX = 2ull << 20;       // rangés par prise du verrou (écriture dans le fichier)
@@ -1251,6 +1383,13 @@ void vides_balayer(unsigned periode) {
                  g_froid_octets.load() / 1048576.0, ranges / 1048576.0, g_froid_cumul.load() / 1048576.0,
                  g_froid_relus.load() / 1048576.0, observes, retires / 1048576.0, (unsigned long long)froid_occupees,
                  (unsigned long long)(GetTickCount64() - t0));
+        static uint64_t arrets_dits = 0;   // restaurations atomiques (MondeArrete) : leur coût, quand il y en a eu
+        if (const uint64_t na = g_arrets.load(); na != arrets_dits && (k % 10 == 1 || na > arrets_dits + 5000)) {
+            arrets_dits = na;
+            HLOG("mem", "pages restored with the other threads stopped: %llu times, %.1f ms in total, longest %.2f ms "
+                        "(%llu threads)", (unsigned long long)na, g_arrets_ns.load() / 1e6, g_arret_max_ns.load() / 1e6,
+                 (unsigned long long)g_arret_fils.load());
+        }
     }
 }
 }  // namespace

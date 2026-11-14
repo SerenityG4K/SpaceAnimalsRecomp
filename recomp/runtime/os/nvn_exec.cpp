@@ -451,6 +451,18 @@ void nvn_execute(const std::vector<Op>& ops) {
                 memcpy((void*)(a[0] + a[2]), o.blob.data(), o.blob.size());
             break;
         }
+        case OpType::CopyTextureToBuffer: {   // (src, srcView, region, dst, flags) : PAS exécutée ; notée (diagnostic)
+            static int nctb = 0;
+            if (nctb++ < 60) {
+                int32_t r[6] = {};
+                if (o.blob.size() >= 24) memcpy(r, o.blob.data(), 24);
+                HLOG("nvn", "CopyTextureToBuffer NOT EXECUTED (frame %llu): texture %llx view %llx -> buffer 0x%llx, region "
+                            "%d,%d,%d %dx%dx%d, flags %llx", (unsigned long long)g_frame.load(), (unsigned long long)a[0],
+                     (unsigned long long)a[1], (unsigned long long)a[3], r[0], r[1], r[2], r[3], r[4], r[5],
+                     (unsigned long long)a[4]);
+            }
+            break;
+        }
         default:
             break;
         }

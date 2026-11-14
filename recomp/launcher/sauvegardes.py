@@ -44,7 +44,7 @@ def fichiers(dossier):
     out = []
     for r, _, fs in os.walk(dossier):
         for f in fs:
-            if not f.startswith("SAVE MOVED"):
+            if not f.startswith("SAVE MOVED") and f != ".empreinte":   # ni la note, ni la marque d'une copie de secours
                 out.append(os.path.relpath(os.path.join(r, f), dossier))
     return sorted(out)
 

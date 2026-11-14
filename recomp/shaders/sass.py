@@ -242,7 +242,8 @@ def decode(pc, w):
         i.psrc = [pred_at(W, 87, 90)]
     elif op == 0x108:                                 # MUFU
         _dec_alu(i, "mufu", 1)
-        i.mods = {"op": MUFU.get(i.f(74, 80), i.f(74, 80)), "f16": i.b(73)}
+        # f16 : opération en demi-précision ; sub choisit la moitié du mot source, comme pour f2f (2026-11-13)
+        i.mods = {"op": MUFU.get(i.f(74, 80), i.f(74, 80)), "f16": i.b(73), "sub": i.f(60, 62)}
     elif op == 0x022 and i.opc == 0x822:              # FSWZADD
         i.name = "fswzadd"
         i.dst = Reg(i.f(16, 24))

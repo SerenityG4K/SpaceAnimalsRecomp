@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <unordered_map>
 
 namespace lz {
@@ -433,7 +434,8 @@ void titre(float t) {
 
 double progres_total(Construction& c) {
     static const struct { const char* id; double poids; } P[] = {
-        {"verifier", 1}, {"extraire", 2}, {"images", 2}, {"recompiler", 78}, {"lier", 3}, {"shaders", 9}, {"pipelines", 3}};
+        {"verifier", 1}, {"extraire", 2}, {"images", 2}, {"recompiler", 78}, {"lier", 3}, {"shaders", 9}, {"pipelines", 3},
+        {"dep_verifier", 1}, {"dep_copier", 30}};   // déplacement de l'installation (deplacer.py)
     auto poids = [&](const std::string& id) {
         for (auto& p : P)
             if (id == p.id) return p.poids;
@@ -476,7 +478,8 @@ void bouton_principal(float t) {
         g_dc->PopLayer();
         g_dc->DrawGeometry(geo, pinceau(VERT, sv ? 0.95f : 0.7f), 1.4f);
         wchar_t s[96];
-        swprintf(s, 96, L"%ls   %d %%", T(tache == Tache::Construction ? "en_cours" : tache == Tache::Shaders ? "shaders_en_cours" : "maj_en_cours"),
+        swprintf(s, 96, L"%ls   %d %%", T(tache == Tache::Construction ? "en_cours" : tache == Tache::Shaders ? "shaders_en_cours" :
+                   tache == Tache::Deplacement ? "dep_en_cours" : "maj_en_cours"),
                  (int)(p * 100));
         texte(s, F_BOUTON, x + w / 2 + 4, y + 13, BLANC, 1.f, 2.5f, 1);
     } else {
@@ -504,34 +507,14 @@ void bouton_principal(float t) {
     rel(geo);
 }
 
-// plein écran ou fenêtré (recomp.ini du jeu), sous le bouton principal
-void bascule_affichage() {
-    const float y = 258, h = 22;
-    texte(T("affichage"), F_PETIT, 44, y + 5, GRIS, 1.f, 2.5f);
-    float x = 134;
-    for (int k = 0; k < 2; k++) {
-        const bool plein = k == 0, actif = g.reglages.sans_bordure == plein;
-        const int z = plein ? Z_AFF_PLEIN : Z_AFF_FEN;
-        IDWriteTextLayout* l = mise(T(plein ? "plein_maj" : "fenetre_maj"), F_PETIT, 2000.f, 1.5f);
-        const float w = largeur_texte(l) + 22;
-        const bool sv = survol(z);
-        if (actif) rect(x, y, x + w, y + h, VERT, sv ? 1.f : 0.88f);
-        else rect(x, y, x + w, y + h, NOIR, 0.55f), cadre(x, y, x + w, y + h, sv ? VERT : GRIS, sv ? 0.9f : 0.45f);
-        if (l)
-            g_dc->DrawTextLayout(D2D1::Point2F(x + 11, y + 4), l, pinceau(actif ? 0x04140A : sv ? BLANC : TEXTE, 1.f),
-                                 D2D1_DRAW_TEXT_OPTIONS_NONE);
-        zone(D2D1::RectF(x, y, x + w, y + h), z);
-        x += w + 6;
-    }
-}
-
 void menu() {
     struct { int id; const char* cle; float y; Page p; } items[] = {
-        {Z_MENU_REGLAGES, "reglages", 284, Page::Reglages},
-        {Z_MENU_CONTROLES, "controles", 316, Page::Controles},
-        {Z_MENU_CONSTRUCTION, "construction", 348, Page::Construction},
-        {Z_MENU_RAPPORT, "rapport", 380, Page::Aucune},
-        {Z_MENU_QUITTER, "quitter", 418, Page::Aucune},
+        {Z_MENU_GRAPHISMES, "graphismes", 262, Page::Graphismes},
+        {Z_MENU_REGLAGES, "reglages", 294, Page::Reglages},
+        {Z_MENU_CONTROLES, "controles", 326, Page::Controles},
+        {Z_MENU_CONSTRUCTION, "construction", 358, Page::Construction},
+        {Z_MENU_RAPPORT, "rapport", 390, Page::Aucune},
+        {Z_MENU_QUITTER, "quitter", 422, Page::Aucune},
     };
     for (auto& it : items) {
         const bool actif = it.id != Z_MENU_QUITTER && it.id != Z_MENU_RAPPORT && g.page == it.p;
@@ -567,7 +550,8 @@ void bloc_copie() {
     {
         std::lock_guard<std::mutex> l(g.cons.lk);
         shaders = g.cons.active && g.cons.tache != Tache::Construction;
-        if (shaders) info = g.cons.tache == Tache::Shaders ? T("e_pipelines") : T("maj_en_cours");
+        if (shaders)
+            info = g.cons.tache == Tache::Shaders ? T("e_pipelines") : g.cons.tache == Tache::Deplacement ? T("dep_en_cours") : T("maj_en_cours");
         if (shaders && !g.cons.info.empty()) info += L"  ·  " + g.cons.info;
     }
     texte(!g.jeu_pret ? T("jeu_absent") : g.jeu_obsolete ? T("jeu_obsolete") : T("jeu_pret"), F_CORPS, 44, y + 46, BLANC, 1.f);
@@ -657,21 +641,27 @@ void panneau(const wchar_t* titre_p) {
 }
 
 // sélecteur ‹ valeur ›
-void selecteur(float y, const wchar_t* valeur, int zg, int zd) {
+void selecteur(float y, const wchar_t* valeur, int zg, int zd, bool actif = true) {
     const float x0 = 652, x1 = 940, h = 28;
-    const bool sv = survol(zg) || survol(zd);
+    const bool sv = actif && (survol(zg) || survol(zd));
     rect(x0, y, x1, y + h, NOIR, 0.65f);
-    cadre(x0, y, x1, y + h, VERT, sv ? 0.75f : 0.32f);
-    texte(L"‹", F_VALEUR, x0 + 14, y + 2, survol(zg) ? BLANC : VERT, 1.f, 0.f, 1);
-    texte(L"›", F_VALEUR, x1 - 14, y + 2, survol(zd) ? BLANC : VERT, 1.f, 0.f, 1);
-    texte(valeur, F_VALEUR, (x0 + x1) / 2, y + 4, BLANC, 1.f, 0.5f, 1, x1 - x0 - 70);
-    zone(D2D1::RectF(x0, y, (x0 + x1) / 2, y + h), zg);
-    zone(D2D1::RectF((x0 + x1) / 2, y, x1, y + h), zd);
+    cadre(x0, y, x1, y + h, VERT, !actif ? 0.14f : sv ? 0.75f : 0.32f);
+    if (actif) {   // inactif : valeur fixée par un autre réglage (rendu 3D d'un mode DLSS), grisée, sans flèches
+        texte(L"‹", F_VALEUR, x0 + 14, y + 2, survol(zg) ? BLANC : VERT, 1.f, 0.f, 1);
+        texte(L"›", F_VALEUR, x1 - 14, y + 2, survol(zd) ? BLANC : VERT, 1.f, 0.f, 1);
+        zone(D2D1::RectF(x0, y, (x0 + x1) / 2, y + h), zg);
+        zone(D2D1::RectF((x0 + x1) / 2, y, x1, y + h), zd);
+    }
+    texte(valeur, F_VALEUR, (x0 + x1) / 2, y + 4, actif ? BLANC : GRIS, 1.f, 0.5f, 1, x1 - x0 - 70);
 }
 
-void libelle(float y, const char* cle, const char* aide) {
+// libellé d'un réglage et sa ligne d'aide (ambre : mise en garde, une mise à l'échelle expérimentale par exemple)
+void libelle_aide(float y, const char* cle, const std::wstring& aide, uint32_t couleur = GRIS) {
     texte(T(cle), F_CORPS, PX0 + 24, y + 1, TEXTE, 1.f, 0.3f);
-    if (aide) texte(T(aide), F_PETIT, PX0 + 24, y + 19, GRIS, 1.f, 0.f, 0, 190);
+    if (!aide.empty()) texte(aide, F_PETIT, PX0 + 24, y + 19, couleur, 1.f, 0.f, 0, 190);
+}
+void libelle(float y, const char* cle, const char* aide, uint32_t couleur = GRIS) {
+    libelle_aide(y, cle, aide ? std::wstring(T(aide)) : std::wstring(), couleur);
 }
 
 void bouton_contour(float x0, float y0, float x1, float y1, const wchar_t* s, int id, bool actif = true) {
@@ -680,6 +670,14 @@ void bouton_contour(float x0, float y0, float x1, float y1, const wchar_t* s, in
     cadre(x0, y0, x1, y1, VERT, actif ? (sv ? 0.95f : 0.55f) : 0.18f);
     texte(s, F_PETIT, (x0 + x1) / 2, y0 + (y1 - y0 - 15) / 2, actif ? (sv ? BLANC : VERT) : GRIS, 1.f, 2.f, 1);
     if (actif) zone(D2D1::RectF(x0, y0, x1, y1), id);
+}
+
+// dossier affiché dans une case étroite : « D:\…\SpaceAnimalsRecomp » quand le chemin est long
+std::wstring chemin_court(const std::wstring& p) {
+    if (p.size() <= 26) return p;
+    const size_t k = p.find_last_of(L'\\');
+    if (k == std::wstring::npos || k < 3) return p;
+    return p.substr(0, 3) + L"…" + p.substr(k);
 }
 
 void page_reglages() {
@@ -698,23 +696,7 @@ void page_reglages() {
     libelle(y, "reg_langue", "reg_langue_aide");
     selecteur(y, nom_langue_jeu(g.reglages.langue).c_str(), Z_LANGUE_G, Z_LANGUE_D);
     y += pas;
-    // résolution
-    libelle(y, "reg_res", "reg_res_aide");
-    if (g.reglages.resolution == 0) wcscpy(v, T("auto_ecran"));
-    else if (g.reglages.resolution == 2160) wcscpy(v, L"2160p (4K)");
-    else swprintf(v, 64, L"%dp", g.reglages.resolution);
-    selecteur(y, v, Z_RES_G, Z_RES_D);
-    y += pas;
-    libelle(y, "reg_hz", "reg_hz_aide");
-    swprintf(v, 64, L"%d", g.reglages.hz);
-    selecteur(y, v, Z_HZ_G, Z_HZ_D);
-    y += pas;
-    libelle(y, "reg_natif", "reg_natif_aide");
-    selecteur(y, g.reglages.natif ? T("natif") : T("console"), Z_NATIF_G, Z_NATIF_D);
-    y += pas;
-    libelle(y, "reg_aff", "reg_aff_aide");
-    selecteur(y, g.reglages.sans_bordure ? T("sans_bordure") : T("fenetre"), Z_AFF_G, Z_AFF_D);
-    y += pas;
+    // résolution, images par seconde, rendu 3D, DLSS et affichage : page Graphismes
     libelle(y, "reg_vol", nullptr);
     swprintf(v, 64, L"%d %%", g.volume);
     selecteur(y, v, Z_VOL_G, Z_VOL_D);
@@ -730,6 +712,20 @@ void page_reglages() {
     libelle(y, "reg_maj", "reg_maj_aide");
     selecteur(y, g.maj_auto ? T("maj_auto") : T("maj_manuel"), Z_MAJ_AUTO_G, Z_MAJ_AUTO_D);
     y += pas;
+    // Emplacement du jeu et raccourci sur le bureau (issue GitHub n° 14). Le dossier d'installation est déplacé par
+    // deplacer.py (lanceur.cpp, deplacer) ; un dossier de développement ne l'est jamais.
+    const bool libre = !g.cons.active && !g.jeu_lance;
+    const bool deplacable = g.paquet && !g.sources;
+    libelle(y, "reg_dossier", deplacable ? "reg_dossier_aide" : "reg_dossier_sources");
+    rect(652, y, 846, y + 28, NOIR, 0.65f);
+    cadre(652, y, 846, y + 28, VERT, 0.32f);
+    texte(chemin_court(g.dossier_exe), F_PETIT, 662, y + 6, BLANC, 1.f, 0.f, 0, 176);
+    bouton_contour(852, y, 940, y + 28, T("deplacer"), Z_DEPLACER, libre && deplacable);
+    y += pas;
+    const int rac = raccourci_etat();
+    libelle(y, "reg_raccourci", rac == 1 ? "rac_present" : rac == 2 ? "rac_ailleurs" : "rac_absent");
+    bouton_contour(652, y, 940, y + 28, T(rac == 1 ? "rac_retirer" : "rac_creer"), Z_RACCOURCI);
+    y += pas + 8;
     texte(T("experts"), F_PETIT, PX0 + 24, y, VERT, 0.85f, 3.f);
     ligne(PX0 + 140, y + 8, PX1 - 24, y + 8, VERT, 0.15f);
     y += 20;
@@ -737,8 +733,109 @@ void page_reglages() {
     if (g.fils == 0) swprintf(v, 64, T("auto_fils"), fils_effectifs());
     else swprintf(v, 64, L"%d", g.fils);
     selecteur(y, v, Z_FILS_G, Z_FILS_D);
-    const bool libre = !g.cons.active && !g.jeu_lance;
     bouton_contour(PX0 + 24, PY1 - 46, PX0 + 262, PY1 - 18, T("reconstruire"), Z_RECONSTRUIRE, libre && g.copie_ok);
+}
+
+// Page Graphismes (2026-11-12, demande de l'utilisateur) : tout ce qui touche à l'image (recomp.ini du jeu). Le soir,
+// autre demande : choisir la carte graphique (une carte AMD par exemple ; le DLSS n'est alors plus proposé), et dire
+// que toutes les mises à l'échelle sont expérimentales (DLSS Qualité à Ultra perf., rendu 3D sous 100 %).
+void page_graphismes() {
+    panneau(T("gra_titre"));
+    float y = PY0 + 58;
+    const float pas = 33;   // neuf réglages depuis le FSR (2026-11-12)
+    wchar_t v[64];
+    {   // carte graphique : Automatique (la carte que le jeu prendra est nommée), puis chaque carte vue par Vulkan
+        const bool pretes = g.cartes_pretes.load(std::memory_order_acquire);
+        bool nommee = false;
+        const int c = carte_du_jeu(&nommee);
+        std::wstring val, aide;
+        if (!pretes) val = T("gpu_auto"), aide = T("gpu_recherche");
+        else if (c < 0) val = T("gpu_auto"), aide = T("gpu_aucune");
+        else if (nommee) val = nom_carte(g.cartes[c].nom), aide = T("gpu_aide");
+        else val = std::wstring(T("gpu_auto_carte")) + nom_carte(g.cartes[c].nom), aide = T("gpu_aide");
+        libelle_aide(y, "reg_gpu", aide);
+        selecteur(y, val.c_str(), Z_GPU_G, Z_GPU_D, c >= 0);
+        y += pas;
+    }
+    libelle(y, "reg_res", "reg_res_aide");
+    if (g.reglages.resolution == 0) wcscpy(v, T("auto_ecran"));
+    else if (g.reglages.resolution == 2160) wcscpy(v, L"2160p (4K)");
+    else swprintf(v, 64, L"%dp", g.reglages.resolution);
+    selecteur(y, v, Z_RES_G, Z_RES_D);
+    y += pas;
+    libelle(y, "reg_hz", "reg_hz_aide");
+    swprintf(v, 64, L"%d", g.reglages.hz);
+    selecteur(y, v, Z_HZ_G, Z_HZ_D);
+    y += pas;
+    libelle(y, "reg_aff", "reg_aff_aide");
+    selecteur(y, g.reglages.sans_bordure ? T("sans_bordure") : T("fenetre"), Z_AFF_G, Z_AFF_D);
+    y += pas;
+    // DLSS : mode (aide changée si nvngx_dlss.dll manque à côté du jeu, dans son dossier dlss et dans outils\dlss, où le
+    // paquet le range), puis modèle. Sur une
+    // carte qui n'est pas une NVIDIA RTX : « Indisponible », grisé ; le mode choisi reste dans recomp.ini (retrouvé en
+    // revenant à la carte NVIDIA), sans effet dans le jeu (dlss.cpp, carte_dlss).
+    static const char* const modes[6] = {"dlss_non", "dlss_dlaa", "dlss_qualite", "dlss_equilibre", "dlss_perf", "dlss_ultra"};
+    const bool possible = dlss_possible();
+    const int mode = possible ? std::clamp(g.reglages.dlss, 0, 5) : 0;   // mode qui servira
+    static bool dll = false;   // relu une fois par seconde (quatre dossiers, comme dlss.cpp)
+    static ULONGLONG dll_t = 0;
+    if (GetTickCount64() - dll_t > 1000) {
+        dll_t = GetTickCount64();
+        dll = false;
+        for (const std::wstring& dossier : {g.jeu, g.jeu + L"\\dlss", g.dossier_exe + L"\\outils\\dlss", g.recomp + L"\\outils\\dlss"})
+            dll = dll || GetFileAttributesW((dossier + L"\\nvngx_dlss.dll").c_str()) != INVALID_FILE_ATTRIBUTES;
+    }
+    if (!possible) {
+        libelle(y, "reg_dlss", "reg_dlss_rtx");
+        selecteur(y, T("dlss_indispo"), Z_DLSS_G, Z_DLSS_D, false);
+    } else if (mode && !dll) {
+        libelle(y, "reg_dlss", "reg_dlss_manque");
+        selecteur(y, T(modes[mode]), Z_DLSS_G, Z_DLSS_D);
+    } else {   // super résolution (Qualité à Ultra perf.) : mise à l'échelle expérimentale
+        libelle(y, "reg_dlss", mode >= 2 ? "reg_dlss_exp" : "reg_dlss_aide", mode >= 2 ? AMBRE : GRIS);
+        selecteur(y, T(modes[mode]), Z_DLSS_G, Z_DLSS_D);
+    }
+    y += pas;
+    libelle(y, "reg_dlss_modele", "reg_dlss_modele_aide");
+    selecteur(y, g.reglages.dlss_modele == 2 ? T("dlss_45") : T("dlss_4"), Z_DLSSM_G, Z_DLSSM_D, mode != 0);
+    y += pas;
+    // FSR d'AMD (2026-11-12) : sur toute carte ; sans effet quand le DLSS sert (le jeu fait le même choix, fsr.cpp), ou
+    // quand les deux bibliothèques d'AMD manquent (à côté du jeu, dans son dossier fsr ou dans outils\fsr). Puis la
+    // version : automatique (FSR 4 si la carte le propose), FSR 4 ou FSR 3.1.
+    static const char* const modes_fsr[6] = {"dlss_non", "fsr_natif", "dlss_qualite", "fsr_equilibre", "dlss_perf", "dlss_ultra"};
+    const int mode_fsr = std::clamp(g.reglages.fsr, 0, 5);
+    static bool fsr_dll = false;   // relu une fois par seconde (huit fichiers cherchés)
+    static ULONGLONG fsr_vu = 0;
+    if (const ULONGLONG t = GetTickCount64(); !fsr_vu || t - fsr_vu > 1000) {
+        fsr_vu = t;
+        fsr_dll = false;
+        for (const std::wstring& dossier : {g.jeu, g.jeu + L"\\fsr", g.dossier_exe + L"\\outils\\fsr", g.recomp + L"\\outils\\fsr"})
+            fsr_dll = fsr_dll || (GetFileAttributesW((dossier + L"\\amd_fidelityfx_loader_vk.dll").c_str()) != INVALID_FILE_ATTRIBUTES &&
+                                  GetFileAttributesW((dossier + L"\\amd_fidelityfx_upscaler_vk.dll").c_str()) != INVALID_FILE_ATTRIBUTES);
+    }
+    const bool fsr_sert = mode_fsr && mode == 0 && fsr_dll;   // comme le jeu : sans les fichiers d'AMD, render_scale
+    if (mode_fsr && mode) libelle(y, "reg_fsr", "reg_fsr_dlss", AMBRE);
+    else if (mode_fsr && !fsr_dll) libelle(y, "reg_fsr", "reg_fsr_manque", AMBRE);
+    else libelle(y, "reg_fsr", mode_fsr >= 2 ? "reg_dlss_exp" : "reg_fsr_aide", mode_fsr >= 2 ? AMBRE : GRIS);
+    selecteur(y, T(modes_fsr[mode_fsr]), Z_FSR_G, Z_FSR_D);
+    y += pas;
+    libelle(y, "reg_fsr_version", "reg_fsr_version_aide");
+    selecteur(y, g.reglages.fsr_version == 4 ? L"FSR 4" : g.reglages.fsr_version == 3 ? L"FSR 3.1" : T("gpu_auto"), Z_FSRV_G,
+              Z_FSRV_D, fsr_sert);
+    y += pas;
+    // rendu 3D : fixé par le mode du DLSS ou du FSR quand il y en a un (100 % en DLAA ou en natif) ; sous 100 %, mise à
+    // l'échelle expérimentale
+    const int e_dlss = mode ? DLSS_ECHELLES[mode] : fsr_sert ? FSR_ECHELLES[mode_fsr] : 0;
+    if (e_dlss >= 100 || (!e_dlss && g.reglages.echelle >= 100)) libelle(y, "reg_natif", "reg_natif_aide");
+    else libelle(y, "reg_natif", !e_dlss ? "reg_natif_exp" : mode ? "reg_natif_dlss" : "reg_natif_fsr", AMBRE);
+    wchar_t echelle[48];
+    if (e_dlss) swprintf(echelle, 48, T(mode ? "rendu_dlss" : "rendu_fsr"), e_dlss);
+    else if (g.reglages.echelle >= 100) swprintf(echelle, 48, L"%ls", T("natif"));
+    else swprintf(echelle, 48, L"%d %%", g.reglages.echelle);
+    selecteur(y, echelle, Z_NATIF_G, Z_NATIF_D, e_dlss == 0);
+    y += pas + 6;
+    ligne(PX0 + 24, y, PX1 - 24, y, VERT, 0.15f);
+    texte_lignes(T("gra_note"), F_PETIT, PX0 + 24, y + 12, PX1 - PX0 - 48, GRIS);
 }
 
 // Nom d'une touche d'après son scancode (0xE0xx : touche étendue), sur le clavier réglé dans Windows
@@ -755,6 +852,495 @@ std::wstring nom_touche(UINT sc) {
     return b;
 }
 
+// ---- page Contrôles : onglets CLAVIER · MANETTE, à droite du titre (soulignés comme FR · EN)
+void onglets_controles() {
+    float x = PX0 + 200;
+    const float y = PY0 + 20;
+    for (int k = 0; k < 2; k++) {
+        const int id = k ? Z_ONGLET_MANETTE : Z_ONGLET_CLAVIER;
+        const bool ouvert = (k == 1) == g.onglet_manette;
+        const float w = texte(T(k ? "ong_manette" : "ong_clavier"), F_PETIT, x, y, ouvert ? VERT : survol(id) ? BLANC : GRIS, 1.f, 2.f);
+        if (ouvert) ligne(x, y + 17, x + w - 2, y + 17, VERT, 1.f, 1.f);
+        zone(D2D1::RectF(x - 6, y - 5, x + w + 6, y + 21), id);
+        x += w + 26;
+    }
+}
+
+// ---- onglet Manette : la manette du joueur, dessinée à plat (2026-11-12, 2e version). Demande de l'utilisateur, avec
+// quatre modèles d'« overlay » (manettes pleines et ombrées, à plat) : « je veux que tu dessines la manette avec ce
+// type d'overlay », puis, à la question posée : la manette branchée, la Pro de la Switch quand aucune ne l'est. Dessins
+// faits ici à la main (chemins de Bézier dans un repère de 300 × 190, pas d'image, pas de logo de marque) : Pro de la
+// Switch, Xbox, PlayStation (DualShock 4 sombre, DualSense clair), Joy-Con en paire, Joy-Con seul à l'horizontale.
+// Chaque bouton est une entrée physique (EntreePad) : il s'allume quand on l'appuie, comme un overlay d'entrées, et les
+// sticks bougent avec la manette. Un bouton donné à une action de la Switch se clique : il attend alors l'appui qui le
+// remplace (même chose qu'un clic dans la liste) ; au survol, une étiquette dit l'action qu'il fait.
+// Vérification sans manette : LANCEUR_MANETTE=<SDL_GamepadType> force un dessin, LANCEUR_APPUIS=<masque hexadécimal
+// des entrées> les montre appuyées.
+const float MX = 545, MY = 118, MS = 1.04f;   // origine et échelle du repère 300 × 190
+float mx(float x) { return MX + x * MS; }
+float my(float y) { return MY + y * MS; }
+
+void rond(float cx, float cy, float r, uint32_t rgb, float a, bool plein, float ep = 1.f) {
+    const D2D1_ELLIPSE e = D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r);
+    if (plein) g_dc->FillEllipse(e, pinceau(rgb, a));
+    else g_dc->DrawEllipse(e, pinceau(rgb, a), ep);
+}
+void arrondi(float x0, float y0, float x1, float y1, float r, uint32_t rgb, float a, bool plein, float ep = 1.f) {
+    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(D2D1::RectF(x0, y0, x1, y1), r, r);
+    if (plein) g_dc->FillRoundedRectangle(rr, pinceau(rgb, a));
+    else g_dc->DrawRoundedRectangle(rr, pinceau(rgb, a), ep);
+}
+
+// Chemins : sous-ensemble du « d » de SVG (M, L, C, Q, Z, coordonnées absolues du repère), géométries faites une fois
+std::unordered_map<const char*, ID2D1PathGeometry*> g_chemins;
+ID2D1PathGeometry* chemin(const char* d) {
+    auto it = g_chemins.find(d);
+    if (it != g_chemins.end()) return it->second;
+    ID2D1PathGeometry* p = nullptr;
+    ID2D1GeometrySink* s = nullptr;
+    if (FAILED(g_fab->CreatePathGeometry(&p)) || FAILED(p->Open(&s))) {
+        rel(p);
+        g_chemins[d] = nullptr;
+        return nullptr;
+    }
+    s->SetFillMode(D2D1_FILL_MODE_WINDING);
+    const char* c = d;
+    char cmd = 0;
+    bool ouvert = false;
+    auto nombre = [&](float& v) {
+        while (*c == ' ' || *c == ',') c++;
+        char* fin = nullptr;
+        v = strtof(c, &fin);
+        if (fin == c) return false;
+        c = fin;
+        return true;
+    };
+    auto pt = [](float x, float y) { return D2D1::Point2F(mx(x), my(y)); };
+    for (;;) {
+        while (*c == ' ' || *c == ',') c++;
+        if (!*c) break;
+        if ((*c >= 'A' && *c <= 'Z')) cmd = *c++;
+        float v[6];
+        if (cmd == 'M' && nombre(v[0]) && nombre(v[1])) {
+            if (ouvert) s->EndFigure(D2D1_FIGURE_END_OPEN);
+            s->BeginFigure(pt(v[0], v[1]), D2D1_FIGURE_BEGIN_FILLED);
+            ouvert = true;
+            cmd = 'L';
+        } else if (cmd == 'L' && nombre(v[0]) && nombre(v[1])) {
+            s->AddLine(pt(v[0], v[1]));
+        } else if (cmd == 'C' && nombre(v[0]) && nombre(v[1]) && nombre(v[2]) && nombre(v[3]) && nombre(v[4]) && nombre(v[5])) {
+            s->AddBezier(D2D1::BezierSegment(pt(v[0], v[1]), pt(v[2], v[3]), pt(v[4], v[5])));
+        } else if (cmd == 'Q' && nombre(v[0]) && nombre(v[1]) && nombre(v[2]) && nombre(v[3])) {
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment(pt(v[0], v[1]), pt(v[2], v[3])));
+        } else if (cmd == 'Z') {
+            if (ouvert) s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            ouvert = false;
+            cmd = 0;
+        } else {
+            break;   // chemin mal écrit : on s'arrête là
+        }
+    }
+    if (ouvert) s->EndFigure(D2D1_FIGURE_END_CLOSED);
+    s->Close();
+    rel(s);
+    g_chemins[d] = p;
+    return p;
+}
+void remplir(const char* d, uint32_t c, float a = 1.f) {
+    if (ID2D1PathGeometry* p = chemin(d)) g_dc->FillGeometry(p, pinceau(c, a));
+}
+void contour(const char* d, uint32_t c, float a, float ep) {
+    if (ID2D1PathGeometry* p = chemin(d)) g_dc->DrawGeometry(p, pinceau(c, a), ep);
+}
+
+// ---- état d'une entrée de la manette : action de la Switch qu'elle fait, appuyée, survolée, en attente d'un appui
+const wchar_t* const NOMS_SWITCH[NB_PAD] = {L"A", L"B", L"X", L"Y", L"L", L"R", L"ZL", L"ZR", L"+", L"−",
+                                            L"L ●", L"R ●", L"↑", L"↓", L"←", L"→"};
+uint32_t appuis() {
+    static const wchar_t* essai = _wgetenv(L"LANCEUR_APPUIS");   // vérification : entrées montrées appuyées
+    return manettes().appuyees | (essai ? (uint32_t)wcstoul(essai, nullptr, 16) : 0u);
+}
+struct EtatBouton {
+    int entree = P_AUCUNE, action = -1;
+    bool appui = false, cliquable = false, survol = false, attente = false;
+};
+EtatBouton etat_entree(int e) {
+    EtatBouton s;
+    s.entree = e;
+    for (int i = 0; i < NB_PAD && s.action < 0; i++)
+        if (g.reglages.manette[i] == e) s.action = i;
+    s.appui = (appuis() >> e) & 1;
+    // cliquable : une entrée qui fait un bouton de la Switch (clic : ce bouton attend l'entrée voulue) et, pendant une
+    // attente, toutes (clic : l'entrée est donnée au bouton qui attend ; lanceur.cpp, pad_entree_cliquee)
+    s.cliquable = s.action >= 0 || g.capture_pad >= 0;
+    s.survol = s.cliquable && ::lz::survol(Z_ENTREE0 + e);
+    s.attente = s.action >= 0 && g.capture_pad == s.action;
+    return s;
+}
+float pulsation() { return 0.5f + 0.5f * std::sin((float)(GetTickCount64() % 100000) * 0.006f); }
+
+// étiquette du bouton survolé : l'action de la Switch qu'il fait (dessinée en dernier, par-dessus le reste)
+struct {
+    bool la = false;
+    float x = 0, y = 0;
+    int action = -1;
+} g_etiquette;
+void zone_bouton(const EtatBouton& s, float x0, float y0, float x1, float y1) {
+    if (!s.cliquable) return;
+    zone(D2D1::RectF(mx(x0 - 2), my(y0 - 2), mx(x1 + 2), my(y1 + 2)), Z_ENTREE0 + s.entree);
+    if (s.survol && s.action >= 0)
+        g_etiquette.la = true, g_etiquette.x = mx(x1), g_etiquette.y = my(y0), g_etiquette.action = s.action;
+}
+void etiquette() {
+    if (!g_etiquette.la) return;
+    g_etiquette.la = false;
+    const float x = g_etiquette.x + 2, y = g_etiquette.y - 16;
+    rect(x, y, x + 34, y + 16, NOIR, 0.88f);
+    cadre(x, y, x + 34, y + 16, VERT, 0.9f);
+    texte(NOMS_SWITCH[g_etiquette.action], F_PETIT, x + 17, y + 1, VERT, 1.f, 0.f, 1);
+}
+
+// Signe d'un bouton (lettre, flèche…) : sombre sur un bouton allumé
+auto signe_texte(float x, float y, const wchar_t* s, uint32_t c, Fmt f = F_PETIT) {
+    return [=](bool appui) { texte(s, f, mx(x), my(y) - (f == F_GRAS ? 8.5f : 7.f), appui ? NOIR : c, 1.f, 0.f, 1); };
+}
+auto sans_signe() {
+    return [](bool) {};
+}
+
+// Boutons : fond, puis l'état (appuyé : plein et halo verts ; en attente : anneau ambre pulsé ; survolé : contour
+// blanc), puis le signe ; une entrée sans action s'allume plus pâle
+template <class F> void b_rond(int e, float x, float y, float r, uint32_t fond, F signe) {
+    const EtatBouton s = etat_entree(e);
+    rond(mx(x), my(y), r * MS, fond, 1.f, true);
+    if (s.appui) {
+        rond(mx(x), my(y), (r + 4) * MS, VERT, 0.22f, true);
+        rond(mx(x), my(y), r * MS, s.action >= 0 ? VERT : VERT_PALE, 0.9f, true);
+    }
+    if (s.attente) rond(mx(x), my(y), (r + 2.5f) * MS, AMBRE, 0.35f + 0.65f * pulsation(), false, 2.f);
+    else if (s.survol) rond(mx(x), my(y), (r + 1.2f) * MS, BLANC, 1.f, false, 1.5f);
+    signe(s.appui);
+    zone_bouton(s, x - r, y - r, x + r, y + r);
+}
+template <class F> void b_capsule(int e, float x0, float y0, float x1, float y1, float r, uint32_t fond, F signe) {
+    const EtatBouton s = etat_entree(e);
+    arrondi(mx(x0), my(y0), mx(x1), my(y1), r * MS, fond, 1.f, true);
+    if (s.appui) {
+        arrondi(mx(x0 - 3), my(y0 - 3), mx(x1 + 3), my(y1 + 3), (r + 3) * MS, VERT, 0.22f, true);
+        arrondi(mx(x0), my(y0), mx(x1), my(y1), r * MS, s.action >= 0 ? VERT : VERT_PALE, 0.9f, true);
+    }
+    if (s.attente) arrondi(mx(x0 - 2), my(y0 - 2), mx(x1 + 2), my(y1 + 2), (r + 2) * MS, AMBRE, 0.35f + 0.65f * pulsation(), false, 2.f);
+    else if (s.survol) arrondi(mx(x0 - 1), my(y0 - 1), mx(x1 + 1), my(y1 + 1), (r + 1) * MS, BLANC, 1.f, false, 1.5f);
+    signe(s.appui);
+    zone_bouton(s, x0, y0, x1, y1);
+}
+template <class F> void b_chemin(int e, const char* d, float x0, float y0, float x1, float y1, uint32_t fond, F signe) {
+    const EtatBouton s = etat_entree(e);
+    remplir(d, fond);
+    if (s.appui) remplir(d, s.action >= 0 ? VERT : VERT_PALE, 0.9f);
+    if (s.attente) contour(d, AMBRE, 0.35f + 0.65f * pulsation(), 2.f);
+    else if (s.survol) contour(d, BLANC, 1.f, 1.5f);
+    signe(s.appui);
+    zone_bouton(s, x0, y0, x1, y1);
+}
+
+// Stick : cuvette, puis chapeau (son clic est un bouton) déplacé comme le stick de la manette
+void stick(int e, int cote, float x, float y, float rc, float rh, uint32_t cuvette, uint32_t chapeau, uint32_t centre) {
+    rond(mx(x), my(y), rc * MS, cuvette, 1.f, true);
+    const float* a = manettes().axes + cote * 2;
+    const float jeu = rc - rh - 1.5f, cx = x + a[0] * jeu, cy = y + a[1] * jeu;
+    b_rond(e, cx, cy, rh, chapeau, [=](bool appui) {
+        if (!appui) rond(mx(cx), my(cy), (rh - 4) * MS, centre, 1.f, true);
+        rond(mx(cx), my(cy), (rh - 0.8f) * MS, 0x000000, 0.25f, false, 1.f);
+    });
+}
+// Croix d'un seul tenant (Pro, Xbox) : quatre branches, chacune son entrée, et le centre
+void croix_pad(float cx, float cy, float l, float w, uint32_t fond, uint32_t signe) {
+    const float h = w / 2;
+    b_capsule(P_HAUT, cx - h, cy - l - h, cx + h, cy - h, 2, fond, signe_texte(cx, cy - l / 2 - h, L"▲", signe));
+    b_capsule(P_BAS, cx - h, cy + h, cx + h, cy + l + h, 2, fond, signe_texte(cx, cy + l / 2 + h, L"▼", signe));
+    b_capsule(P_GAUCHE, cx - l - h, cy - h, cx - h, cy + h, 2, fond, signe_texte(cx - l / 2 - h, cy, L"◀", signe));
+    b_capsule(P_DROITE, cx + h, cy - h, cx + l + h, cy + h, 2, fond, signe_texte(cx + l / 2 + h, cy, L"▶", signe));
+    rect(mx(cx - h), my(cy - h), mx(cx + h), my(cy + h), fond, 1.f);
+}
+
+// ---- Pro de la Switch (et manette GameCube, rare) : anthracite, ZL et ZR en languettes au-dessus du corps
+const char* const PRO_CORPS = "M 34 56 C 44 40 100 36 150 36 C 200 36 256 40 266 56 C 284 74 294 118 294 150 "
+                              "C 294 172 276 182 258 178 C 238 174 226 152 212 140 C 196 130 104 130 88 140 "
+                              "C 74 152 62 174 42 178 C 24 182 6 172 6 150 C 6 118 16 74 34 56 Z";
+const char* const PRO_FACE = "M 62 58 C 92 46 208 46 238 58 C 252 76 252 108 240 124 C 212 118 88 118 60 124 "
+                             "C 48 108 48 76 62 58 Z";
+const char* const PRO_L = "M 28 46 C 40 30 84 24 114 24 L 114 34 C 86 34 46 40 34 54 Z";
+const char* const PRO_R = "M 272 46 C 260 30 216 24 186 24 L 186 34 C 214 34 254 40 266 54 Z";
+void manette_pro() {
+    const uint32_t corps = 0x2B2B2F, face = 0x333338, bouton = 0x404046, signe = 0xD8D8DC, cuvette = 0x18181B,
+                   chapeau = 0x4A4A51, centre = 0x3B3B41;
+    b_capsule(P_GACHETTE_G, 86, 8, 122, 24, 6, bouton, signe_texte(104, 16, L"ZL", signe));
+    b_capsule(P_GACHETTE_D, 178, 8, 214, 24, 6, bouton, signe_texte(196, 16, L"ZR", signe));
+    b_chemin(P_EPAULE_G, PRO_L, 28, 24, 114, 54, bouton, sans_signe());   // L et R : bandes du haut, sans nom
+    b_chemin(P_EPAULE_D, PRO_R, 186, 24, 272, 54, bouton, sans_signe());
+    remplir(PRO_CORPS, corps);
+    remplir(PRO_FACE, face);
+    contour(PRO_CORPS, 0x000000, 0.55f, 1.f);
+    b_capsule(P_BACK, 112, 52, 126, 58, 3, bouton, sans_signe());   // −
+    b_capsule(P_START, 180, 52, 194, 58, 3, bouton, [=](bool appui) {   // + : barre verticale
+        arrondi(mx(184.5f), my(48), mx(189.5f), my(62), 2.f * MS, appui ? VERT : bouton, 1.f, true);
+    });
+    b_capsule(P_MISC1, 125, 74, 137, 86, 2, bouton, [=](bool appui) {   // capture
+        rond(mx(131), my(80), 3.f * MS, appui ? NOIR : cuvette, 1.f, true);
+    });
+    b_rond(P_GUIDE, 169, 80, 6.5f, bouton, [=](bool appui) {   // accueil
+        rond(mx(169), my(80), 3.6f * MS, appui ? NOIR : signe, 0.85f, false, 1.f);
+    });
+    stick(P_STICK_G, 0, 78, 80, 22, 16, cuvette, chapeau, centre);
+    rond(mx(110), my(116), 21 * MS, cuvette, 1.f, true);
+    croix_pad(110, 116, 12, 12, bouton, signe);
+    stick(P_STICK_D, 1, 190, 116, 22, 16, cuvette, chapeau, centre);
+    b_rond(P_NORD, 224, 60, 10.5f, bouton, signe_texte(224, 60, L"X", signe, F_GRAS));
+    b_rond(P_EST, 246, 80, 10.5f, bouton, signe_texte(246, 80, L"A", signe, F_GRAS));
+    b_rond(P_SUD, 224, 100, 10.5f, bouton, signe_texte(224, 100, L"B", signe, F_GRAS));
+    b_rond(P_OUEST, 202, 80, 10.5f, bouton, signe_texte(202, 80, L"Y", signe, F_GRAS));
+}
+
+// ---- Xbox (et manettes inconnues ou génériques) : noire, lettres de couleur, bouton central sans logo
+const char* const XB_CORPS = "M 52 60 C 66 48 96 42 118 42 L 182 42 C 204 42 234 48 248 60 C 272 70 286 92 292 126 "
+                             "C 298 156 296 178 278 184 C 262 190 246 176 232 160 C 220 148 206 144 196 144 "
+                             "L 104 144 C 94 144 80 148 68 160 C 54 176 38 190 22 184 C 4 178 2 156 8 126 "
+                             "C 14 92 28 70 52 60 Z";
+const char* const XB_HAUT = "M 108 42 L 192 42 L 180 66 C 168 68 132 68 120 66 Z";
+const char* const XB_LB = "M 36 56 C 48 40 80 32 108 32 L 108 40 C 82 40 54 46 44 60 Z";
+const char* const XB_RB = "M 264 56 C 252 40 220 32 192 32 L 192 40 C 218 40 246 46 256 60 Z";
+const char* const XB_LT = "M 58 34 C 58 18 66 8 80 6 C 88 6 94 12 94 20 L 94 34 Z";
+const char* const XB_RT = "M 242 34 C 242 18 234 8 220 6 C 212 6 206 12 206 20 L 206 34 Z";
+void manette_xbox() {
+    const uint32_t corps = 0x161618, haut = 0x202024, bouton = 0x27272C, signe = 0xCFCFD4, cuvette = 0x07070A,
+                   chapeau = 0x323238, centre = 0x41414A, face = 0x1E1E23;
+    b_chemin(P_GACHETTE_G, XB_LT, 58, 6, 94, 34, bouton, signe_texte(76, 21, L"LT", signe));
+    b_chemin(P_GACHETTE_D, XB_RT, 206, 6, 242, 34, bouton, signe_texte(224, 21, L"RT", signe));
+    b_chemin(P_EPAULE_G, XB_LB, 36, 32, 108, 60, bouton, sans_signe());   // LB et RB : bandes du haut, sans nom
+    b_chemin(P_EPAULE_D, XB_RB, 192, 32, 264, 60, bouton, sans_signe());
+    remplir(XB_CORPS, corps);
+    remplir(XB_HAUT, haut);
+    contour(XB_CORPS, 0x000000, 0.6f, 1.f);
+    b_rond(P_GUIDE, 150, 54, 10, 0xE4E4E8, [=](bool appui) {   // bouton central (sans logo)
+        rond(mx(150), my(54), 6.5f * MS, appui ? NOIR : 0xB8B8BF, 0.9f, false, 1.3f);
+    });
+    b_rond(P_BACK, 128, 84, 6.5f, bouton, [=](bool appui) {   // View : deux carrés
+        const uint32_t c = appui ? NOIR : signe;
+        cadre(mx(124.6f), my(81.2f), mx(129.4f), my(85.6f), c, 1.f);
+        cadre(mx(126.6f), my(83.2f), mx(131.4f), my(87.6f), c, 1.f);
+    });
+    b_rond(P_START, 172, 84, 6.5f, bouton, [=](bool appui) {   // Menu : trois traits
+        for (int k = -1; k <= 1; k++)
+            ligne(mx(168.6f), my(84 + k * 2.2f), mx(175.4f), my(84 + k * 2.2f), appui ? NOIR : signe, 1.f, 1.f);
+    });
+    b_capsule(P_MISC1, 145, 95, 155, 100, 2.5f, bouton, sans_signe());   // Share (Xbox Series)
+    stick(P_STICK_G, 0, 74, 84, 22, 15, cuvette, chapeau, centre);
+    rond(mx(112), my(124), 22 * MS, cuvette, 1.f, true);
+    croix_pad(112, 124, 13, 13, 0x2D2D33, signe);
+    stick(P_STICK_D, 1, 190, 124, 22, 15, cuvette, chapeau, centre);
+    b_rond(P_NORD, 228, 66, 11, face, signe_texte(228, 66, L"Y", 0xE5CC2A, F_GRAS));
+    b_rond(P_EST, 250, 86, 11, face, signe_texte(250, 86, L"B", 0xD9413F, F_GRAS));
+    b_rond(P_SUD, 228, 106, 11, face, signe_texte(228, 106, L"A", 0x5DBB4F, F_GRAS));
+    b_rond(P_OUEST, 206, 86, 11, face, signe_texte(206, 86, L"X", 0x3C83D9, F_GRAS));
+}
+
+// ---- PlayStation : DualShock 4 sombre, DualSense clair ; pavé tactile, symboles de couleur, croix en quatre boutons
+const char* const PS_CORPS = "M 44 50 C 58 40 90 36 112 36 L 188 36 C 210 36 242 40 256 50 C 276 62 286 86 288 112 "
+                             "C 290 140 290 164 282 178 C 274 190 252 190 244 178 C 234 162 226 140 214 128 "
+                             "C 204 120 96 120 86 128 C 74 140 66 162 56 178 C 48 190 26 190 18 178 "
+                             "C 10 164 10 140 12 112 C 14 86 24 62 44 50 Z";
+const char* const PS_CENTRE = "M 98 80 L 202 80 C 212 96 214 112 210 124 C 194 118 106 118 90 124 C 86 112 88 96 98 80 Z";
+const char* const PS_PAVE = "M 106 38 L 194 38 L 190 78 C 170 81 130 81 110 78 Z";
+const char* const PS_L1 = "M 38 48 C 48 32 74 24 100 24 L 100 36 C 78 36 56 42 46 54 Z";
+const char* const PS_R1 = "M 262 48 C 252 32 226 24 200 24 L 200 36 C 222 36 244 42 254 54 Z";
+const char* const PS_L2 = "M 52 32 C 52 18 60 8 72 6 C 82 6 88 12 88 20 L 88 32 Z";
+const char* const PS_R2 = "M 248 32 C 248 18 240 8 228 6 C 218 6 212 12 212 20 L 212 32 Z";
+void manette_ps(bool ps5) {
+    const uint32_t corps = ps5 ? 0xE9E9EC : 0x232429, centre_c = ps5 ? 0x1F2025 : 0x1B1C20,
+                   pave = ps5 ? 0xF4F4F6 : 0x17181C, bouton = ps5 ? 0x26272C : 0x2F3036, signe = 0xD5D5DA,
+                   cuvette = ps5 ? 0x15161A : 0x0E0E10, chapeau = 0x35363C, centre = 0x2A2B30,
+                   creux = ps5 ? 0xD4D4D9 : 0x1B1C20, tranche = ps5 ? 0xDBDBDF : 0x2F3036, st = ps5 ? 0x3A3B40 : signe;
+    b_chemin(P_GACHETTE_G, PS_L2, 52, 6, 88, 32, tranche, signe_texte(70, 20, L"L2", st));
+    b_chemin(P_GACHETTE_D, PS_R2, 212, 6, 248, 32, tranche, signe_texte(230, 20, L"R2", st));
+    b_chemin(P_EPAULE_G, PS_L1, 38, 24, 100, 54, tranche, sans_signe());   // L1 et R1 : bandes du haut, sans nom
+    b_chemin(P_EPAULE_D, PS_R1, 200, 24, 262, 54, tranche, sans_signe());
+    remplir(PS_CORPS, corps);
+    remplir(PS_CENTRE, centre_c);
+    contour(PS_CORPS, ps5 ? 0x8E8E96 : 0x000000, 0.6f, 1.f);
+    b_chemin(P_PAVE, PS_PAVE, 106, 38, 194, 80, pave, sans_signe());   // pavé tactile (son clic)
+    if (ps5) contour(PS_PAVE, 0xBDBDC4, 1.f, 1.f);
+    b_capsule(P_BACK, 92, 42, 99, 58, 3, bouton, sans_signe());    // Share / Create
+    b_capsule(P_START, 201, 42, 208, 58, 3, bouton, sans_signe());  // Options
+    // croix : quatre boutons séparés
+    rond(mx(60), my(84), 24 * MS, creux, 1.f, true);
+    b_capsule(P_HAUT, 54, 65, 66, 77, 2.5f, bouton, signe_texte(60, 71, L"▲", signe));
+    b_capsule(P_BAS, 54, 91, 66, 103, 2.5f, bouton, signe_texte(60, 97, L"▼", signe));
+    b_capsule(P_GAUCHE, 41, 78, 53, 90, 2.5f, bouton, signe_texte(47, 84, L"◀", signe));
+    b_capsule(P_DROITE, 67, 78, 79, 90, 2.5f, bouton, signe_texte(73, 84, L"▶", signe));
+    // △ ○ ✕ □, dessinés (pas des caractères) et de leurs couleurs
+    rond(mx(240), my(84), 26 * MS, creux, 1.f, true);
+    b_rond(P_NORD, 240, 66, 10, bouton, [=](bool appui) {
+        const uint32_t c = appui ? NOIR : 0x3FC9A3;
+        const float s = 5.2f;
+        ligne(mx(240), my(66 - s), mx(240 + s), my(66 + s * 0.6f), c, 1.f, 1.6f);
+        ligne(mx(240 + s), my(66 + s * 0.6f), mx(240 - s), my(66 + s * 0.6f), c, 1.f, 1.6f);
+        ligne(mx(240 - s), my(66 + s * 0.6f), mx(240), my(66 - s), c, 1.f, 1.6f);
+    });
+    b_rond(P_EST, 258, 84, 10, bouton, [=](bool appui) { rond(mx(258), my(84), 5.f * MS, appui ? NOIR : 0xE5545F, 1.f, false, 1.6f); });
+    b_rond(P_SUD, 240, 102, 10, bouton, [=](bool appui) {
+        const uint32_t c = appui ? NOIR : 0x7DA6E8;
+        ligne(mx(236), my(98), mx(244), my(106), c, 1.f, 1.6f);
+        ligne(mx(236), my(106), mx(244), my(98), c, 1.f, 1.6f);
+    });
+    b_rond(P_OUEST, 222, 84, 10, bouton, [=](bool appui) {
+        cadre(mx(217.6f), my(79.6f), mx(226.4f), my(88.4f), appui ? NOIR : 0xE59BCB, 1.f, 1.6f);
+    });
+    stick(P_STICK_G, 0, 106, 116, 18, 13, cuvette, chapeau, centre);
+    stick(P_STICK_D, 1, 194, 116, 18, 13, cuvette, chapeau, centre);
+    b_rond(P_GUIDE, 150, 102, 6.5f, bouton, sans_signe());   // bouton PS (sans logo)
+    if (ps5) b_capsule(P_MISC1, 144, 112, 156, 117, 2.5f, bouton, sans_signe());   // micro
+}
+
+// ---- Joy-Con : gris ; en paire (verticaux, côte à côte) ou seul (à l'horizontale, le rail en haut)
+const uint32_t JC_CORPS = 0x8B8E94, JC_BOUTON = 0x2D2E32, JC_SIGNE = 0xE2E2E5, JC_CUVETTE = 0x1F2023, JC_CHAPEAU = 0x36373C,
+               JC_CENTRE = 0x2A2B2F, JC_RAIL = 0x5D6066, JC_TRANCHE = 0x3A3B40;
+const char* const JC_G = "M 146 28 L 120 28 C 98 28 82 44 82 66 L 82 150 C 82 172 98 188 120 188 L 146 188 Z";
+const char* const JC_D = "M 154 28 L 180 28 C 202 28 218 44 218 66 L 218 150 C 218 172 202 188 180 188 L 154 188 Z";
+void joycons_paire() {
+    b_capsule(P_GACHETTE_G, 98, 6, 132, 16, 4, JC_TRANCHE, signe_texte(115, 11, L"ZL", JC_SIGNE));
+    b_capsule(P_GACHETTE_D, 168, 6, 202, 16, 4, JC_TRANCHE, signe_texte(185, 11, L"ZR", JC_SIGNE));
+    b_capsule(P_EPAULE_G, 92, 18, 140, 27, 4, JC_TRANCHE, signe_texte(116, 22.5f, L"L", JC_SIGNE));
+    b_capsule(P_EPAULE_D, 160, 18, 208, 27, 4, JC_TRANCHE, signe_texte(184, 22.5f, L"R", JC_SIGNE));
+    remplir(JC_G, JC_CORPS);
+    remplir(JC_D, JC_CORPS);
+    rect(mx(143), my(32), mx(146), my(184), JC_RAIL, 1.f);
+    rect(mx(154), my(32), mx(157), my(184), JC_RAIL, 1.f);
+    contour(JC_G, 0x000000, 0.4f, 1.f);
+    contour(JC_D, 0x000000, 0.4f, 1.f);
+    // Joy-Con gauche : −, stick, quatre flèches, capture
+    b_capsule(P_BACK, 126, 38, 138, 43, 2, JC_BOUTON, sans_signe());
+    stick(P_STICK_G, 0, 114, 72, 17, 12, JC_CUVETTE, JC_CHAPEAU, JC_CENTRE);
+    b_rond(P_HAUT, 114, 104, 8, JC_BOUTON, signe_texte(114, 104, L"▲", JC_SIGNE));
+    b_rond(P_BAS, 114, 132, 8, JC_BOUTON, signe_texte(114, 132, L"▼", JC_SIGNE));
+    b_rond(P_GAUCHE, 100, 118, 8, JC_BOUTON, signe_texte(100, 118, L"◀", JC_SIGNE));
+    b_rond(P_DROITE, 128, 118, 8, JC_BOUTON, signe_texte(128, 118, L"▶", JC_SIGNE));
+    b_capsule(P_MISC1, 122, 156, 132, 166, 2, JC_BOUTON, sans_signe());
+    // Joy-Con droit : +, X A B Y, stick, accueil
+    b_capsule(P_START, 160, 38.5f, 172, 43.5f, 2, JC_BOUTON, [=](bool appui) {
+        arrondi(mx(163.5f), my(35), mx(168.5f), my(47), 1.5f * MS, appui ? VERT : JC_BOUTON, 1.f, true);
+    });
+    b_rond(P_NORD, 186, 58, 8, JC_BOUTON, signe_texte(186, 58, L"X", JC_SIGNE));
+    b_rond(P_EST, 200, 72, 8, JC_BOUTON, signe_texte(200, 72, L"A", JC_SIGNE));
+    b_rond(P_SUD, 186, 86, 8, JC_BOUTON, signe_texte(186, 86, L"B", JC_SIGNE));
+    b_rond(P_OUEST, 172, 72, 8, JC_BOUTON, signe_texte(172, 72, L"Y", JC_SIGNE));
+    stick(P_STICK_D, 1, 186, 120, 17, 12, JC_CUVETTE, JC_CHAPEAU, JC_CENTRE);
+    b_rond(P_GUIDE, 176, 158, 6, JC_BOUTON, [=](bool appui) {
+        rond(mx(176), my(158), 3.3f * MS, appui ? NOIR : JC_SIGNE, 0.85f, false, 1.f);
+    });
+}
+const char* const JC_SEUL = "M 20 76 L 280 76 L 280 116 C 280 142 262 158 236 158 L 64 158 C 38 158 20 142 20 116 Z";
+void joycon_seul(bool droit) {
+    rect(mx(24), my(70), mx(276), my(76), JC_RAIL, 1.f);   // rail, en haut
+    b_capsule(P_EPAULE_G, 70, 61, 112, 70, 3, JC_TRANCHE, signe_texte(91, 65.5f, L"SL", JC_SIGNE));
+    b_capsule(P_EPAULE_D, 188, 61, 230, 70, 3, JC_TRANCHE, signe_texte(209, 65.5f, L"SR", JC_SIGNE));
+    remplir(JC_SEUL, JC_CORPS);
+    contour(JC_SEUL, 0x000000, 0.4f, 1.f);
+    if (!droit) {   // Joy-Con gauche : − au bout, stick, losange de flèches, capture
+        b_capsule(P_START, 30, 104, 36, 124, 2, JC_BOUTON, sans_signe());
+        stick(P_STICK_G, 0, 96, 116, 18, 13, JC_CUVETTE, JC_CHAPEAU, JC_CENTRE);
+        b_capsule(P_MISC1, 252, 110, 264, 122, 2, JC_BOUTON, sans_signe());
+    } else {        // Joy-Con droit : accueil, stick, losange de lettres, + au bout
+        b_rond(P_GUIDE, 46, 116, 6, JC_BOUTON, [=](bool appui) {
+            rond(mx(46), my(116), 3.3f * MS, appui ? NOIR : JC_SIGNE, 0.85f, false, 1.f);
+        });
+        stick(P_STICK_G, 0, 104, 116, 18, 13, JC_CUVETTE, JC_CHAPEAU, JC_CENTRE);
+        b_capsule(P_START, 252, 113, 266, 119, 2, JC_BOUTON, [=](bool appui) {
+            arrondi(mx(256.5f), my(109), mx(261.5f), my(123), 1.5f * MS, appui ? VERT : JC_BOUTON, 1.f, true);
+        });
+    }
+    // losange : à l'horizontale, chaque bouton fait ce que sa place indique (lettres dehors, comme sur la console)
+    const float cx = 196, cy = 116, d = 16;
+    const struct { int e; float x, y; const wchar_t* lettre; float lx, ly; } b[4] = {
+        {P_NORD, cx, cy - d, L"X", cx, cy - d - 13}, {P_EST, cx + d, cy, L"A", cx + d + 14, cy},
+        {P_SUD, cx, cy + d, L"B", cx, cy + d + 13}, {P_OUEST, cx - d, cy, L"Y", cx - d - 14, cy}};
+    for (const auto& k : b) {
+        b_rond(k.e, k.x, k.y, 7.5f, JC_BOUTON, [=](bool appui) { rond(mx(k.x), my(k.y), 1.8f * MS, appui ? NOIR : JC_SIGNE, 1.f, true); });
+        texte(k.lettre, F_PETIT, mx(k.lx), my(k.ly) - 7, 0x2B2C30, 1.f, 0.f, 1);
+    }
+}
+
+// Dessin de la manette branchée (la première), la Pro de la Switch sans manette
+void dessin_manette() {
+    static const wchar_t* force = _wgetenv(L"LANCEUR_MANETTE");   // vérification : SDL_GamepadType à dessiner
+    const EtatManettes& e = manettes();
+    const int t = force ? _wtoi(force) : e.sdl && e.nb > 0 ? e.type : 7;
+    switch (t) {
+    case 0: case 1: case 2: case 3: manette_xbox(); break;
+    case 4: case 5: manette_ps(false); break;
+    case 6: manette_ps(true); break;
+    case 8: joycon_seul(false); break;
+    case 9: joycon_seul(true); break;
+    case 10: joycons_paire(); break;
+    default: manette_pro(); break;
+    }
+    etiquette();
+}
+
+// Nom d'un bouton de la Switch dans la liste et les messages : A, B … ZR, +, −, Stick L ●, Croix ↑ …
+std::wstring nom_bouton_switch(int i) {
+    static const wchar_t* const noms[10] = {L"A", L"B", L"X", L"Y", L"L", L"R", L"ZL", L"ZR", L"+", L"−"};
+    static const wchar_t* const croix[4] = {L" ↑", L" ↓", L" ←", L" →"};
+    if (i < 10) return noms[i];
+    if (i == K_LSTICK) return T("pad_clic_g");
+    if (i == K_RSTICK) return T("pad_clic_d");
+    return std::wstring(T("croix")) + croix[i - K_UP];
+}
+
+void page_manette() {
+    const EtatManettes& e = manettes();
+    if (e.sdl && e.nb > 0) {   // manette branchée : son nom (la première, et combien d'autres)
+        wchar_t b[256];
+        swprintf(b, 256, T("pad_branchee"), e.nom.c_str());
+        std::wstring s = b;
+        if (e.nb > 1) {
+            swprintf(b, 256, T("pad_autres"), e.nb - 1);
+            s += b;
+        }
+        texte(s, F_PETIT, PX0 + 24, PY0 + 56, VERT_PALE, 1.f, 0.f, 0, PX1 - PX0 - 48);
+    }
+    dessin_manette();
+    // liste : bouton de la Switch, puis l'entrée de la manette du joueur qui le fait (noms de sa famille de manettes)
+    const float y0 = PY0 + 268, pas = 22;
+    for (int i = 0; i < NB_PAD; i++) {
+        const float cx = i < 8 ? PX0 + 24 : PX0 + 274, y = y0 + (i % 8) * pas;
+        const bool attente = g.capture_pad == i;
+        const bool appui = (appuis() >> g.reglages.manette[i]) & 1;
+        if (i % 2 == 0) rect(cx - 6, y - 2, cx + 238, y + 20, VERT, 0.035f);
+        texte(nom_bouton_switch(i), F_GRAS, cx, y + 1, attente ? AMBRE : appui ? VERT : BLANC, 1.f, 0.f, 0, 76);
+        zone(D2D1::RectF(cx - 6, y - 2, cx + 78, y + 20), Z_PAD0 + i);   // le nom aussi : attendre l'entrée voulue
+        const float b0 = cx + 80, b1 = cx + 234;
+        rect(b0, y, b1, y + 19, appui ? VERT : NOIR, appui ? 0.3f : 0.6f);
+        cadre(b0, y, b1, y + 19, attente ? AMBRE : VERT, attente ? 1.f : survol(Z_PAD0 + i) ? 0.85f : 0.3f);
+        texte(L"‹", F_VALEUR, b0 + 9, y - 1, survol(Z_PADG0 + i) ? BLANC : VERT, 1.f, 0.f, 1);
+        texte(L"›", F_VALEUR, b1 - 9, y - 1, survol(Z_PADD0 + i) ? BLANC : VERT, 1.f, 0.f, 1);
+        zone(D2D1::RectF(b0, y, b0 + 18, y + 19), Z_PADG0 + i);
+        zone(D2D1::RectF(b1 - 18, y, b1, y + 19), Z_PADD0 + i);
+        zone(D2D1::RectF(b0 + 18, y, b1 - 18, y + 19), Z_PAD0 + i);
+        texte(attente ? L"…" : nom_entree(g.reglages.manette[i], e.famille), F_PETIT, (b0 + b1) / 2, y + 3,
+              attente ? AMBRE : appui ? BLANC : VERT_PALE, 1.f, 0.f, 1, b1 - b0 - 40);
+    }
+    // par défaut, et ce qu'il faut savoir ; pendant une attente : le bouton qui attend, et comment lui donner une entrée
+    // (appui sur la manette ou clic sur le dessin ; clic seulement sans manette)
+    bouton_contour(PX0 + 24, PY1 - 40, PX0 + 150, PY1 - 16, T("pad_defaut"), Z_PAD_DEFAUT);
+    const bool attente = g.capture_pad >= 0, branchee = e.sdl && e.nb > 0;
+    const char* msg = attente ? (branchee ? "pad_attente" : "pad_attente_clic")
+                      : !e.sdl ? "pad_sans_sdl" : e.nb == 0 ? "pad_aucune" : "pad_note";
+    wchar_t b[512];
+    swprintf(b, 512, T(msg), attente ? nom_bouton_switch(g.capture_pad).c_str() : L"");
+    texte_lignes(b, F_PETIT, PX0 + 164, PY1 - 44, PX1 - PX0 - 188, attente ? AMBRE : GRIS);
+}
+
 // Case d'une touche : un clic, puis la touche voulue (lanceur.cpp : Z_TOUCHE0 + action, g.capture, WM_KEYDOWN).
 void case_touche(float x0, float x1, float y, int action, const wchar_t* prefixe) {
     const int id = Z_TOUCHE0 + action;
@@ -769,6 +1355,11 @@ void case_touche(float x0, float x1, float y, int action, const wchar_t* prefixe
 
 void page_controles() {
     panneau(T("ctl_titre"));
+    onglets_controles();
+    if (g.onglet_manette) {
+        page_manette();
+        return;
+    }
     float y = PY0 + 54;
     // préréglage du clavier : WASD (QWERTY) ou ZQSD (AZERTY) ; « personnalisées » dès qu'une touche a été changée
     libelle(y, "ctl_disposition", nullptr);
@@ -813,7 +1404,9 @@ void page_controles() {
             for (size_t k = 0; k < L[i].actions.size(); k++)
                 case_touche(c1 + k * (lc + esp), c1 + k * (lc + esp) + lc, y, L[i].actions[k], sens[k]);
         }
-        texte(L[i].manette, F_CORPS, c2, y + 1, TEXTE, 1.f, 0.f, 0, PX1 - 24 - c2);
+        // bouton de la manette : réglé dans l'onglet Manette (A … − : une entrée ; sticks et croix : le texte fixe)
+        const std::wstring m = L[i].actions.size() == 1 ? nom_entree(g.reglages.manette[L[i].actions[0]], 0) : L[i].manette;
+        texte(m, F_CORPS, c2, y + 1, TEXTE, 1.f, 0.f, 0, PX1 - 24 - c2);
         y += pas;
     }
     texte_lignes(T(g.capture >= 0 ? "ctl_attente" : "ctl_note"), F_PETIT, c0, PY1 - 52, PX1 - PX0 - 48, g.capture >= 0 ? VERT : GRIS);
@@ -882,7 +1475,7 @@ void page_construction(float t) {
     if (c.finie) {
         if (c.annulee) texte(T("cons_annulee"), F_CORPS, PX0 + 24, ry, AMBRE);
         else if (c.echec) texte_lignes(std::wstring(T("cons_echec")) + c.erreur, F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, AMBRE);
-        else texte(T("cons_fini"), F_GRAS, PX0 + 24, ry, VERT);
+        else texte(T(c.tache == Tache::Deplacement ? "dep_cons_fini" : "cons_fini"), F_GRAS, PX0 + 24, ry, VERT);
     } else if (c.active && c.courante >= 0 && c.courante < (int)c.etapes.size() && c.etapes[c.courante] == "pipelines" &&
                c.info == L"jeu") {   // relevé des shaders créés par le jeu (preparer.py, releve_shaders)
         texte_lignes(T("cons_info_releve"), F_CORPS, PX0 + 24, ry, PX1 - PX0 - 48, VERT_PALE);
@@ -1029,12 +1622,12 @@ void dessin_image() {
     particules(t);
     titre(t);
     bouton_principal(t);
-    bascule_affichage();
-    menu();
+    menu();   // plein écran / fenêtré : page Graphismes (plus de bascule sur l'accueil depuis le 2026-11-12)
     bloc_copie();
     if (g.page == Page::Reglages) page_reglages();
     else if (g.page == Page::Controles) page_controles();
     else if (g.page == Page::Construction) page_construction(t);
+    else if (g.page == Page::Graphismes) page_graphismes();
     bandeau(t);
     barre_haut();
     cadre(0, 0, LARGEUR, HAUTEUR, VERT, 0.45f);
@@ -1069,6 +1662,8 @@ void dessin_liberer() {
     vider_cache();
     for (int i = 0; i < F_NB; i++) rel(g_fmt[i]), rel(g_ellipse[i]);
     rel(g_trame), rel(g_bm_titre), rel(g_bm_video), rel(g_fx_flou), rel(g_fx_couleur), rel(g_br);
+    for (auto& c : g_chemins) rel(c.second);   // dessins des manettes (onglet Manette)
+    g_chemins.clear();
     rel(g_dw), rel(g_cible), rel(g_dc), rel(g_dev), rel(g_fab), rel(g_chaine), rel(g_d3dctx), rel(g_d3d);
 }
 

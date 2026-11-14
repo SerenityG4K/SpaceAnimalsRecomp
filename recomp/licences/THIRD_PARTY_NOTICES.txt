@@ -8,12 +8,19 @@ SpaceAnimalsRecomp itself is licensed under the GNU General Public License v3.0 
 https://github.com/SerenityG4K/SpaceAnimalsRecomp). No file of the game is included in any package.
 
 The full package (SpaceAnimalsRecomp-<version>-windows.zip) also contains, in the "outils" folder, the unmodified
-binaries of the build tools below, so that the game can be built on a PC where nothing is installed. GCC and glslang
-are reduced to the files the build uses; the files kept are the original ones, unchanged. The update package
-(-update.zip) contains none of these binaries.
+binaries of the build tools below, so that the game can be built on a PC where nothing is installed, and SDL3, which
+the game and the launcher use to read PlayStation, Switch Pro and Joy-Con controllers. GCC and glslang are reduced
+to the files the build uses; the files kept are the original ones, unchanged. The update package (-update.zip)
+contains none of these binaries (the launcher downloads a missing one from the address given below).
 
-Corresponding source: every component below is distributed as unmodified upstream binaries. Its source code is
-available, for the exact version shipped, at the addresses given below (GNU GPL v3 section 6(d), LGPL section 4).
+Since version 1.1.0 the "outils" folder also contains two upscaling libraries that the game can load at run time:
+AMD FSR (section 5, MIT license) and NVIDIA DLSS (section 6). NVIDIA DLSS is proprietary software: it is NOT covered
+by the GNU GPL, it comes under NVIDIA's own license, and the paragraph on corresponding source below does not apply
+to it. The game runs without either of them.
+
+Corresponding source: every component of sections 1 to 4 is distributed as unmodified upstream binaries. Its source
+code is available, for the exact version shipped, at the addresses given below (GNU GPL v3 section 6(d), LGPL
+section 4).
 If one of these addresses stops working, open an issue on https://github.com/SerenityG4K/SpaceAnimalsRecomp/issues :
 the corresponding source will be provided.
 
@@ -21,7 +28,7 @@ The license texts referred to below are in the LICENCES folder:
   GPL-3.0.txt, GPL-2.0.txt, LGPL-3.0.txt, LGPL-2.1.txt, GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt,
   MinGW-w64-COPYING.txt, MinGW-w64-runtime-COPYING.txt, MinGW-w64-headers-crt-COPYING.txt,
   MinGW-w64-winpthreads-COPYING.txt, isl-LICENSE.txt, zlib-LICENSE.txt, zstd-LICENSE.txt, glslang-LICENSE.txt,
-  LLVM-LICENSE.txt, z3-LICENSE.txt
+  LLVM-LICENSE.txt, z3-LICENSE.txt, SDL3-LICENSE.txt, AMD-FidelityFX-SDK-LICENSE.txt, NVIDIA-DLSS-SDK-LICENSE.txt
 
 
 1. GCC and Clang toolchain: WinLibs build "gcc-16.2.0-llvm-23.1.3-mingw-w64ucrt-14.0.0-r3" (outils/gcc)
@@ -134,8 +141,50 @@ Python modules (outils/python/Lib/site-packages), unmodified wheels from PyPI:
                     source: https://pypi.org/project/capstone/5.0.7/#files
 
 
-4. In the source code of SpaceAnimalsRecomp
+4. SDL 3.4.20 (outils/sdl3/SDL3.dll)
+------------------------------------
+
+Binary distribution by the SDL project (Simple DirectMedia Layer):
+  https://github.com/libsdl-org/SDL/releases/download/release-3.4.20/SDL3-3.4.20-win32-x64.zip
+  SHA-256 368bed8b24e44ad9ea372990814f2343fcfb9e468abb7f8f4a3bc146c7304752
+license: zlib (SDL3-LICENSE.txt; also outils/sdl3/LICENSE.txt)
+source: https://github.com/libsdl-org/SDL/archive/refs/tags/release-3.4.20.tar.gz
+
+
+5. AMD FSR, FidelityFX SDK 2.4.0 (outils/fsr)
+---------------------------------------------
+
+amd_fidelityfx_loader_vk.dll and amd_fidelityfx_upscaler_vk.dll (FSR 4.1.2 and FSR 3.1.6 for Vulkan): the signed
+libraries published by AMD, unmodified.
+  https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK (tag v2.4.0, Kits/FidelityFX/signedbin)
+  SHA-256 38a56a01fb3565c0757d9f5c1e4e69de4b65e5f2e5769b323b200dc1f142bab9  amd_fidelityfx_loader_vk.dll
+  SHA-256 4a7e895af6e0b615d40a84d59eb8c2b1054ad91cdd0c739567940270d51bdab7  amd_fidelityfx_upscaler_vk.dll
+license: MIT, Copyright (C) Advanced Micro Devices, Inc. (AMD-FidelityFX-SDK-LICENSE.txt: the SDK's license file, where
+these two libraries are in the MIT-licensed list)
+The game loads them when FSR is enabled in recomp.ini (recomp/runtime/os/fsr.cpp).
+
+
+6. NVIDIA DLSS, DLSS SDK 310.9.16 (outils/dlss/nvngx_dlss.dll)
+--------------------------------------------------------------
+
+nvngx_dlss.dll: the library published by NVIDIA for applications that use DLSS, unmodified.
+  https://github.com/NVIDIA/DLSS (tag v310.9.16, lib/Windows_x86_64/rel/nvngx_dlss.dll)
+  SHA-256 d00b5b0ab29c3ca101b70c3a5ecb3a01b7ef33766a3383a28a18623083e6123e
+license: proprietary, Copyright (C) NVIDIA Corporation. All rights reserved. It is distributed with
+SpaceAnimalsRecomp under the NVIDIA RTX SDKs license (NVIDIA-DLSS-SDK-LICENSE.txt), not under the GNU GPL: you may
+use it with this application, and you may not modify it, reverse engineer it or redistribute it on its own. No source
+code is available for it.
+This application uses NVIDIA DLSS. NVIDIA, GeForce RTX and DLSS are trademarks of NVIDIA Corporation.
+The NVIDIA driver loads it when DLSS is enabled in recomp.ini, on NVIDIA RTX cards only (recomp/runtime/os/dlss.cpp).
+
+
+7. In the source code of SpaceAnimalsRecomp
 -------------------------------------------
 
 recomp/runtime/third_party: Vulkan and Vulkan Video headers by the Khronos Group, Apache-2.0 (license notice at the
 top of each header).
+
+recomp/runtime/third_party/ffx: headers of the AMD FSR API (AMD FidelityFX SDK v2.4.0,
+https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK), unmodified, MIT license (license notice at the top of
+each header; full text of the SDK's license file: AMD-FidelityFX-SDK-LICENSE.txt, where these headers are in the
+MIT-licensed list). The libraries themselves are in section 5.

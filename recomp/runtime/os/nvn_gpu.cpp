@@ -146,9 +146,21 @@ void gpu_thread() {
         }
         uint64_t t0 = now_us();
         run_item(it);
-        g_t_busy += now_us() - t0;
+        const uint64_t dt = now_us() - t0;
+        g_t_busy += dt;
+        static std::atomic<uint64_t> par_type[7], nb_type[7];   // RECOMP_PERF : temps occupé par type d'élément
+        if (it.k >= 0 && it.k < 7) par_type[it.k] += dt, nb_type[it.k]++;
         if (it.k == Item::Present && getenv("RECOMP_PERF") && it.b % 120 == 0) {
             HLOG("perf", "nvn_execute: %.2f ms/frame", g_exec_ns.exchange(0) / 120e6);
+            HLOG("perf", "GPU thread items (ms/frame, count): commands %.2f (%llu) present %.2f (%llu) fence %.2f (%llu) "
+                         "wait %.2f (%llu) finish %.2f (%llu) pools %.2f textures %.2f",
+                 par_type[0].exchange(0) / 120e3, (unsigned long long)nb_type[0].exchange(0),
+                 par_type[1].exchange(0) / 120e3, (unsigned long long)nb_type[1].exchange(0),
+                 par_type[2].exchange(0) / 120e3, (unsigned long long)nb_type[2].exchange(0),
+                 par_type[3].exchange(0) / 120e3, (unsigned long long)nb_type[3].exchange(0),
+                 par_type[4].exchange(0) / 120e3, (unsigned long long)nb_type[4].exchange(0),
+                 par_type[5].exchange(0) / 120e3, par_type[6].exchange(0) / 120e3);
+            nb_type[5] = nb_type[6] = 0;
             perf_report_ops();
             HLOG("perf", "GPU thread: busy %.2f ms/frame (including flushes %.2f, %llu), syncs awaited %.2f ms/frame (%llu), acquire %.2f ms/frame",
                  g_t_busy.exchange(0) / 120e3, g_t_flush.exchange(0) / 120e3, (unsigned long long)g_n_flush.exchange(0),
@@ -211,6 +223,13 @@ void gpu_submit(std::shared_ptr<std::vector<Op>> ops) {
     it.k = Item::Cmds;
     it.ops = std::move(ops);
     push(std::move(it));
+    // RECOMP_GPU_SYNC=1 (diagnostic) : le jeu attend que le fil GPU ait exécuté la liste, comme avant le fil GPU.
+    // Un défaut d'image qui disparaît ainsi vient d'une lecture de la mémoire du jeu faite trop tard par le fil GPU.
+    static const bool synchrone = getenv("RECOMP_GPU_SYNC") != nullptr;
+    if (synchrone) {
+        std::unique_lock<std::mutex> lk(g_q_lk);
+        g_idle_cv.wait(lk, [] { return g_q.empty() && !g_busy; });
+    }
 }
 void gpu_fence(uint64_t sync) {
     {

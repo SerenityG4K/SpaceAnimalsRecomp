@@ -205,7 +205,19 @@ class Emitter:
             return self.setr(i.dst, f"({self.p(i.psrc[0])} ? {self.u(s[0])} : {self.u(s[1])})") if not (s[0].neg or s[0].abs or s[1].neg or s[1].abs) \
                 else self.setf(i.dst, f"({self.p(i.psrc[0])} ? {self.f(s[0])} : {self.f(s[1])})")
         if n == "mufu":
-            x = self.f(s[0])
+            # Demi-précision (f16) : la source est la moitié du mot choisie par sub, le résultat un f16 dans la
+            # moitié basse. Jusqu'au 2026-11-13 le drapeau était ignoré : le mot entier était lu comme un f32 (un seul
+            # shader traduit concerné, d38474b0c297f4ed : quatre inverses d'un flou radial ; les autres cas sont dans
+            # des shaders de calcul pas encore traduits).
+            f16 = bool(m.get("f16"))
+            if f16:
+                x = f"unpackHalf2x16({self.u(s[0])}).{'y' if m.get('sub', 0) & 1 else 'x'}"
+                if getattr(s[0], "abs", False):
+                    x = f"abs({x})"
+                if getattr(s[0], "neg", False):
+                    x = f"(-{x})"
+            else:
+                x = self.f(s[0])
             op = m["op"]
             # MUFU.SIN/COS (Volta et après, sans RRO) prennent l'angle en TOURS : le compilateur multiplie
             # d'abord par 1/(2π) (FMUL.RZ 0.15915494). Le matériel prend la partie fractionnaire.
@@ -215,6 +227,8 @@ class Emitter:
                  "tanh": f"tanh({x})"}.get(op)
             if e is None:
                 raise Unsupported(f"mufu {op}")
+            if f16:
+                return self.setr(i.dst, f"(packHalf2x16(vec2({e}, 0.0)) & 0xffffu)")
             return self.setf(i.dst, e)
         if n == "frnd":
             x = self.f(s[0])
@@ -243,11 +257,15 @@ class Emitter:
             st, dt = m.get("st", 2), m.get("dt", 2)
             v = self.u(s[0])
             if n == "i2f" and st != 2:
-                # 8 / 16 bits
+                # 8 / 16 bits : l'octet (0 à 3) ou la moitié (0 ou 1) du mot source est choisi par sub, comme pour
+                # f2i et f2f. Jusqu'au 2026-11-13, toujours l'octet 0 : les décalcomanies projetées au sol lisaient
+                # leur couche d'atlas dans l'octet des drapeaux au lieu de l'octet 2 (taches bleues de Corneria :
+                # une carte de normales affichée comme couleur). 252 instructions du jeu ont un sub non nul.
                 bitsz = {0: 8, 1: 16}.get(st)
                 if bitsz is None:
                     raise Unsupported("i2f 64 bits")
-                v = f"bitfieldExtract({'int' if m['signed'] else 'uint'}({v}), 0, {bitsz})"
+                dec = (m.get("sub", 0) & (3 if st == 0 else 1)) * bitsz
+                v = f"bitfieldExtract({'int' if m['signed'] else 'uint'}({v}), {dec}, {bitsz})"
                 conv = f"float({v})"
             else:
                 conv = f"float(int({v}))" if m["signed"] else f"float({v})"

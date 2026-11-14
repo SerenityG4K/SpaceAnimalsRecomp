@@ -1926,6 +1926,20 @@ allocated). It was the PC's commit (RAM + page file) that was full, not a render
   Python, the same syntax tree once strings are emptied. Neither `cpu.h`, nor `simd.h`, nor the text emitted by
   `a64/codegen.py` was touched (they would make the game recompile).
 
+**Bug report anonymization, second pass (2026-11-12, issue #5; not published).** Nakata2021's report, public on GitHub,
+showed the path of the player's game copy in `lanceur.log` (the `--copie "…"` argument of `preparer.py`): only the
+install folder and the Windows profile were replaced. Checking it, a second leak: `lanceur.ini` (written in UTF-16 by
+`WritePrivateProfileStringW`) was read as UTF-8, so its interleaved NUL characters kept every pattern from matching,
+the `copie` key included. `rapport.py` now decodes UTF-16 and UTF-8 BOMs, replaces the copy's path (from
+`lanceur.ini` and `RECOMP_NUP`, slashes either way), any absolute path ending in `.nup` (old copies in the game's
+"copy found: … (the manifest says …)" line) and the copy's file name with `<copy>`, and any other absolute path with
+`<drive>:\<path>` plus its extension, except under Windows, Program Files and ProgramData; `report.txt` gains a "Game
+copy" line (drive, same drive as the install or not, spaces, non-ASCII characters, OneDrive, size; no path). New quick
+check `rapport` (`verif/essai_rapport.py`): a fake install in a folder with spaces and parentheses, a UTF-16
+`lanceur.ini`, logs full of traps, a fake profile, user and PC name; none of the 13 private names may remain in the zip
+and 10 pieces must stay (Windows and ProgramData paths, the tokens). It fails on 1.0.3's `rapport.py` (20 failures)
+and passes now; on the user's real logs, applied in memory, nothing private and no unmasked absolute path remains.
+
 ## Release procedure: additions for 1.0.3
 
 To do on top of the procedure in the section "Checks before each release":
@@ -2771,3 +2785,915 @@ without any problem. At the user's request, the alert now only comes below 10 GB
 log (`host_main.cpp`, "available commit … TOO LOW") follows the same threshold. Thinner margin than before for the
 spikes of the driver's compiler (up to 2 GB, section "In-game memory spikes"): if the game stops for lack of memory,
 the launcher says so (code 4) as before.
+
+## DLSS, 3D render scale and speed measurements (night of 2026-11-12)
+
+### What the game does with the console's DLSS
+
+The game calls NVN's DLSS API (traced with `RECOMP_DLSS_TRACE=1`): `nvnDlssNetworkBuilder*` (method 0, preset 5,
+flags 0x4a, at most 3 evaluations), `nvnDlssNetworkInitialize`, then every frame `nvnDlssParameters*` (color, depth,
+motion vectors, output, mask, subrectangles, jitter, motion-vector scale: (−480, 270) at 960×540, i.e.
+(−0.5 × width, +0.5 × height)) and `nvnCommandBufferEvaluateDlss`. The engine only uses it at its console scale (0.5),
+as anti-aliasing at the internal resolution (the output has the input's size).
+
+At 0.5 the engine also runs a compute shader (059b307b6448e8a1, 128 threads) made of the console's tensor-core matrix
+instructions, with no Vulkan equivalent: this is why "Like the console" gave a black 3D scene since 1.0.0.
+`nvnCommandBufferEvaluateDlss` now copies the input into the output (enlarged if needed), which is not enough without
+that shader.
+
+### 3D render scale (render_scale) instead of "Like the console"
+
+From 0.67 to 1.0 the engine renders smaller then enlarges with its temporal anti-aliasing (`taa_resolve`, fragment
+7d70390948abb483): the picture is correct. (Corrected in the afternoon: `taa_resolve` runs at the render size and
+`upsample.frag` enlarges bilinearly; 0.67 is just above the scale where the console's DLSS takes over. See "DLSS super
+resolution, the engine's upscale paths, camera cuts" below.) Hence `render_scale` (100, 85, 75 or 67 %) in recomp.ini
+and in the launcher ("100% (native)", 85%, 75%, 67%), injected into `render.resolution_scale(_console)` with
+`render.dynres_enabled = false`. `native_resolution = false` (the old "Like the console") means 67 % when
+`render_scale` is missing. Test variable: `RECOMP_RENDER_SCALE`.
+Measured at 75 % (1440p, 120 Hz, same run): GPU-bound scenes go from 80-88 to 99-105 fps (+17 to 30 %);
+CPU-bound sequences do not move.
+
+The engine's dynamic resolution (`render.dynres_*`, bounded to 67-100 %): tried, it does not kick in here (internal
+size and UV bounds of `taa_resolve` always full, `RECOMP_DLSS_PROBE` probe). It probably depends on the game's GPU
+time measurements, which the recomp does not provide: a lead for later. Along the way, a `RECOMP_CVARS` entry now
+replaces the recomp's entry of the same name (`svc_fs.cpp`) instead of making a duplicated key, of which we do not
+know which one the engine keeps.
+
+### Where to plug a real DLSS (NVIDIA SDK not downloaded)
+
+The `taa_resolve` pass (fragment 7d70390948abb483) has exactly DLSS's inputs:
+
+| Input | Where in the pass |
+|---|---|
+| depth | texture whose handle is at +0x70 of bank 2 (R channel, nearest of 5 taps) |
+| current color (jittered) | handle at +0x78 (RGB) |
+| history | handle at +0x80 |
+| motion vectors | handle at +0x88 (RG, NDC units: UV = (0.5·x, −0.5·y)) |
+| jitter | bank 6, words 10 and 11 (UV units; y with the opposite sign) |
+| input pixel size, UV bounds | bank 6, words 2-3 and 4-5 |
+| outputs | target 0 (resolved color), target 1 (next history) |
+
+Probe `RECOMP_DLSS_PROBE=1` (`dlss_sonde`, one "dlss" line every 60 frames, rendering unchanged); reading of
+2026-11-12 at native 1440p: depth 2560×1440 R32F, color and history RGBA16 UNORM (VkFormat 91; first written down
+here as RGBA16F, wrongly), motion vectors RG16 SNORM, target 0 in NVN format 56 (RGBA8 sRGB), target 1 (next
+history) RGBA16 UNORM; pixel size 1/2560 and 1/1440, jitter 7·10⁻⁵ to 1.8·10⁻⁴ in UV, i.e. 0.2 to 0.5 pixel. For
+DLSS, the console's motion-vector scale is authoritative: (−0.5 × width, +0.5 × height).
+
+The real DLSS was then plugged there (next section). Two corrections to the table above came out of reading the
+translated shader: the color and the history are YCoCg, and the "depth" is not the hardware depth.
+
+### Real DLSS through NVIDIA NGX (2026-11-12, morning; not published)
+
+With the user's approval, the official DLSS SDK 310.9.16 was downloaded from github.com/NVIDIA/DLSS (each file checked
+against the git hashes of the tag) into `sdk/DLSS-310.9.16/`, outside `recomp/`: none of its files enters the
+repository or the package. `nvngx_dlss.dll` (signed by NVIDIA) is not provided with the recomp either.
+
+**Calling NGX.** The SDK reaches NGX through a static library built for MSVC (`nvsdk_ngx_s.lib`), which our
+MinGW / Clang build cannot link. The NGX core belongs to the NVIDIA driver (`_nvngx.dll` in the driver store, folder
+in the registry, `HKLM\SYSTEM\CurrentControlSet\Services\nvlddmkm\NGXCore`, value `NGXPath`) and exports the Vulkan
+entry points (`NVSDK_NGX_VULKAN_*`): `dlss.cpp` loads it and calls them directly; the parameter table is a C++ object
+of the driver, called through its virtual table (MSVC layout). The NGX structures are declared again in `dlss.cpp`
+(no SDK header in the recomp). ⚠ The argument order of the core's `Init_ProjectID_Ext` and the virtual table slots
+were found by disassembling the SDK's static library, which the SDK license forbids (section 4.a): see "License"
+below.
+
+Standalone test first (`essai_ngx.cpp`, scratchpad, not in the repository; RTX 5070 Ti): NGX initialization and DLSS
+availability fine; device extensions asked by NGX: `VK_NVX_binary_import`, `VK_NVX_image_view_handle`,
+`VK_KHR_buffer_device_address`, `VK_KHR_push_descriptor` (no instance extension). GPU time of one evaluation, DLAA
+2560×1440: model K 0.83 ms, M 2.44 ms, L 3.18 ms; K in Quality mode 1707×960 → 2560×1440: 0.75 ms. A uniform input
+comes out unchanged. A few early runs crashed after `ReleaseFeature`, while destroying the parameter tables or
+shutting NGX down (not reproduced later): the game never does either (the process exit cleans up).
+
+**What taa_resolve really reads and writes** (translated shader, `shader_cache/7d70390948abb483.frag.glsl`):
+- color (+0x78) and history (+0x80): (Co + 0.5, Y, Cg + 0.5) in YCoCg, on an RGB already compressed: x / (1 + x)
+  when bit 0 of bank 6 word 14 is set, otherwise square root. Target 1 receives the new history in the same layout;
+  target 0 (RGBA8 sRGB) receives the decoded linear color: x / (1 − x), or x²;
+- "depth" (+0x70, R32F) is the linear depth of the ambient occlusion pass (`ssao_sao_z_input`; taa_resolve keeps the
+  nearest of 5 taps above word 19, 1.0001), useless for DLSS. The hardware depth is the D32F_S8 attachment of the
+  prepass (`shader_graph_default.prepass`), which also writes the motion vectors (RG16 SNORM, its target 1);
+- jitter: the current color is read at uv + (w10, −w11), in UV of the input textures; motion vectors are not
+  jittered (the history is read at uv − (0.5 x, −0.5 y)).
+
+**Integration** (`vk_render.cpp`, `dlss_taa`, called by `draw` at the taa_resolve draw):
+1. pre-pass (`dlss_avant.comp`): YCoCg → RGB (still compressed), motion vectors × (−0.5 × width, +0.5 × height),
+   in pixels (RG16F);
+2. DLSS: that color, the hardware depth (depth attachment of the draw that wrote the motion vectors, else the last
+   D32F depth of the same size; inverted, near = 1), the motion vectors (render resolution), jitter in pixels
+   (w10 × width, −w11 × height of the input textures), reset after a pause of more than 4 frames; output RGBA16F at
+   the targets' size. DLAA when the render size equals the output size, otherwise Quality, Balanced, Performance or
+   Ultra Performance by the size ratio (`render_scale`);
+3. post-pass (`dlss_apres.comp`): target 1 = history in the engine's YCoCg layout, and the linear color, blitted
+   into target 0 (sRGB format: no storage writes).
+The SPIR-V of the passes is in `dlss_spirv.h` (`runtime/os/dlss_spirv.py`, glslang). Formats, sizes or depth not as
+expected, or NGX refusal: the original draw runs, logged once per reason ("dlss"); three failed evaluations in a row
+switch DLSS off for the session. The creation of the DLSS feature (a few hundred ms) is out of the game's clock
+(`rt_stall_begin`).
+
+Settings (recomp.ini, appended to existing files): `dlss = off | dlaa | quality | balanced | performance |
+ultra_performance` and `dlss_model = dlss4 | dlss45` (models K and M). In the four super resolution modes the 3D
+render scale follows the mode (66.67, 58, 50, 33.33 %) instead of `render_scale`, as long as the NGX core and
+`nvngx_dlss.dll` are there (`dlss::echelle_dlss`, read by `recomp_cvars` before Vulkan exists). Below 67 % the engine
+used to switch to the console's DLSS network (black 3D): the engine has a `render.dlss_allowed` variable (found in
+the strings of main, with `render.taa_allowed`, `render.dlss_preset`, `render.upscale_mip_bias_override_scale`),
+injected as `false` below 66.5 % so that it keeps its TAA path, which our DLSS replaces — to be checked in game.
+(Checked in the afternoon: not enough, 50 % has a second console path; see the next section.)
+Launcher: new "GRAPHICS" page (resolution, frame rate, display mode, DLSS mode, DLSS model, 3D rendering; the
+latter greyed out with the mode's scale when a DLSS mode sets it), first entry of the left menu; the full screen /
+windowed toggle of the home screen moved there; the DLSS help line says when `nvngx_dlss.dll` is missing next to the
+game.
+`nvngx_dlss.dll` is looked for in `RECOMP_DLSS_DIR`, next to recomp_main.exe, then in its `dlss` folder; NGX's own
+files go to the `ngx` folder next to the executable. Test variables: `RECOMP_DLSS`, `RECOMP_DLSS_MODEL`, `RECOMP_DLSS_DIR`,
+`RECOMP_DLSS_PRESET=<letter>`, `RECOMP_DLSS_LOG=1` (NGX log in the recomp log), `RECOMP_DLSS_JITTER_FLIP` and
+`RECOMP_DLSS_MV_FLIP` (1 flips x, 2 flips y).
+
+**License (decision left to the user).** NVIDIA RTX SDKs license of the SDK: 4.a forbids reverse engineering,
+decompiling or disassembling any part of the SDK (done here on the static library, see above); 4.e forbids using the
+SDK in a way that makes it subject to an open source license; 1.c and 2 allow distributing its files inside an
+application, under conditions. Ways out: an MSVC-built bridge linking the official static library as intended (needs
+Visual Studio Build Tools), and `nvngx_dlss.dll` fetched by the player from NVIDIA rather than shipped with a GPL-3.0
+package.
+
+### DLSS super resolution, the engine's upscale paths, camera cuts (2026-11-12, afternoon; not published)
+
+The user watched the morning's test windows and saw three defects: black 3D, blurry areas and ghost frames. Causes
+and fixes:
+
+**Passes of a frame** (`RECOMP_VK_DEBUG=3600`, opening cinematic, summarized by a scratchpad script):
+- native: scene, bloom, `fxaa_luma.frag` (tone mapping, YCoCg output in RGBA16), `taa_resolve`, the interface
+  (`vui*`), `backbuffer.frag`;
+- below 100 %: the same passes at the render size, then `upsample.frag` (fragment 45f8409ea692850d: one bilinear tap
+  of the TAA output, UV × bank 6 words 8-9; bit 0x80 of word 10: the shader encodes sRGB itself) into the screen-size
+  target, then the interface. This bilinear enlargement is what made the morning's Balanced test blurry: our DLSS
+  only anti-aliased at 58 % and the engine enlarged afterwards;
+- `render.dlss_allowed` (true by default; "Allows use of DLSS (Currently Nintendo only)") from a ratio of 1.5 (scale
+  ≤ 0.6667): no `fxaa_luma` nor `taa_resolve` but `present.frag`, `dlss_velocity.frag` (RG16F + R8 bias mask),
+  `nvnCommandBufferEvaluateDlss` (our stub copies), `upsample.frag` into a render-size target, then a compute shader
+  (48e14554faa3dae5) missing from the cache: black 3D. 0.67 (the night's lowest `render_scale`) is just above the
+  threshold, 0.6667 (DLSS Quality) just below;
+- `render.ndsr_allowed` (true by default; "Allows use of NDSR (Nintendo only)") at 0.5: `upsample.frag` writes a
+  render-size RGBA8 image and the NDSR compute shader (059b307b6448e8a1, tensor-core instructions) enlarges it:
+  black 3D (the "Like the console" setting of 1.0.x, and the morning's Performance test).
+
+Both variables are now always `false` (`recomp_cvars`, `svc_fs.cpp`): at any scale the engine runs `taa_resolve`
+then `upsample.frag`. Checked: at 50 % without DLSS the 3D scene now shows (enlarged bilinearly), where it was black.
+
+**Super resolution** (`vk_render.cpp`): `dlss_agrandir`, called at each `upsample.frag` draw, writes down the size of
+its target and of its source. When `taa_resolve`'s targets have the size of that source, `dlss_taa` asks DLSS for an
+output of the upsample target's size (Quality, Balanced, Performance or Ultra Performance by the ratio), keeps the
+history in a separate image, blits the DLSS output down (linear filter) into `taa_resolve`'s target 0 for whoever
+reads it, and `dlss_agrandir` replaces the `upsample.frag` draw by a copy of the full-size output (refused, and logged
+once, if the target is not RGBA8 sRGB or the shader encodes sRGB itself). The first 3D frame still goes through DLAA
+at the render size (the upsample target is not known yet), hence two creations in the log. Checked at 1440p (RTX 5070
+Ti, model K), sharpness of the opening cinematic's frame 3601 (variance of the Laplacian of the luminance, 80 %
+centre; same frame in every run): native TAA 19.1; Quality 1707×960 → 2560×1440 20.2; Performance 1280×720 → 2560×1440
+20.5; Ultra Performance 853×480 → 2560×1440 16.9; the morning's Balanced (DLAA at 58 % then bilinear) 11.4; 50 %
+without DLSS (bilinear) 10.0. Every mode holds 60 fps (average interval 16.8 ms over the run, like native TAA).
+
+**Camera cuts.** The game's TAA needs no reset at a cut: it clamps its history to the neighbourhood of the current
+frame. DLSS does need one, and the morning's code only reset after a pause of the 3D rendering. Bank 6 word 13 of
+`taa_resolve` is the weight of the current frame in its blend (constant 0.0625): not a cut signal. The camera is:
+`dlss_camera` reads bank 7 of the prepass fragment (f14dbbfacf9715f3), at the first draw of the motion-vector pass of
+the frame: the view-projection matrix (words 32-47, column-major; the vertex shader reads the same), the one the game
+gives for the previous frame (words 96-111), and word 434, by which the prepass multiplies its motion vectors. Over
+7,048 frames of the opening cinematic (`RECOMP_DLSS_PROBE=2`, scratchpad script `cam_coupes.py`), word 434 is 0
+exactly at the 13 cuts and 1 everywhere else, and at those frames only the game's "previous" matrix stops being the
+previous frame's (bit-identical otherwise). So at a cut the motion vectors are zero, DLSS took the new shot for a
+still one and kept the previous shot in its history: the ghost frames. `dlss_coupe_camera` now resets DLSS when word
+434 is 0 or the game's previous matrix differs from ours (12 cuts detected in each later run). Checked in split screen
+at the cuts, without (`RECOMP_DLSS_NO_CUT_RESET=1`) and with the reset: without it, the first frame of the cut to
+General Pepper's hologram still shows red and green patches of the previous shot (Fox, the hologram table) on the DLSS
+half; with it, the DLSS half is as clean as the TAA half. Rotation and jump of the camera centre are logged too, but
+neither would do as a criterion: at the 13 cuts the rotation goes from 0 to 173° and the jump from 0 to 56,600 units
+(one cut keeps the camera where it was), while the first frame after a gap in the 3D rendering jumps by 14 units
+without being a cut.
+
+**Area 6: frozen picture, then the missing crosshair** (user's report of 14:20, DLSS 4.5 Quality at 120 Hz; reproduced
+from a copy of their save, right after Macbeth). At the start of the Area 6 mission the game renders a second, small
+3D view (306×265: the portrait of the dialogue box, with its own prepass, depth pyramid and `taa_resolve`) besides the
+scene. With a single DLSS feature, `dlss_taa` recreated it at each change of view, twice per frame, and released the
+old feature and the resized intermediate images after a `vkDeviceWaitIdle`, while the command buffer being recorded
+still held the other view's evaluation: 17 ms later, `VK_ERROR_DEVICE_LOST`; the game went on (sound, rumble) but
+nothing more was drawn. Fixes: (1) DLSS takes only the main view, the largest `taa_resolve` target of the last 300
+frames; a view under half its area keeps the game's anti-aliasing (logged once, "smaller secondary view"); in super
+resolution DLSS waits for the scene's first `upsample.frag` instead of creating a DLAA feature replaced at once (one
+creation per run instead of two), and a small view's own upscale cannot overwrite the scene's; (2) nothing is released
+while recorded commands may still use it: replaced NGX features (`dlss::menage`) and images (`g_dl.morts`) are
+released at the start of a recording, once the GPU has finished the submission that could read them (the rule of
+`drop_images`); (3) one camera per view (keyed by its motion-vector image), so that the portrait's cuts do not reset
+the scene's DLSS. Checked on the same save, 150 s each, DLSS 4.5 Quality and DLAA at 120 Hz: one creation, no lost
+device.
+
+The user then saw in the test window that the Arwing's crosshair was gone in super resolution (it was there in DLAA):
+the game draws it into `taa_resolve`'s target after it and before `upsample.frag`, and the DLSS output, computed at
+`taa_resolve`, replaced that upscale. `dlss_taa` now copies target 0 as it leaves it (`g_dl.base`); at
+`upsample.frag`, `dlss_composer.comp` compares the game's target with that copy (bilinear reads, sRGB decoded): where
+they differ, the game's bilinear upscale is taken, as `upsample.frag` would; elsewhere the DLSS output stays untouched
+(both reads are bit-identical there). Checked on the same save in Quality: crosshair and lock-on circle back, sharp
+scene around them.
+
+`dlss_spirv.py` moved from `recomp/shaders/` to `recomp/runtime/os/` (exported with the runtime, `.py` added for that
+folder in `depot.py` and `paquet.py`): every change to a script of `recomp/shaders/` made the build redo its "shaders"
+step (extraction and translation of the 2,388 game shaders) at each player's update; a `.py` of `runtime/os/` counts
+in no step signature (`preparer.py`, `DEPENDANCES`).
+
+**Test tools.** `RECOMP_DLSS_SPLIT=1`: split screen on the same frame, the game's TAA on the left (its original draw,
+with its own history), DLSS on the right (the right half of its output copied over; in super resolution the split is
+made at `upsample.frag`). `draw` was split into `draw` (timer, lock) and `draw_verrouille` (body) so that `dlss_taa`
+and `dlss_agrandir` can replay the original draw. `RECOMP_DLSS_SNAP_CUTS=n`: snapshots 0, 1, 2 and 4 frames after each
+of the first n detected camera cuts. `RECOMP_DLSS_NO_CUT_RESET=1`: no reset at the cuts (the morning's behaviour).
+`RECOMP_DLSS_PROBE=2`: the camera of every frame in the log.
+
+### Choice of the graphics card, DLSS only on NVIDIA RTX, experimental upscaling (2026-11-12, evening; not published)
+
+The user's request: some players will launch with an AMD card; the launcher must let the player choose the GPU, DLSS
+must not be selectable on a card that is not NVIDIA, and every upscaling option must be labelled experimental.
+
+**Game.** New `recomp.ini` key `gpu` (`settings.cpp`, block `kCleGpu` appended to files from earlier versions;
+`RECOMP_GPU` now goes through it): `auto`, or a text searched in the card names, case-insensitive (the launcher writes
+the full name; by hand, part of it is enough: `AMD`). `vk_render.cpp`, `choisir_carte`: the first card whose name
+contains that text; otherwise (`auto`, or no card with that name any more) the discrete card with the most video
+memory (largest `DEVICE_LOCAL` heap), failing that the card with the most; on a tie, the first. Before: the last
+discrete card in Vulkan's order, which the launcher could not predict (the order can differ between programs). Log:
+`GPU available: <name> (discrete, 15.6 GB)` for each card, then `GPU: <name> (Vulkan x.y, automatic choice)` or
+`(…, chosen in the settings)`, and `gpu = <text>: no graphics card with that name, automatic choice`.
+
+DLSS only runs on an NVIDIA card (`vendorID` 0x10DE) whose name contains "RTX" (`dlss.cpp`, `carte_dlss`, same rule as
+the launcher). The super resolution mode sets the render scale when the engine variables are read (`svc_fs.cpp`),
+before Vulkan is initialized: `vkr::carte_prevue` therefore makes the same choice on a temporary Vulkan instance (local
+function pointers, nothing shared with `init`), once, and only when a DLSS mode is requested. On another card the DLSS
+mode in `recomp.ini` has no effect ("DLSS needs an NVIDIA RTX graphics card (the game will use …)") and 3D keeps
+`render_scale`. Before, an NVIDIA GTX card in Quality was rendered at 67% with the game's anti-aliasing.
+
+**Launcher.** `cartes_lister` (`lanceur.cpp`), in a thread at startup: the cards listed by Vulkan, as the game sees
+them (`vulkan-1.dll` loaded at run time, headers from `runtime/third_party`: `-I` in `construire.py`); 190 ms here; one
+line per name; `lanceur.log`: `graphics cards (Vulkan, 188 ms): NVIDIA GeForce RTX 5070 Ti (discrete, 15.6 GB); AMD
+Radeon(TM) Graphics (integrated or other, 10.5 GB)`. `carte_du_jeu` repeats the game's choice. Graphics page, first
+row "Graphics card": "Auto: GeForce RTX 5070 Ti" (the card the game will take), then each card (names without "(TM)"
+or "(R)", "NVIDIA" dropped before "GeForce"); the full name goes into `recomp.ini`, with its explanation if the key
+was missing (before the `[keyboard]` section if there is one). If the card that will be used is not an NVIDIA RTX:
+DLSS "Unavailable" and greyed out (help "NVIDIA RTX cards only"), model greyed out, 3D rendering adjustable; the DLSS
+mode stays in `recomp.ini`, found again when going back to the NVIDIA card.
+
+**Experimental.** Every upscaling option is labelled experimental: amber help "experimental upscaling" on DLSS
+Quality, Balanced, Performance and Ultra Perf.; on 3D rendering, "experimental: faster, less sharp" below 100%,
+"experimental: enlarged by DLSS" when the DLSS mode sets it, and in grey "below 100%: experimental, faster" at 100%;
+the note at the bottom rewritten; comments of `render_scale` and `dlss` in `recomp.ini`. DLAA (native rendering) is not
+upscaling: no label.
+
+Changing the card changes the `pipelines.ok` signature (vendor and model of the card): at the next PLAY the shader
+preparation is redone for the new card (a single `pipelines.cache`).
+
+**Tests.** `construire.py --classe <Name>`: a test build of the launcher with another window class (one instance per
+class), which runs next to the player's launcher without touching it. `scratchpad/essai_gpu_launcher.py` (test
+install, simulated clicks, `recomp.ini` read back after each click): 9 checks out of 9 (cycle Auto → RTX 5070 Ti →
+Radeon → Auto, `gpu` key explained, DLSS and model clicks without effect on the AMD card, 3D rendering adjustable,
+block before `[keyboard]`); captures in French and English; `essai_gpu_dll.py`: with `nvngx_dlss.dll` next to the game,
+the DLSS help in Quality turns amber. Game (test install, `scratchpad/chaine_gpu.sh`): without a `gpu` key, the game
+appends its block, takes the RTX 5070 Ti ("automatic choice") and creates DLSS Quality (1707×960 → 2560×1440);
+`gpu = Matrox`: "no graphics card with that name, automatic choice", DLAA created; `gpu = AMD Radeon(TM) Graphics`
+with DLSS Quality requested: "DLSS needs an NVIDIA RTX graphics card (the game will use AMD Radeon(TM) Graphics)",
+`render.resolution_scale = 1.0000`, the game on the AMD card (2,388 shaders ready in 19.9 s), no device loss.
+Predicting the card (temporary instance) adds about 0.14 s at startup, only when a DLSS mode is requested.
+
+### Where the GPU time goes (NVIDIA RTX 5070 Ti, native 1440p)
+
+Measured with `RECOMP_GPU_PROFILE=N` (two timestamps per draw of frame N) and `RECOMP_PERF=1`:
+- mission intro frame: 1.58 ms of GPU; briefing frame (Fox's fur, holograms): 15.75 ms, spread over about ten
+  materials, no outlier shader (main material 2.0 ms in 17 draws, fur depth prepass 1.9 ms, fur 1.8 ms, holographic
+  fur 1.7 ms…). These scenes prevent 120 Hz at native 1440p: `render_scale` at 85 or 75 % is meant for them;
+- removing `nonuniformEXT` from texture indices read from a constant bank: no gain on NVIDIA (15.75 → 15.65 ms),
+  not kept;
+- GPU thread: 2.3 to 5.3 ms of commands per frame, the CPU is not the limit. `RECOMP_PERF=1` now also prints this
+  thread's time per kind of work ("GPU thread items").
+
+### GPU thread: texture binding cache
+
+In busy scenes (≈ 2,000 draws per frame) the GPU thread was the limit: 12.5 ms per frame, i.e. ≈ 75 fps instead of
+120, of which 5.9 ms for texture binding alone (`RECOMP_PERF`, "draw: … textures"). Every draw re-bound all the
+handles of its state, up to 64 per stage, with two locks, four lookups and a copy of the game's descriptors per
+handle (≈ 2.8 µs per draw), although from one draw to the next they are almost always the same.
+
+`bind_tex_c` and `bind_samp_c` (`vk_render.cpp`) now remember each full binding, per descriptor (texture × type) and
+per sampler, with the pool, its generation (the game's registrations) and the current displayed frame. As long as
+none of these change, the same handle does nothing. An entry drops when its descriptor is rewritten (`tex_write`,
+including by a compute dispatch), when images are destroyed (`drop_images`) and when its image must be uploaded
+again. The first binding of each displayed frame stays complete: check of sources rewritten by the game and last use
+as before. Compute dispatches keep the full binding. `RECOMP_NO_BIND_CACHE=1`: no cache.
+
+Measurement (same run, 1440p, 120 Hz): in busy scenes, ≈ 44,000 to 53,000 bindings avoided for 500 to 600 done
+per frame; texture binding 5.9 → 0.8 to 1.0 ms per frame, GPU thread 12.5 → 6 to 7 ms; these sequences go from
+≈ 72 to 102-121 fps. Run captures checked by eye (cutscenes, holograms, interface, portraits): nothing changed.
+
+Two other steps of each draw, lightened the same way:
+- *program*: it was copied on every draw (vector and strings) and its shaders looked up by name; it is now kept per
+  program key and version (`g_progs`, version bumped by `nvnProgramSetShaders`), only when all its shaders are found:
+  0.5 → 0.2 ms per frame;
+- *pipeline*: the ≈ 600-byte key went through a byte-by-byte FNV hash; a key identical to the previous draw's reuses
+  its pipeline, otherwise the hash runs on 8-byte words (pipelines are never destroyed, the hash only keys the
+  in-memory table): 1.0 → 0.5 ms per frame.
+
+GPU thread in busy scenes, overall: 12.5 → 5.2 to 5.7 ms per frame. Same run: median sample 118 fps (95.5 at the
+start), none under 55.
+
+### Scene-change hitches: texture uploads
+
+**Measurement.** `RECOMP_PERF=1` now also prints, every 120 frames, the time of each step of packaged-texture uploads
+(`texture uploads: … source … buffer … deswizzle … copy … hash … release …, staging free …; worst frame … ms`), the
+staging pool and the deferred-release queue.
+
+Test run (Corneria mission without a player, 1440p, 120 Hz, RTX 5070 Ti, same save copy): 3,294 uploads, 7.5 GB in
+4 minutes; 28 of the 33 windows containing a frame over 40 ms owed it mostly to uploads, and the worst frame lasted
+559 ms. Upload time: writing the source to the temporary file (texture_release) 30 %, deswizzle 23 %, hash 13 %,
+reading back sources put aside 12 %, staging buffer creation and release 16 %.
+
+**Fixes** (`vk_render.cpp`):
+- *Deferred release* (`tex_release_later`, `tex_release_pending`): the temporary-file write no longer follows the
+  upload; it is done at frame ends, 1 ms per frame (more as the queue grows). What exceeds the bound is released at
+  once: 384 MB, 256 MB under 5 GB of available commit; the whole queue under 3 GB or when Windows refuses memory to
+  the game. The source hash is compared again first: a source rewritten in the meantime is not released.
+  `RECOMP_TEX_RELEASE_NOW=1`: old behavior. A first version emptied the whole queue under 5 GB available: it lost
+  most of the gain, since this test PC, like the user's in game, goes under 5 GB available within the first minute.
+- *Worker threads* (`Ouvriers`) created once, instead of 7 threads created and joined for every large texture.
+- *Hash in 1 MB pieces*, computed in parallel with the deswizzle (same result from one run to the next; never kept
+  on disk).
+- *Staging buffer pool* (`transit_prendre`, `transit_rendre`): power-of-two buffers, mapped once, reused; at most
+  128 MB kept (64 MB under 5 GB of available commit, none under 3 GB); 1,574 buffers reused for 1,602 created in the
+  test run. `RECOMP_NO_STAGING_POOL=1`: old behavior.
+- *Deswizzle* block by block in source order, fixed-size copies: ≈ 3 times faster on one core (0.93 → 2.9 GB/s), same
+  bytes on 1,254 level and band shapes (test program).
+
+**Result** (same run): worst frame 192 ms instead of 559; 120-frame windows containing a frame over 40 ms: 22
+instead of 33; 90th percentile of the worst interval per window: 40 ms instead of 77; mean interval 9.53 ms
+instead of 10.04; lowest sample 65 fps instead of 52 (with the binding cache above). Game commit peak at the end
+of the run, when the test guard stops it: 8.9 to 10.3 GB depending on the run, against 9.2 for the reference
+(the automatic player's path varies by ±1 GB). Left: reading back sources put aside (≈ 0.1 s per big scene
+change), and the temporary-file write when Windows slows it down for the whole system (around 148 s in this run,
+already 0.58 s in the reference): a single write cannot be cut.
+
+Validation run with all of the night's changes, this time through the full 7 minutes (the guard did not stop it):
+34 windows out of 368 with a frame over 40 ms (9 %, against 16 % before), 90th percentile 38 ms, worst frame
+224 ms, median sample 116 fps, none under 55, commit peak 8.3 GB, no error.
+
+
+## Screens with Windows display scaling: the game is DPI aware (2026-11-12, evening; not published)
+
+Log of GitHub issue #10 (Igor4276, 1.0.3): a 2560×1440 screen set to 150 % in Windows, "display 2560x1440" but
+"swapchain 1707x960" in borderless fullscreen. `recomp_main.exe` did not declare itself DPI aware (the launcher did):
+Windows gave it sizes in points and stretched its window itself. The game's 1080p image was shrunk to 1707×960 by the
+presentation, then enlarged to 2560×1440 by Windows: blurry. It is not the cause of his slowness (the Vulkan recording
+thread, limited by his Zen 3 processor: 31 to 40 fps at 2,800 draws per frame).
+
+* `host_main.cpp`, `dpi_compatible`, at the very start of `main` (before any window, before SDL):
+  `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)`, failing that `SetProcessDPIAware()`.
+  Log: `Windows display scaling of the main screen: 150 % (per-monitor DPI aware)`.
+* Sizes are now in real pixels: in borderless fullscreen, the window covers the screen pixel for pixel (a 2560×1440
+  swapchain in the example) and the game's image is enlarged only once, by the presentation.
+* Nothing else changes for players. `resolution = auto` still chooses from the size in points (`present.cpp`,
+  `gfx_screen_size`: pixels ÷ scaling), hence the same mode as before (720p for a 1440p screen at 150 %, 1440p for a
+  4K screen at 150 %): switching to the real size would make the game heavier after an update, on laptops above all.
+  The windowed-mode window keeps its apparent size (2/3 of the output, in points, multiplied by the scaling). At 100 %
+  nothing changes: when too large, Windows shrinks it at creation as before (2560×1421 on a 1440p screen; a first
+  version capped it at 90 % of the work area, 2211×1244, removed). On a scaled screen, Windows only shrank its height
+  (3840×1421 on a 2560×1440 screen at 150 %, wider than the screen): it now fits the work area, frame included, with
+  its proportions kept.
+* `WM_DPICHANGED` (window moved to a screen with another scaling): in fullscreen, the window covers the new screen;
+  windowed, it takes the rectangle suggested by Windows.
+* `RECOMP_DPI=<dpi>` (tests) simulates a scaling (144 for 150 %) for these two choices.
+
+Tests (test install, windowed, `scratchpad/chaine_dpi.sh`): the user's screen at 100 %: "100 % (per-monitor DPI
+aware)", window requested 2560×1440 and swapchain 2560×1421 as before; `RECOMP_DPI=144` (150 % simulated):
+`resolution = auto` → 1280×720 as on a 150 % screen before, window 2388×1343 (inside the work area, 16:9), no error.
+Real scaling not tried: the user's screen is at 100 %, and that Windows setting is not one to change for a test.
+
+
+## PlayStation, Switch Pro and Joy-Con controllers: SDL3 shipped, editable buttons (2026-11-12, evening; not published)
+
+The user's request: add support for DualShock and DualSense controllers and for Switch controllers and Joy-Cons, and
+add controller remapping, with a drawing of the Switch controller on which players choose the buttons to assign.
+
+* **SDL3 was missing.** `input.cpp` could read these controllers through SDL3 since 1.0.3, but `SDL3.dll` was shipped
+  nowhere: the user's log said "SDL3.dll not found", and only Xbox controllers worked (XInput). SDL 3.4.20
+  (`SDL3-3.4.20-win32-x64.zip`, official page github.com/libsdl-org/SDL, SHA-256
+  368bed8b24e44ad9ea372990814f2343fcfb9e468abb7f8f4a3bc146c7304752, zlib license), downloaded with the user's consent,
+  is now a tool of `launcher/outils.py` (`outils/sdl3` folder): the full package contains it, and an update installs it
+  (`maj.py` runs `outils.py` again). Notices: `licences/THIRD_PARTY_NOTICES.txt` (section 4) and
+  `licences/SDL3-LICENSE.txt`; package text (`paquet.py`) updated.
+* **Joy-Cons**: `SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS = 1` (a pair forms one controller; SDL 3's default, written to
+  say so) and `SDL_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS = 0` (a single Joy-Con is held sideways). Switch 2 controllers:
+  SDL 3.4 only reads them wired, and only when built with libusb; support is not assured with the official Windows
+  build.
+* **Editable buttons, game**: `Settings::pad` (16 entries, order `K_A` … `K_RIGHT`), keys `pad_a` … `pad_right` of
+  `recomp.ini` (`[controller]` section, written by the launcher). Values: the controller input by position, as SDL
+  names it (`south`, `east`, `west`, `north`, `leftshoulder`, `lefttrigger`, `start`, `back`, `dpad_up`…, `guide`,
+  `misc1`, paddles, `touchpad`, `none`); by default the usual by-position layout. `input.cpp`: `entree_sdl` (SDL
+  buttons, triggers past a quarter of their travel) and `entrees_xinput` (XInput controller without SDL: same
+  settings). Sticks stay sticks. Log: "controller: N button(s) changed from the default layout".
+* **Launcher, Controls page: KEYBOARD · CONTROLLER tabs.** The Controller tab draws a Switch-style controller with
+  simple shapes (body and grips merged into one Direct2D geometry, ZL/ZR, L/R, sticks, D-pad, A B X Y diamond, + and −,
+  capture and home as decoration). Each button can be clicked, on the drawing or in the list: the launcher then waits
+  for a press on the player's controller (an input newly pressed since the wait began; Esc or a click: cancel) and
+  gives it to that button; if another button had it, they swap. The ‹ › arrows of the list cycle through free inputs
+  (no cascading swaps); DEFAULTS restores the by-position layout. The drawing lights up when a controller button is
+  pressed, to see what each button does. Input names follow the connected controller (Xbox: A, LB, LT…; PlayStation:
+  ✕ ○ □ △, L1, L2…; Nintendo: B, A, ZL…), "B / ○" without a controller. The CONTROLLER column of the Keyboard tab
+  follows these settings. `manette.cpp` (new): SDL3 loaded by the launcher (same folders as the game) when the tab
+  opens, stopped when it closes, during a build and when the game starts, so that controllers belong to the game alone.
+  `LANCEUR_PAGE=manette` opens the tab (checks).
+* Tests: launcher test build (another window class), `scratchpad/essai_manette_launcher.py`: 8 checks out of 8 (› on A:
+  next free input `guide`, no swap; ‹ on ZR: `touchpad`; `[controller]` section explained; DEFAULTS; SDL3 loaded by the
+  launcher), captures in French and English. Game (test install, `scratchpad/chaine_manette.sh`): SDL 3.4.20 loaded
+  from `outils\sdl3`, "controller: 2 button(s) changed", unknown key reported, no error in 35 s. No controller was
+  connected to the user's PC (SDL sees none): real presses on PlayStation, Switch Pro and Joy-Con controllers are still
+  to be tried.
+* **Drawing, 2nd version** (same evening, at the user's request, after four "overlay" models: filled controllers with
+  flat shading; when asked, the answer was: the connected controller). It replaces the first drawing: the tab draws the
+  player's controller, Switch Pro (also without a controller, and for a GameCube one), Xbox (and generic controllers),
+  dark DualShock 4 (also for a PS3 one), light DualSense, Joy-Con pair, left or right Joy-Con alone held sideways
+  (letters of their role outside). Drawings made by hand in `dessin.cpp` (Bézier paths written like SVG "d" strings,
+  read by `chemin()` and kept as Direct2D geometries; no image, no brand logo). Each element is a physical input
+  (`EntreePad`): it lights up when pressed (green fill and glow; paler for an input without an action), the sticks
+  move with the controller's (`EtatManettes::axes`), a button given to an action can be clicked to wait for the press
+  that replaces it, and the hover tag tells which Switch action it performs. `EtatManettes::type` (SDL type of the
+  first controller) picks the drawing. `LANCEUR_MANETTE=<SDL type>` and `LANCEUR_APPUIS=<hex mask>` (checks) force a
+  drawing and presses, also shown in the list.
+* Tests: `scratchpad/essai_dessins_manettes.py` captures the seven drawings, then a Pro controller with four simulated
+  presses (A, ZR, L, D-pad up): drawing and list rows lit. Not tested here: the hover tag (the real mouse is not moved
+  during tests) and presses on a real controller (none is connected).
+* **Assign by clicking** (same evening, at the user's request: remap by pressing the buttons. Without a controller
+  switched on, a click on the drawing did nothing: only the ‹ › arrows changed the buttons.) A click on a button, on
+  the drawing or in the list, makes it wait, with or without a controller: a press on the controller or a click on a
+  button of the drawing (even an input that does nothing: capture, home, touchpad…) gives it that input; if it was in
+  use, they swap. Clicking the waiting button again, Esc or a click elsewhere: cancel. Zones `Z_ENTREE0 + input` (one
+  per drawn input; those that do nothing, only while waiting), `pad_entree_cliquee` (lanceur.cpp); help texts
+  rewritten, the waiting button is named in them ("A: click the button on the drawing that should do it").
+* Tests: `scratchpad/essai_remap_clic.py`, 9 checks out of 9 (A then B on the drawing: swap; A in the list then
+  capture: A = misc1; Esc and a second click cancel; a free input is not clickable outside a wait; DualSense: ZR then
+  touchpad); `essai_manette_launcher.py` still 8 out of 8; French and English texts fit on three lines.
+
+## AMD FSR: FSR 4 and FSR 3.1 instead of the game's anti-aliasing (evening of 2026-11-12; not published)
+
+The user's request: integrate "a version of FSR 3 and 4" for players without an NVIDIA card (and be able to try it on
+NVIDIA too).
+
+**Source.** AMD FidelityFX SDK 2.4.0 (28 October 2026), the first of the 2.x series with Vulkan support: FSR
+Upscaling 4.1.2 (neural network) and FSR 3.1.6 behind one five-function interface (the "FSR API"). Eight files taken
+from the official repository `GPUOpen-LibrariesAndSDKs/FidelityFX-SDK`, tag `v2.4.0`, each checked against the git
+hash of the official tree (`scratchpad/telecharger_fsr.py`); both libraries carry a valid Authenticode signature from
+Advanced Micro Devices. License: the SDK's license file puts these eight files (API headers and signed libraries) in
+its MIT-licensed list; the rest of the SDK is under a more restrictive AMD license (binary only, no reverse
+engineering), which covers none of the files taken here.
+- API headers, unmodified: `runtime/third_party/ffx/` (same layout as `Kits/FidelityFX` in the SDK);
+- `amd_fidelityfx_loader_vk.dll` (39 KB) and `amd_fidelityfx_upscaler_vk.dll` (36 MB): `outils/fsr/`;
+- license: `licences/AMD-FidelityFX-SDK-LICENSE.txt`; reference copy of the eight files: `sdk/FSR-2.4.0/`, outside
+  `recomp/`.
+
+**In the game** (`runtime/os/fsr.cpp`, `fsr.h`). FSR takes exactly the place of DLSS: `dlss_taa` replaces the engine's
+`taa_resolve` pass and `dlss_agrandir` its upscale, with the same images (compressed RGB color, inverted hardware
+depth, motion vectors in pixels, jitter, history reset on camera cuts). The functions of `dlss.h` (`pret`, `evaluer`,
+`menage`, `fonction_prete`, `description`, `echelle_dlss`, `couper`) hand over to FSR when FSR is the one in use;
+`vk_render.cpp` hardly changes. On top of what DLSS needs:
+- the camera planes and field of view, derived from the view-projection matrix already captured for camera cuts
+  (`dlss_plans_camera`: near plane 1, far plane at infinity, 35 degrees in cutscenes);
+- the frame time (host clock);
+- the color declared perceptual (the engine keeps it as a square root): `FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE`
+  and `FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB` (`RECOMP_FSR_LINEAR=1`: declared linear, to compare);
+- at Vulkan device creation, when FSR is requested: half floats, 16-bit integers, 16-bit storage and integer dot
+  product enabled if the card offers them (FSR's shaders).
+One FSR context per pair of sizes (render, output), recreated if they change; the old one is destroyed once the GPU
+has finished the submissions that could still use it, like the DLSS features. Video memory of the FSR 3.1 context at
+1440p: 222 MB in native mode, 134 MB in Quality, 103 MB in Performance.
+
+**Settings** (`recomp.ini`, appended to an existing file; `settings.cpp`):
+- `fsr = off | native | quality | balanced | performance | ultra_performance` (3D rendering at 100, 67, 59, 50 or
+  33%);
+- `fsr_version = auto | fsr3 | fsr4`: `auto` lets the API take the newest version the card accepts, including a newer
+  version delivered by AMD's driver; `fsr3` and `fsr4` impose one (if it is not offered: automatic choice, logged);
+- `fsr_sharpness = 0 ... 100`: sharpening added by FSR (RCAS pass), 0 by default;
+- if `dlss` is requested too and the card is an NVIDIA RTX, DLSS is used;
+- tests: `RECOMP_FSR`, `RECOMP_FSR_VERSION`, `RECOMP_FSR_SHARPNESS`, `RECOMP_FSR_DIR` (folder of the libraries),
+  `RECOMP_FSR_DEBUG=1` (FSR's debug view, detailed messages).
+Without both libraries (next to the game, in its `fsr` subfolder, in `<root>\outils\fsr` or
+`<root>\recomp\outils\fsr`), the game keeps its anti-aliasing and `render_scale`, and the log says so ("fsr").
+
+**Which version on which card.** The log lists the versions offered ("FSR versions offered for this graphics card").
+On both cards of this PC, the GeForce RTX 5070 Ti and the integrated Radeon of a Ryzen 7 9700X, the list is "3.1.6,
+2.3.4": FSR 3.1.6 is used. According to AMD's documentation, FSR 4 is offered on Radeon RX 6000, 7000 and 9000 cards
+and on some Ryzen AI processors. **FSR 4 could therefore not be tested here**: the path is the same (same context,
+same images), but only a player with one of those cards can tell whether it works.
+
+**Launcher** (GRAPHICS page): two more rows, "FSR (AMD)" (Off, Native, Quality, Balanced, Performance, Ultra Perf.)
+and "FSR version" (Automatic, FSR 4, FSR 3.1). The help line turns amber when FSR has no effect (DLSS takes priority)
+or AMD's files are missing; 3D rendering follows the FSR mode as it follows the DLSS mode. Nine settings instead of
+seven: row pitch 33 instead of 36.
+
+**Tests** (test install, `scratchpad/chaine_fsr.sh`; Corneria mission played without a player from a copy of a save,
+95 to 150 s):
+- RTX 5070 Ti, 1440p, 120 Hz: FSR 3.1.6 Quality (1707x960 -> 2560x1440), Native and Performance (1280x720) with no
+  error and no FSR message; median 120 fps in Quality and Performance, 111 in Native;
+- full mission (7 minutes) in FSR 3.1.6 Quality on the RTX, libraries taken from the test install's `outils\fsr`:
+  median 111.9 fps, minimum 66.1, no skipped draw, no error, 12 camera cuts reported to FSR; pictures of the mission
+  looked at 100% (canyon, city, crosshair): sharp, no trails;
+- DLSS Quality still fine after going through the facade; DLSS and FSR requested together on the RTX: DLSS is used;
+- integrated Radeon, 1080p: FSR 3.1.6 Quality (1280x720 -> 1920x1080) and Native with no error, correct pictures (3.6
+  to 8 fps: that is the limit of this small card, not a result to expect from a dedicated card);
+- image compared with the game's anti-aliasing on a still shot of the briefing: same picture, slightly less fine
+  contrast in Quality without added sharpening (edge energy 5.4 against 6.6), no artifact;
+- launcher: `scratchpad/essai_fsr_launcher.py`, 9 checks out of 9 (keys written with their explanation, cycling
+  through the versions, 3D rendering fixed by the mode, version greyed out when DLSS is in use), captures in French
+  and English; without AMD's files in the install, the version is greyed out and 3D rendering stays adjustable, as
+  in the game.
+
+**What is left.**
+- FSR 4 to be tried on a Radeon RX 6000 or newer (recent driver).
+- Distribution: `outils.py` only knows how to download archives, and the SDK publishes no small one (the official
+  archive is about 200 MB). Two ways: put both libraries (36 MB, MIT license) in the package, or teach `outils.py` to
+  fetch two files from AMD's repository. `depot.py` does not take `runtime/third_party/ffx/LICENSE.md` yet (extension
+  outside its list): the license is also in `licences/`.
+- Default sharpening for the super resolution modes (0 today).
+
+## Optimizations of the evening of 2026-11-12: draws, waits between game threads (not published)
+
+The user's request: as many optimizations as possible for Vulkan, NVIDIA and AMD shaders and memory, while keeping
+stability as much as possible.
+
+**Method.** Always the same run (Corneria mission played without a player from a copy of a save, 1440p, 120 Hz, RTX
+5070 Ti, `RECOMP_PERF=1`, the user's launcher open during all measurements), compared per range of draws per frame
+over the first 300 seconds (`scratchpad/compare_perf.py`): in light scenes the game already holds 120 fps, everything
+happens in scenes with more than 2,000 draws. New tool: a sampling profile (`scratchpad/echantillonner.py`: program
+counter of the busiest threads about 400 times per second, symbols through `llvm-nm`).
+
+**What the profile shows** (scenes with 2,500 draws):
+- no thread is saturated: the game's worker threads are active about 43% of the time and asleep the rest (waits of
+  the emulated kernel), the GPU thread about 55%;
+- on the GPU thread, about 5% of the samples are clock reads: the timer of the `draw` steps ran even without
+  `RECOMP_PERF` (seven reads per draw);
+- `rt_lookup` (target of an indirect call, by binary search in the table of the 300,000 functions): about 3.5% of the
+  active time of the game threads; growth of the command lists and locks of the NVN tables: about 2%;
+- one thread of the NVIDIA driver (`nvgpucomp64.dll`) keeps a whole core busy during the entire sampling: this is the
+  background recompilation already described in "Memory spikes in game", still without a remedy.
+
+**Changes kept.** Each has its test variable to turn it off; `fast_rendering = false` in `recomp.ini`
+(`RECOMP_FAST_RENDERING`) turns them all off at once, for a player who would see a defect after the update.
+1. *Bank descriptor sets reused* (`vk_render.cpp`, `draw`; `RECOMP_NO_BANK_CACHE`). Every draw allocated two
+   descriptor sets and wrote all its banks into them, allocating two vectors on the way. Per stage, the previous
+   draw's set is now reused when the same shader finds exactly the same buffers; the blocks of bank 2 (texture
+   handles, 0x680 bytes) and bank 0x18 are only rewritten into the constants ring when their content changes. Valid
+   for one recording (`g_banques_gen`). The ring is used 3.5 times less (at most 1.0 MB per recording instead of 3.5).
+2. *Dynamic state kept* (`Vk::Dyn`; `RECOMP_NO_DYN_CACHE`): viewport, scissor, stencil references and masks, blend
+   constants and depth bias were never compared with their previous value (seven Vulkan calls per draw). Reset at
+   every recording and after a DLSS or FSR evaluation.
+3. *Texture stage skipped* (`LieEtage`; `RECOMP_NO_BIND_SKIP`): a stage whose shader, 192 handles, pool generations
+   and binding-cache stamp are those of its previous draw, where every binding was already cached, and with no entry
+   dropped since (`g_lie_evt`: descriptor rewritten, image to re-upload), no longer walks its handles one by one.
+4. *Small things on the GPU thread*: the shader's name is no longer searched in the submission's batch at every draw
+   (`note_shader`, `ShaderMod::lot`); the step timer only reads the clock with `RECOMP_PERF`.
+5. *Recording of NVN commands* (`nvn_cmd.cpp`, `rec`; `RECOMP_NO_REC_CACHE`): every command of the game (about 36,000
+   per frame in heavy scenes) took the lock of the command-buffer table and looked its buffer up; each thread now
+   remembers the last buffer it wrote to, and a buffer reserves the size of its previous recording in advance.
+6. *Indirect calls of the recompiled code* (`runtime.cpp`, `rt_lookup`; `RECOMP_NO_CALL_CACHE`): direct-mapped cache
+   of 16,384 targets in front of the binary search, with a version counter per entry (lock-free reads).
+7. *Active waiting between game threads* (`kernel.cpp`, `block`; `RECOMP_SPIN_US`): a game thread that has to wait
+   (mutex, condition variable, wait on address) first watches for its wake-up for 50 microseconds without sleeping.
+   This is the change that weighs most on the frame interval of heavy scenes, for about 3.5% more processor time per
+   worker thread; enabled only with at least 8 hardware threads.
+
+**Tried, not enabled.** *Partial submissions* (`soumettre_morceau`, `RECOMP_PARTIAL_SUBMIT=<draws>`): send the work
+of a frame to the GPU every 512 draws while the rest is translated. Measured gain: 9.62 -> 9.36 ms in windows of
+2,000 to 3,000 draws, nothing beyond. Too little to change the submission pattern of every player: the code stays,
+turned off.
+
+**Measurements** (median interval between two frames, and busy time of the GPU thread, per range of draws per frame):
+
+| Run | 1,000 to 2,000 draws | 2,000 to 3,000 draws | more than 3,000 draws |
+|---|---|---|---|
+| baseline (start of the evening) | 8.71 ms (thread 5.56) | 11.56 ms (thread 7.27) | 15.35 ms (thread 11.45) |
+| descriptor sets reused, dynamic state kept | 8.50 (4.60) | 9.50 (5.92) | 14.27 (10.27) |
+| + game-thread caches, no active waiting | 8.57 (4.75) | 9.62 (5.82) | 13.39 (8.83) |
+| + 50 µs of active waiting, texture stage skipped (settings kept) | 8.51 (4.54) | 8.80 (5.28) | 12.35 (7.75) |
+
+That is 86 -> 114 fps in scenes with 2,000-3,000 draws and 65 -> 81 beyond 3,000. Steps of a draw, at about 2,600
+draws per frame (ms per frame): descriptors 2.36 -> 1.17; vertices, dynamic state and draw call 0.97 -> 0.54;
+pipeline 0.85 -> 0.67; texture binding 1.16 -> 0.90; total of the steps 5.77 -> 3.69. Below 1,000 draws per frame,
+nothing changes (8.34 to 8.40 ms: 120 fps). Pictures of the runs compared by eye (cutscene, title screen, sea, canyon,
+city): nothing changed.
+
+**Memory.** No new saving this time. Peak committed memory of the test runs: 10.2 to 12.4 GB (11.4 for the
+baseline), dominated as before by the spikes of the driver's compiler. The six 16 MB constants rings were not
+reduced although they are used less: only one mission is measured. FSR, when enabled, takes 103 to 222 MB of video
+memory at 1440p.
+
+**Shaders.** No translated shader changed (a change in `shaders/` would make every player redo the shader step). For
+AMD cards, the evening's contribution is FSR (previous section).
+
+**Also tried, not kept.** 150 microseconds of active waiting instead of 50: 9.42 ms in windows of 2,000 to 3,000
+draws, worse than 50 (the spinning threads get in the way of the others).
+
+**Checks** (`scratchpad/chaine_controles.sh`, test install):
+- DLSS Quality: ready, created, 120 fps; DLSS and FSR requested together: DLSS is used;
+- stress: partial submissions every 32 draws (the caches valid for one recording drop dozens of times per frame):
+  200 s of mission with no skipped draw and no error, correct pictures; same with FSR Quality;
+- `fast_rendering = false`: "the rendering optimizations of 2026-11-12 are all off", no descriptor set reused, no
+  stage skipped, active waiting at 0;
+- integrated AMD card, 1080p: the game's anti-aliasing with partial submissions every 64 draws, and native FSR: no
+  error, correct pictures.
+
+**Full validation runs** (7 minutes, 1440p, 120 Hz, without `RECOMP_PERF`, default settings): median of the readings
+112.8 fps (100.5 for the baseline at the start of the evening), minimum 62.9 (56.3), 43,800 frames instead of 39,600,
+peak committed memory 9.8 GB (11.4), no skipped draw, normal exit. With FSR Quality: median 111.9, minimum 66.1, peak
+10.6 GB.
+
+**Other scenes** (`scratchpad/chaine_autres_scenes.sh`, default settings, 1440p, 120 Hz): Area 6 from the copy of
+the user's save (two views), 150 s: median 120 fps, minimum 114.9; the same with FSR Quality: 120 / 118 (the small
+view keeps the game's anti-aliasing, as with DLSS); new game (opening cutscene then training), 200 s: median 75.3
+fps, minimum 39.4, against 76.0 and 37.2 in the control run with `fast_rendering = false`: these scenes are limited
+by the GPU (fur, holograms), the optimizations change nothing there. No skipped draw and no error in the four runs.
+
+**What is not verified.** Corneria serves as measurement; Area 6 and the opening cutscene as checks. Left: a
+processor with fewer than 8 threads (active waiting is then off, the rest applies), the effect on a dedicated AMD
+card, a game session by the user. The sources of this folder are those of the user's game: the launcher will offer
+to relink it.
+
+## Version 1.1.0: game location, desktop shortcut (issue #14), FSR and DLSS in the package (2026-11-13; not published)
+
+**Requests of the user (2026-11-13).** The next version is called 1.1.0; GitHub issue #14 ("select where the recomp
+will live", "a desktop icon") must be done before publishing it; AMD's and NVIDIA's DLLs are shipped "directly in the
+project, like a normal game".
+
+**Version number.** `recomp/VERSION` and the fallback number of `launcher/lanceur.h` are 1.1.0. The launcher reads
+`VERSION` when it starts. A game built by 1.0.3 becomes "to update": the rebuild question is asked once, at the first
+start (`lier` step only).
+
+**Game location** (Settings page, "Game location" row, "Move…" button): `launcher/deplacer.py` (new), driven by
+`lanceur.cpp` (`deplacer`, `finir_deplacement`, `abandonner_deplacement`, `deplacement_au_demarrage`, task
+`Tache::Deplacement` shown by the Build page).
+- The player picks a folder: empty or missing, the install goes there; otherwise it goes to a `SpaceAnimalsRecomp`
+  subfolder. `deplacer.py --verifier` answers before the question asked to the player.
+- Same volume: nothing to copy. The launcher closes, PowerShell renames the folder once the bundled Python has ended
+  (it is in the folder, and Windows does not rename a folder with an open file), then restarts the launcher.
+  Everything follows, the game copy too if it is in the folder.
+- Other volume: everything is copied, dates included (the build steps already done stay done), and checked while the
+  launcher shows the progress. Then the launcher closes, and the new folder's Python copies again what changed in
+  between, deletes the old folder and restarts the launcher. The player's game copy is neither copied nor deleted: it
+  stays where it is, and the launcher keeps reading it there.
+- Nothing is deleted before the copy is complete. An interrupted copy (canceled, failed, launcher closed) carries a
+  mark (`.deplacement_en_cours`): it is removed at once, or at the next start (`deplacement_vers` key of
+  lanceur.ini). `--abandonner` only removes a marked folder, never the one the script runs from.
+- Refusals, told to the player: source folder (never moved), destination inside the install, folder already in use,
+  Program Files and Windows, path too long for the game's files (more than 259 characters, and longer than today),
+  characters outside the Windows code page (same rule as `preparer.py`), not enough free space (size + 1 GB or 2%),
+  game or launcher running.
+- At start the launcher records its folder (`dossier` key of lanceur.ini): if it changed (by this button or by
+  hand), the path of a game copy kept in the old folder is rebuilt.
+- Check variables: `LANCEUR_ACTION=deplacer`, `LANCEUR_DEPLACER_VERS`, `LANCEUR_DEPLACER_CAPTURE`,
+  `DEPLACER_FORCER_COPIE=1` (copy even on the same volume). Log: `%TEMP%\SpaceAnimalsRecomp-move.log`.
+
+**Desktop shortcut** (Settings page): creates or removes `StarFox Remake [recompiled].lnk` on the desktop, to
+`lanceur.exe` and with its icon (`lanceur.cpp`, `raccourci_creer`, `raccourci_basculer`). At start, a shortcut whose
+target no longer exists (moved folder) is redone to this launcher (`raccourci_suivre`). Uninstalling removes it when
+it leads to the install (`desinstaller.py`, `raccourci_bureau`). Checks: `LANCEUR_BUREAU` (another folder than the
+desktop), `LANCEUR_ACTION=raccourci`.
+
+**Uninstall: a 1.0.3 defect found on the way, fixed.** PowerShell started with `DETACHED_PROCESS` ends at once and
+runs nothing. The end of the uninstall was handed to it that way: on a player's PC (bundled Python inside the
+install), the install folder therefore stayed, with that Python's files. Seen with a Python placed inside a fake
+install (`scratchpad/issue14/essai_python_dedans.py`): before, folder still there (10 files); after
+(`NEW_PROCESS_GROUP | CREATE_NO_WINDOW`), folder deleted. The checks of `recomp/verif` use an outside Python and
+could not see it.
+
+**FSR and DLSS in the package.**
+- `launcher/outils.py`: three "fichier" entries (one file taken as is from the publisher's official repository,
+  SHA-256 checked): `fsr-loader` and `fsr-upscaler` (outils/fsr, FidelityFX SDK v2.4.0), `dlss`
+  (outils/dlss/nvngx_dlss.dll, NVIDIA/DLSS repository, tag v310.9.16). The local DLSS file is the same as the
+  official one (git hash compared through the GitHub API, without downloading it again). The full package contains
+  them (`paquet.py` copies `outils/`); an update downloads them (`maj.py` runs `outils.py`), about 95 MB.
+- The game also looks for `nvngx_dlss.dll` in `<root>\outils\dlss` and `<root>\recomp\outils\dlss`
+  (`runtime/os/dlss.cpp`), and so does the launcher (`dessin.cpp`).
+- Licenses: `licences/AMD-FidelityFX-SDK-LICENSE.txt` (renamed from `.md`: the package only takes `.txt` files),
+  `licences/NVIDIA-DLSS-SDK-LICENSE.txt` (new), `THIRD_PARTY_NOTICES.txt` (sections 5 and 6: DLSS is proprietary
+  software, under NVIDIA's license, not under the GPL), the package's instructions. `depot.py` and `paquet.py` also
+  take the `.md` and `.txt` files of `runtime` (license of the FSR headers).
+- What NVIDIA's license asks of the publisher (the user's decision, worth knowing): distribute the DLL under terms
+  at least as protective (section 2.c), do not subject it to an open source license (4.e), no reverse engineering
+  (4.a), and credit NVIDIA DLSS with NVIDIA's marks in the credits or about box (supplement, 7.1.b). Done here:
+  license text and notice in the package, written mention; no logo.
+
+**Checks.**
+- `verif/essai_deplacement.py` (new, quick check `deplacement`): 44 conditions on fake installs (same volume, other
+  volume with and without a game copy, refusals, abandon, resumed copy, game running).
+- `verif/essai_desinstaller.py`: desktop shortcut removed, kept when it leads elsewhere. `verif/essai_rapport.py`:
+  the `dossier` and `deplacement_vers` keys of lanceur.ini are anonymized in the bug report.
+- `scratchpad/issue14/essai_launcher_i14.py`: 28 conditions with the test launcher in a fake install that has its
+  Python inside (shortcut created, read, removed; moves; source folder; refusal); screenshots.
+- `scratchpad/issue14/essai_reel.py`: the real test install (27,993 files, 4.48 GB, built game): there on the same
+  volume in 13 s, back by copy in 162 s; same files, sizes and dates; `preparer.py --a-refaire` unchanged (nothing
+  more to rebuild).
+- DLSS Quality with the DLL only in `outils\dlss` (relinked test game): found there ("nvngx_dlss.dll in
+  …\outils\dlss"), DLSS created (1707×960 → 2560×1440), 90 s of mission at 120 fps, no error.
+- Not checked: a real other drive (the copy is forced on the same one: same code, only the "same volume or not"
+  choice differs; that choice was read without writing anything to D:); the real desktop; real mouse handling
+  (folder dialog, question); an update from 1.0.3 to 1.1.0 from end to end.
+
+**Quick checks** (`verifier.py rapide`, 2026-11-13, 1:25 am): 11 of 14 pass. `sauvegardes` failed for an old reason:
+the `.empreinte` mark that a backup copy receives counted in its hash, so the copy could no longer be found identical
+to the save; `sauvegardes.py` (`fichiers`) now ignores it, and the check passes again. Left: `versions` (the
+repository README still names 1.0.3; the root lanceur.exe is not rebuilt) and `maj`, which refuses any download
+while an update must now fetch SDL3, FSR and DLSS: the check has to be adapted before publishing (failing since SDL3
+was added). `launcher/lanceur.rc` is at 1.1.0.
+
+**Issue #17 (crash against Andross in 1.0.3), analysis of 2026-11-13, nothing changed.** A read through a null
+pointer in the game function main+0xb8b5620, most likely at main+0xb8b6700 (`ldrh w13, [x11, #0x68]`, x11 read back
+from the stack). Probable cause, not proven: the "known limit" of `rel_restaurer` (`runtime/os/memory.cpp`), a page
+committed then filled, which another thread can read as zeros during the fill. Planned fix: atomic restore (other
+threads suspended during the commit and the copy). Details: shared notes, section 34.
+
+**Issue #17, fix: atomic restore of the pages read back from the temporary file (2026-11-13, "yes, fix it"; not
+published).** `runtime/os/memory.cpp`:
+- `MondeArrete`: every other thread of the process suspended (NtGetNextThread, SuspendThread, then GetThreadContext,
+  which only returns once the thread has really stopped) while a piece is committed and copied (`engager_copier`).
+  During the stop: no lock, no log, no heap allocation. If Windows refuses the memory, the room is obtained elsewhere
+  through the usual path, then swapped for the range during the stop.
+- Forgotten pages and texture data read back (causes 0 to 3): always through that stop. A run of forgotten pages
+  (2 MB at most) comes back whole at the first fault.
+- Faulting write into old texture data (cause 4, more than a hundred per second on the player's PC): no stop, but
+  `copier_sans_recouvrir` (word by word, only where the page is still zero): another thread's write is no longer
+  overwritten by the old data.
+- `RECOMP_NO_ATOMIC_RESTORE=1`: previous path. Log line "pages restored with the other threads stopped".
+
+Measurements (Corneria mission, 1440p, 120 Hz, RTX 5070 Ti; stress: `RECOMP_COLD_SWEEPS=1 RECOMP_ZERO_SWEEP_S=2`,
+5 minutes):
+- before the fix, under stress: median 111.9 fps, 3,000 MB read back, no crash: the defect was not reproduced here;
+- a stop for every 64 KB piece (first version, dropped): 54,901 stops, 72.7 s stopped out of 288 s, that is 1.32 ms
+  per stop (83 threads), median 72.3 fps;
+- kept version, under stress: 8,400 stops, 11.2 s, median 103.4 fps, correct pictures, no error;
+- kept version, default settings, 7-minute run: normal exit, median 107.0 fps, minimum 53.9, 1,362 stops (1.7 s in
+  total), no skipped draw. The day before, PC idle: 112.8; tonight the user was using the PC, and there is no control
+  run in the same conditions: the gap is not attributed.
+
+Limits: the player's crash is not reproduced, the fix closes the window by construction without proving it was the
+cause; in cause 4, a concurrent reader of the old data can still see zeros for an instant; a stop costs 1.3 ms. If
+these stops show in game: reserve the game memory as placeholders and put a page back by replacing a view that is
+already filled.
+
+**Issue #17, continued: hitches measured, restores grouped (2026-11-13, 2:20 to 3:40 am).** The user asked whether
+this would create more stutter, then reminded that their PC is a large one and that small PCs matter. Measurement:
+worst frame of each 120-frame window (`RECOMP_PERF=1`, `scratchpad/issue17/saccades.py`), runs alternating with and
+without `RECOMP_NO_ATOMIC_RESTORE=1`.
+- First version (one stop per 64 KB piece read back), 1440p, 120 Hz, 7 minutes, two runs of each: same frame rate
+  (110 and 111 fps without, 112 and 108 with), as many windows with a frame over 20 ms (103 and 100 against 99 and 99)
+  or over 40 ms (18 and 20 against 16 and 14), but the 99th percentile of the worst frame at 209 and 212 ms instead of
+  111 and 105: the three or four biggest hitches lasted about 100 ms longer (1,341 and 1,350 stops, of which about
+  1,100 faulting reads of texture data, 64 KB each).
+- Fix: a faulting read brings back up to 1 MB at once (`REL_AVANCE`), 4 MB restore buffer (`REL_TAMPON`). Same run:
+  213 stops (0.25 s in total), 99th percentile 112 ms, as without the fix.
+- Simulated small processor (`scratchpad/issue17/chaine_petit_pc.sh`: game limited to 4 logical processors, active
+  waiting off, 1080p, 60 Hz, 5 minutes, two runs of each): 60 fps everywhere; windows with a frame over 40 ms: 12 and
+  15 without, 13 and 11 with; 99th percentile 115 and 124 ms without, 140 and 148 with (one or two windows per run,
+  within the run-to-run spread: maximum 127 and 224 ms without); 210 and 208 stops of about 1 ms (74 threads). Not
+  simulated: slower cores, less RAM, a slow disk, a modest graphics card.
+
+**Black artifacts on explosions (reported by the user during the test runs, not found again).** Seen "at random",
+once until a game over, then briefly, including during a run started with `RECOMP_NO_ATOMIC_RESTORE=1`: the fix of
+issue #17 has nothing to do with it. Searched: contact sheets of six runs, two runs at two screenshots per second
+(fire pictures sorted by `scratchpad/issue17/feu.py`), one run with `RECOMP_TEX_AUDIT=30` (no stale texture during the
+fights; 36 object-less textures reported once, at the scene change). Nothing visible on these pictures; a screenshot
+from the user or the time of an occurrence is needed. Remaining suspects: the binding caches of 2026-11-12
+(`RECOMP_NO_BIND_CACHE`, `RECOMP_FAST_RENDERING=0` to rule them out).
+
+**Issue #18: Microsoft's "Vulkan on Direct3D 12" layer picked instead of the driver (2026-11-13).** On an RX 9070 XT,
+1.0.3 (last discrete card of the list) chose "Microsoft Direct3D12 (AMD Radeon RX 9070 XT)", in Vulkan 1.2, and the
+precompilation crashed. `vk_render.cpp` (`carte_utilisable`, `choisir_carte`): a card without Vulkan 1.3, or whose
+name starts with "Microsoft Direct3D12", is no longer picked automatically (only when named in full in recomp.ini);
+the launcher no longer offers it (`lanceur.cpp`, `cartes_lister`). Checked by simulation
+(`RECOMP_GPU_SET_ASIDE=nvidia`: the AMD card is picked, the "set aside" line is written; named card: honored), not on
+a PC that has this layer.
+
+**Issue #19 and issue #17: same probable cause, seen in the game code (2026-11-13, 3:50 am).** Issue #19 (end of the
+tutorial, RTX 5070, 1.0.3): write at 0x68 at main+0xba23d88 (`strh w8, [x0, #0x68]`), x0 = null return of
+main+0xb8bfde0. That function creates an object of the engine's render storage (`vspirv.render_storage.c`) for a mesh
+particle (explosion debris) and the game does not check the return. Its allocator (main+0xb90aec0) returns null when
+the pool is full, or when its header reads as zeros (empty free list, 0 items out of 0): what the non-atomic restore
+produced when several threads touch at once a page put away for minutes. Issue #17 reads field +0x68 of the same kind
+of object. The atomic restore covers this case; remaining assumption: that the pool was not simply full (nothing is
+reproduced here). In 1.0.3, `cold_page_release = false` should avoid it.
+
+**Game log without the user name (2026-11-13).** A recomp_run.log attached by hand to issue #19 showed the Windows
+profile path. `runtime/os/host_main.cpp` (`masquer_profil`, in `vlog`) replaces that path with `%USERPROFILE%` in
+every line; `RECOMP_LOG_PATHS=1` keeps them. Checked on a run: 5 lines concerned, no profile path left in clear.
+`lanceur.log` still has to be handled the same way.
+
+**Black artifacts, continued: textures rewritten by the game during play (2026-11-13, 4:15 am).** Four runs with
+`RECOMP_TEX_AUDIT=30 RECOMP_FLUSH_LOG=1` (`scratchpad/issue17/chaine_audit.sh`): in each, 2 to 4 textures of
+2048×2048 with no live object are rewritten in place by the game after their upload, and sent again by
+`flush_recheck`; the audit caught 2 and 5 of them stale in between in two runs. The game never calls
+`nvnMemoryPoolFlushMappedRange` (0 flushes). The re-upload is immediate when the source had been given back to Windows
+(touched pages), but waits up to 30 frames when it had not (just uploaded, small, or under an import): the old content
+is displayed meanwhile. A texture that still has a live object and whose source is not given back is never checked
+again. Possible fix, not done: check the sources that are not given back at every frame (whole hash when small, a few
+samples otherwise), with or without a live object. Link with the artifacts seen by the user: plausible, not
+established (no screenshot of the defect).
+
+**Blue patches on the ground in Corneria city: cause found and fixed (2026-11-13).** The defect confirmed by the user
+("a ground texture problem at the checkpoint in the city") came from the shader translator, not from the runtime:
+`glsl.py` translated `i2f` from an 8-bit or 16-bit source by always reading byte 0 of the word, whereas the
+instruction picks the byte (0 to 3) or the half (0 or 1) with its `sub` field, which `sass.py` already decoded and
+which `f2i` and `f2f` used.
+- What it broke: projected decals (ground markings, cracks, craters, blast marks). Every lit material walks entries
+  of 0x50 bytes (bank 11 of the fragment shader); the word at + 76 holds flags in byte 0 and the atlas LAYER in byte 2
+  (`i2f` with `sub` = 2, instruction 0x1040 of `0ca80c10b8a37aae`). The translated shader therefore took the flags
+  for the layer: a crack decal showed the atlas normal map as its colour (an embossed blue patch), a marking showed
+  some other layer.
+- The atlas: the game's texture 260, 1024×1024, 64 layers, BC7, filled by `nvnCommandBufferCopyBufferToTexture`. The
+  game assigns layers on the fly, in an order that changes from one run to the next: hence a varying look, and the
+  illusion of an intermittent defect or of a regression.
+- Extent: 252 instructions in 202 stages out of 2,468 (196 fragment stages: every lit material, lit characters and
+  lit effects included; 6 compute stages). The defect has been there since the first translation (captures of
+  2026-11-11): 1.0.3 has it. It was not a regression of the evening of 2026-11-12, contrary to a first conclusion
+  drawn from captures compared at the same frame number, hence at different places.
+- Effect of an update: `recomp/shaders/*.py` changes, so the shader step is redone on the players' side (62 s of
+  translation and 45 s of pipelines on the development PC), without recompiling the game.
+- Fix: `glsl.py` shifts the read by `sub` × 8 bits (8-bit source) or by (`sub` & 1) × 16 bits (16-bit source).
+  Verified on 2026-11-13 in the test game (1440p, 120 Hz): for the ground shader, only the line of instruction 0x1040
+  changes (byte 2 instead of 0); the 2,388 shaders are translated again (still 80 stages not translated); a mission
+  played unattended: at the city checkpoint, the white ground marking is back and there is no blue patch left
+  (`issue17/avant_apres_point_controle.jpg`); further on ("Any day now, Fox"), the ground is the one Lichii shows at
+  the same place: a white outline, grey cracks (`issue17/lichii_avant_apres.jpg`). Validation mission afterwards
+  (10 min unattended, 61,200 frames): clean exit, 108.6 fps median, 54.8 minimum, no skipped draw, no missing shader,
+  5.41 GB of memory at most (9.62 GB committed).
+- Black artifacts on explosions (seen by the user on the 12th and 13th): a lead, not proven. The lit effect materials
+  (debris, `vfx_lit_normals`, `vfx_rock_chunks_atlas_01_lit`) are among the 196 fixed shaders; with the old
+  translation, an explosion decal, or a piece of debris inside a decal volume, received the wrong layer, and layer 0
+  of the atlas is black. To be confirmed by playing; the `RECOMP_NAN_SCAN` counter had found no NaN, and the check of
+  rewritten textures changed nothing.
+- Same family, found by auditing the fields that `sass.py` decodes and `glsl.py` never reads
+  (`issue17/champs_ignores.py`): half-precision `mufu` (the `f16` flag) was translated in single precision, the whole
+  word read as an f32. The source is the half of the word picked by `sub` (bits 60 to 62, as for `f2f`), the result
+  an f16 in the low half. Only one translated shader is concerned (`d38474b0c297f4ed`: four reciprocals of a radial
+  blur of at most 8 steps); the 855 `lg2` / `ex2` pairs are in compute shaders that are not translated yet. The halves
+  picked by `sub` (y, x, x, y) are the ones the shader's computation asks for, checked by hand.
+  Fixed (`sass.py` decodes `sub` for `mufu`, `glsl.py` applies it), translated again and played (390 s: the opening
+  cinematic and the mission up to the city): no crash, but this shader is used nowhere along that path
+  (`RECOMP_SHADER_WATCH=d38474b0c297f4ed`: no line). Its effect on screen is therefore not verified.
+- Other fields never read, with no known effect: `ftz`, `lanes`, `scalar` (always the same value), `bar` and `noinc`
+  (code structure), `lea.sx32` (274 cases, compute shaders only), the rounding modes of `fmul` and `fadd`.
+- Ruled out along the way, with evidence: the texture contents on the GPU at every detail level (identical to the
+  game's memory, `gpu_niveaux.py`), handles and descriptors, the optimizations of 2026-11-12, the memory saver,
+  synchronization with the GPU thread (`RECOMP_GPU_SYNC=1`: same copies), reads of the game copy, the save, the engine
+  variables, NaN (`RECOMP_NAN_SCAN`: none over a mission).
+- Method to keep: compare two runs at the same place, aligned on the time since the start of the campaign (second
+  write of the save; the city checkpoint is at ≈ + 242.6 s), not on the frame number; read the translated shader
+  early (`build/full/shader_cache/<hash>.frag.glsl`) and the fields that `sass.py` decodes while `glsl.py` ignores
+  them. Tools: `scratchpad/issue17/` (`passages.py`, `point_controle.py`, `decal_dessins.py`, `i2f_selecteur.py`,
+  `i2f_contexte.py`, `gpu_niveaux.py`, `frein.sh`, `lichii_isole.py`). Reference: Lichii as an isolated, portable copy,
+  without touching the user's installation or save.
+
+**Build memory (issue #24, 2026-11-13).** Under Linux with Proton, 31 clang compilations at once filled 31 GB and
+Linux killed the build (three times, with no message: the "half as many tasks" retry of `preparer.py` only triggers
+on "out of memory" or `MemoryError`). The number of tasks was only set at the start, at 0.4 GB per clang (measured
+under Windows at -O1). Memory is now watched during the build: `preparer.py` starts `fullbuild.py` through
+"`preparer.py --fullbuild …`" (`construction_surveillee`), which replaces its `Compilations` class with a subclass
+(`compilations_surveillees`). The memory of each compilation is sampled twice a second (`memoire_processus`); at most
+8 compilations until one has been measured; after that, one more only if free memory, minus 2 GB, covers it and the
+compilations younger than 15 s at the largest measured peak; at least one always runs. The log says "compilations: up
+to N at once, up to X GB each, free memory at the lowest Y GB" per module. Measured under Windows at -O2: up to
+0.44 GB for an `sdk` batch (37 objects in 109 s, 15 at once). Not verified: Linux, and a full build.
+`fullbuild.py` itself is NOT modified, on purpose: it is part of the signature of the "recompiler" step, and a single
+changed byte makes that step run again for every player at update time (109 s on 16 threads with nothing to compile,
+measured; much longer on a small PC). A first draft modified it: `verifier.py`, check `maj`, showed it ("refera :
+recompiler, lier, shaders"). The day `fullbuild.py` changes for another reason, move this code back into it.
+
+**Check of rewritten textures (case 5): speed regression found and fixed (2026-11-13).** Case 5 of `flush_recheck`,
+added the night before, recomputed a fingerprint at every frame for every bound texture whose source stays in memory.
+`mem_valid` asks Windows (`VirtualQuery`, ≈ 25 µs outside its small cache): with `texture_release = false` (every
+source stays), 81 fps median instead of 120 over 100 s, minimum 10, then under 10 fps in a mission. The fingerprint is
+now recomputed every 30 frames per texture (`EPARSE_PERIODE`, spread by the address): a texture rewritten in place
+without having been given back to Windows is sent again at most 30 frames later, like case 3. Case 4 (source given
+back then touched under a live object) stays immediate.
+Cost after the fix, default configuration (`scratchpad/issue17/chaine_revue.sh`, eight 5-minute runs, with then
+without `RECOMP_NO_TEX_RECHECK=1`): simulated small PC (4 logical processors, 1080p, 60 Hz) 60.0 fps median in all four
+runs, windows with a frame over 40 ms: 11 and 10 without, 13 and 16 with, 99th percentile of the worst frame 131 and
+123 ms without, 128 and 126 ms with; 1440p at 120 Hz: median interval 8.67 and 8.48 ms without, 8.61 and 8.44 ms with.
+No measurable cost. The user saw the black artifacts in runs with and without this check (5:25 pm and 5:31 pm): it
+does not fix them.
+
+**`verifier.py` checks (2026-11-13).** `rapide`: everything passes except `versions` (the `lanceur.exe` at the root is
+the user's, at 1.0.3: it will be rebuilt at install time). Three fixes:
+- `maj` refused any download, whereas a 1.0.3 → 1.1.0 update adds SDL3 and the FSR and DLSS DLLs (96 MB). It now puts
+  the archives of those tools in `outils/_archives` beforehand (taken from the package or from the checks' cache),
+  still refuses any other download, and expects exactly those extra tools in `outils/`. The download addresses are not
+  tried.
+- The full package carried `outils/fsr/LICENSE.md` and `README.txt`, which an update does not install: `paquet.py` now
+  keeps, for a tool made of single files, only those files (the licence is in `LICENCES/`).
+- `depot` refused two comments that quoted a profile path as an example (`lanceur.cpp`, `host_main.cpp`): reworded.
+
+**Diagnostics added (2026-11-13), no effect in normal play.** `RECOMP_VK_DEBUG=N1,N2,…` (a list of frames) also gives
+the NVN view and the sampler of every bound texture; with `RECOMP_DBG_TEX_DUMP=part1,part2`, the draws of the named
+materials dump into `tex_dump/` the source memory of their textures, their readback from the GPU (every level of a
+plain texture, level 0 of every layer of an array) and the first 24 words of their uniform buffers;
+`RECOMP_DBG_UBO_DUMP=11,16` adds the whole contents of those banks. `RECOMP_COPY_ARRAY_LOG=1`: every copy into an
+array texture. `RECOMP_GPU_SYNC=1`: the game waits for the GPU thread at every submission (very slow).
+`RECOMP_NAN_SCAN=n`: counts the NaN or infinite pixels of floating-point targets every n frames;
+`RECOMP_NAN_MINMAX=1`: an experiment, min, max and clamp that drop NaN (nothing shows that it fixes anything).
+`svc_fs.cpp`: a failed read of the game copy is logged ("game data read FAILED"); it used to zero-fill the memory
+silently. `nvn_exec.cpp`: `CopyTextureToBuffer`, never executed, is logged if the game emits it.
+`RECOMP_SHADER_WATCH=hash,hash`: the draws that use those shaders (frame, material, first target), the first time and
+then every 600 frames.

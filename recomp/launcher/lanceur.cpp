@@ -14,10 +14,16 @@
 #include <timeapi.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <thread>
+
+// en-têtes Vulkan du moteur (runtime/third_party, construire.py) ; vulkan-1.dll est chargé à l'exécution
+#define VK_NO_PROTOTYPES
+#include <vulkan/vulkan.h>
 
 namespace lz {
 
@@ -60,8 +66,26 @@ void jlog(const wchar_t* fmt, ...) {
     if (!f) return;
     SYSTEMTIME t;
     GetLocalTime(&t);
+    // Chemin du profil Windows (le dossier personnel, qui porte le nom d'utilisateur) remplacé par %USERPROFILE% :
+    // un lanceur.log joint à la main à une
+    // issue publique ne donne plus le nom d'utilisateur (le jeu fait de même, host_main.cpp ; le rapport de bug
+    // l'anonymisait déjà). LANCEUR_LOG_PATHS=1 : chemins laissés tels quels.
+    std::wstring ligne = b;
+    static const std::wstring profil = [] {
+        const wchar_t* e = _wgetenv(L"LANCEUR_LOG_PATHS") ? nullptr : _wgetenv(L"USERPROFILE");
+        return e && wcslen(e) > 5 ? std::wstring(e) : std::wstring();
+    }();
+    if (!profil.empty())
+        for (size_t i = 0; i + profil.size() <= ligne.size();) {
+            if (!_wcsnicmp(ligne.c_str() + i, profil.c_str(), profil.size())) {
+                ligne.replace(i, profil.size(), L"%USERPROFILE%");
+                i += 13;
+            } else {
+                i++;
+            }
+        }
     fprintf(f, "%04u-%02u-%02u %02u:%02u:%02u  %s\r\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond,
-            utf8(b).c_str());
+            utf8(ligne).c_str());
     fclose(f);
 }
 
@@ -71,7 +95,12 @@ constexpr UINT WM_JEU_FINI = WM_APP + 1, WM_CONS_FINIE = WM_APP + 2, WM_RAPPORT_
                WM_MAJ_DISPO = WM_APP + 5;
 constexpr UINT_PTR MINUTEUR_MAJ = 1;
 
-const wchar_t* CLASSE = L"LanceurStarFoxRecompile";
+// Une seule instance par classe de fenêtre. Version d'essai (construire.py --classe) : une autre classe, pour tourner à
+// côté du launcher du joueur sans le toucher.
+#ifndef LANCEUR_CLASSE
+#define LANCEUR_CLASSE L"LanceurStarFoxRecompile"
+#endif
+const wchar_t* CLASSE = LANCEUR_CLASSE;
 
 bool existe(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }
 std::wstring parent(const std::wstring& p) {
@@ -109,6 +138,7 @@ void chemins() {
     if (g.recomp.empty()) g.recomp = g.dossier_exe;
     // paquet installé (lanceur.exe à la racine, recomp/ à côté) : il se met à jour depuis les releases GitHub
     g.paquet = existe(g.dossier_exe + L"\\recomp\\fullbuild.py") && existe(g.dossier_exe + L"\\recomp\\launcher\\maj.py");
+    g.sources = existe(g.recomp + L"\\launcher\\lanceur.cpp");   // dossier de développement : jamais déplacé
     g.version = VERSION;
     if (FILE* f = _wfopen((g.recomp + L"\\VERSION").c_str(), L"rb")) {
         char b[64] = {};
@@ -213,6 +243,18 @@ void config_lire() {
     else if (l == L"en") g.langue = Langue::En;
     else g.langue = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_FRENCH ? Langue::Fr : Langue::En;
     g.copie = ini_lire(L"copie", L"");
+    // Dossier d'installation déplacé depuis le dernier démarrage (« Emplacement du jeu » de la page Réglages, ou à la
+    // main) : une copie du jeu rangée dans l'ancien dossier a suivi, son chemin est refait
+    const std::wstring ancien = ini_lire(L"dossier", L"");
+    if (!ancien.empty() && _wcsicmp(ancien.c_str(), g.dossier_exe.c_str()) != 0) {
+        jlog(L"install folder changed since the last start");
+        if (g.copie.size() > ancien.size() + 1 && !_wcsnicmp(g.copie.c_str(), ancien.c_str(), ancien.size()) &&
+            g.copie[ancien.size()] == L'\\' && !existe(g.copie) && existe(g.dossier_exe + g.copie.substr(ancien.size()))) {
+            g.copie = g.dossier_exe + g.copie.substr(ancien.size());
+            ini_ecrire(L"copie", g.copie);
+        }
+    }
+    if (ancien != g.dossier_exe) ini_ecrire(L"dossier", g.dossier_exe);
     g.volume = std::clamp(_wtoi(ini_lire(L"volume", L"100").c_str()), 0, 100);
     g.fond_video = ini_lire(L"fond", L"extraits") != L"sobre";
     g.fils = std::clamp(_wtoi(ini_lire(L"fils", L"0").c_str()), 0, g.fils_max);
@@ -247,6 +289,124 @@ void copie_trouver() {
     g.copie.clear();
     g.copie_ok = false;
 }
+
+// ---------------------------------------------------------------- cartes graphiques
+// Choix de la carte du jeu dans la page Graphismes (2026-11-12, demande de l'utilisateur : « certains vont lancer avec
+// une carte AMD […] si ce n'est pas un NVIDIA alors on ne peut pas choisir le DLSS »). Les cartes sont listées par
+// Vulkan, comme le jeu les voit (mêmes noms), et le choix automatique est le sien (vk_render.cpp, choisir_carte) : les
+// garder pareils.
+std::string minuscules(std::string s) {
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+
+// Dans un fil au démarrage : créer une instance Vulkan charge les pilotes des cartes (jusqu'à quelques centaines de ms).
+// vulkan-1.dll reste chargé (un pilote peut garder un fil à lui) ; rien ne sert d'autre que la liste.
+void cartes_lister() {
+    std::vector<Carte> l;
+    int ecartees = 0;   // cartes pas proposées (voir plus bas)
+    const ULONGLONG t0 = GetTickCount64();
+    if (HMODULE lib = LoadLibraryW(L"vulkan-1.dll")) {
+        const auto gipa = (PFN_vkGetInstanceProcAddr)(void*)GetProcAddress(lib, "vkGetInstanceProcAddr");
+        const auto creer = gipa ? (PFN_vkCreateInstance)gipa(nullptr, "vkCreateInstance") : nullptr;
+        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        app.pApplicationName = "lanceur";
+        app.apiVersion = VK_API_VERSION_1_3;   // comme le jeu
+        VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+        ici.pApplicationInfo = &app;
+        VkInstance inst = VK_NULL_HANDLE;
+        if (creer && creer(&ici, nullptr, &inst) == VK_SUCCESS) {
+            const auto detruire = (PFN_vkDestroyInstance)gipa(inst, "vkDestroyInstance");
+            const auto enumerer = (PFN_vkEnumeratePhysicalDevices)gipa(inst, "vkEnumeratePhysicalDevices");
+            const auto proprietes = (PFN_vkGetPhysicalDeviceProperties)gipa(inst, "vkGetPhysicalDeviceProperties");
+            const auto memoire = (PFN_vkGetPhysicalDeviceMemoryProperties)gipa(inst, "vkGetPhysicalDeviceMemoryProperties");
+            if (enumerer && proprietes && memoire) {
+                uint32_t n = 0;
+                enumerer(inst, &n, nullptr);
+                std::vector<VkPhysicalDevice> pds(n);
+                if (n) enumerer(inst, &n, pds.data());
+                for (uint32_t i = 0; i < n; i++) {
+                    VkPhysicalDeviceProperties pr;
+                    proprietes(pds[i], &pr);
+                    // Pas proposées, comme le jeu ne les prend pas de lui-même (vk_render.cpp, carte_utilisable) : une
+                    // carte sans Vulkan 1.3, et la couche « Vulkan sur Direct3D 12 » de Microsoft, qui double chaque
+                    // carte sous le nom « Microsoft Direct3D12 (…) » (issue GitHub n° 18)
+                    if (pr.apiVersion < VK_API_VERSION_1_3 || !strncmp(pr.deviceName, "Microsoft Direct3D12", 20)) {
+                        ecartees++;
+                        continue;
+                    }
+                    VkPhysicalDeviceMemoryProperties mp;
+                    memoire(pds[i], &mp);
+                    Carte c;
+                    c.nom = pr.deviceName;
+                    c.fabricant = pr.vendorID;
+                    c.dediee = pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+                    for (uint32_t h = 0; h < mp.memoryHeapCount; h++)
+                        if (mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+                            c.memoire = std::max<uint64_t>(c.memoire, mp.memoryHeaps[h].size);
+                    // deux cartes du même nom : une seule ligne (le jeu prendrait la première, qui a ce nom)
+                    bool deja = false;
+                    for (const Carte& x : l) deja |= x.nom == c.nom;
+                    if (!deja) l.push_back(c);
+                }
+            }
+            if (detruire) detruire(inst, nullptr);
+        }
+    }
+    std::wstring s;
+    for (const Carte& c : l) {
+        wchar_t b[320];
+        swprintf(b, 320, L"%ls%ls (%ls, %.1f GB)", s.empty() ? L"" : L"; ", wide(c.nom).c_str(),
+                 c.dediee ? L"discrete" : L"integrated or other", c.memoire / 1073741824.0);
+        s += b;
+    }
+    jlog(L"graphics cards (Vulkan, %llu ms): %ls", (unsigned long long)(GetTickCount64() - t0),
+         l.empty() ? L"none" : s.c_str());
+    if (ecartees) jlog(L"graphics cards set aside (Vulkan below 1.3, or the Direct3D 12 layer): %d", ecartees);
+    g.cartes = std::move(l);
+    g.cartes_pretes.store(true, std::memory_order_release);
+}
+
+}  // namespace
+
+// déclarées dans lanceur.h (page Graphismes, dessin.cpp)
+int carte_du_jeu(bool* nommee) {
+    if (nommee) *nommee = false;
+    if (!g.cartes_pretes.load(std::memory_order_acquire)) return -1;
+    const std::string voulu = minuscules(g.reglages.gpu);
+    if (voulu != "auto" && !voulu.empty())
+        for (size_t i = 0; i < g.cartes.size(); i++)
+            if (minuscules(g.cartes[i].nom).find(voulu) != std::string::npos) {
+                if (nommee) *nommee = true;
+                return (int)i;
+            }
+    // automatique (ou carte absente : changée depuis) : la carte dédiée qui a le plus de mémoire, à défaut la carte qui en
+    // a le plus ; à égalité, la première
+    int choix = -1;
+    for (size_t i = 0; i < g.cartes.size(); i++) {
+        const Carte& c = g.cartes[i];
+        if (choix < 0 || (c.dediee != g.cartes[choix].dediee ? c.dediee : c.memoire > g.cartes[choix].memoire))
+            choix = (int)i;
+    }
+    return choix;
+}
+
+bool dlss_possible() {
+    const int i = carte_du_jeu();
+    if (i < 0) return true;
+    return g.cartes[i].fabricant == 0x10DE && minuscules(g.cartes[i].nom).find("rtx") != std::string::npos;
+}
+
+std::wstring nom_carte(const std::string& nom) {
+    std::string s = nom;
+    for (const char* x : {"(TM)", "(tm)", "(R)", "(r)"})
+        for (size_t p; (p = s.find(x)) != std::string::npos;) s.erase(p, strlen(x));
+    if (s.rfind("NVIDIA GeForce ", 0) == 0) s.erase(0, 7);   // « GeForce » suffit à dire NVIDIA
+    for (size_t p; (p = s.find("  ")) != std::string::npos;) s.erase(p, 1);
+    return wide(s);
+}
+
+namespace {
 
 // ---------------------------------------------------------------- recomp.ini du jeu
 std::wstring recomp_ini() { return g.jeu + L"\\recomp.ini"; }
@@ -285,6 +445,16 @@ const char* const TOUCHES_CLES[NB_TOUCHES] = {
     "key_a", "key_b", "key_x", "key_y", "key_l", "key_r", "key_zl", "key_zr", "key_plus", "key_minus", "key_lstick", "key_rstick",
     "key_up", "key_down", "key_left", "key_right", "key_ls_up", "key_ls_down", "key_ls_left", "key_ls_right",
     "key_rs_up", "key_rs_down", "key_rs_left", "key_rs_right"};
+// ---------------------------------------------------------------- boutons de la manette (page Contrôles, onglet Manette)
+// Une entrée de la manette par bouton de la Switch (« pad_a = east »…), écrites dans recomp.ini dès que le joueur en
+// change une. Noms des entrées : mêmes que PAD_ENTREES du jeu (runtime/os/settings.cpp), ordre de EntreePad.
+const char* const PAD_CLES[NB_PAD] = {"pad_a", "pad_b", "pad_x", "pad_y", "pad_l", "pad_r", "pad_zl", "pad_zr", "pad_plus",
+                                      "pad_minus", "pad_lstick", "pad_rstick", "pad_up", "pad_down", "pad_left", "pad_right"};
+const char* const ENTREES_PAD[P_NB] = {
+    "none", "south", "east", "west", "north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
+    "rightshoulder", "dpad_up", "dpad_down", "dpad_left", "dpad_right", "misc1", "right_paddle1", "left_paddle1",
+    "right_paddle2", "left_paddle2", "touchpad", "lefttrigger", "righttrigger"};
+
 // Deux préréglages, définis par la lettre gravée sur la touche et résolus sur le clavier réglé dans Windows :
 //   WASD (QWERTY) : stick gauche W A S D, Y sur Z, L sur Q, + sur M ;
 //   ZQSD (AZERTY) : stick gauche Z Q S D, Y sur W, L sur A, + sur la virgule.
@@ -330,8 +500,56 @@ void touches_choisir_prereglage(int p) {
     reglages_ecrire();
     jlog(L"controls: preset %ls", p ? L"ZQSD (AZERTY)" : L"WASD (QWERTY)");
 }
+// Donne l'entrée de la manette au bouton de la Switch `action` ; si un autre bouton l'avait, il reçoit l'ancienne entrée
+// de celui-ci (échange, comme pour les touches). « Aucun » n'est jamais échangé.
+void pad_affecter(int action, int entree) {
+    uint8_t* m = g.reglages.manette;
+    if (entree != P_AUCUNE)
+        for (int i = 0; i < NB_PAD; i++)
+            if (i != action && m[i] == entree) m[i] = m[action];
+    m[action] = (uint8_t)entree;
+    g.reglages.manette_ecrite = true;
+    reglages_ecrire();
+    jlog(L"controls: %hs = %hs", PAD_CLES[action], ENTREES_PAD[entree]);
+}
+void pad_par_defaut() {
+    const ReglagesJeu defaut;
+    memcpy(g.reglages.manette, defaut.manette, sizeof defaut.manette);
+    g.reglages.manette_ecrite = true;
+    reglages_ecrire();
+    jlog(L"controls: controller buttons back to the default layout");
+}
+// Onglet Manette en attente d'un appui : la première entrée appuyée qui ne l'était pas au début de l'attente est donnée
+// au bouton choisi (une entrée déjà tenue ne compte qu'après avoir été relâchée)
+void pad_suivre_capture() {
+    if (g.capture_pad < 0) return;
+    const uint32_t a = manettes().appuyees, nouvelles = a & ~g.pad_tenues;
+    g.pad_tenues &= a;
+    if (!nouvelles) return;
+    int e = 0;
+    while (!(nouvelles >> e & 1)) e++;
+    const int action = g.capture_pad;
+    g.capture_pad = -1;
+    pad_affecter(action, e);
+}
+// Onglet Manette, clic sur une entrée du dessin. Pendant une attente, elle est donnée au bouton qui attend, comme un
+// appui sur la manette : on assigne ainsi en cliquant, sans manette branchée. Sinon, le bouton de la Switch qu'elle fait
+// se met à attendre (une entrée qui ne fait rien n'est cliquable que pendant une attente : dessin.cpp, zone_bouton).
+void pad_entree_cliquee(int e, int attente) {
+    if (attente >= 0) {
+        if (g.reglages.manette[attente] != e) pad_affecter(attente, e);   // la sienne : l'attente est seulement annulée
+        return;
+    }
+    for (int i = 0; i < NB_PAD; i++)
+        if (g.reglages.manette[i] == e) {
+            g.capture_pad = i;
+            g.pad_tenues = manettes().appuyees;
+            return;
+        }
+}
 
 void reglages_lire() {
+    bool echelle_lue = false;
     for (const std::string& l0 : lignes_fichier(recomp_ini())) {
         const std::string l = trim(l0);
         if (l.empty() || l[0] == ';' || l[0] == '#' || l[0] == '[') continue;
@@ -340,11 +558,35 @@ void reglages_lire() {
         const std::string k = trim(l.substr(0, eq)), v = trim(l.substr(eq + 1));
         if (k == "refresh_rate") g.reglages.hz = std::clamp(atoi(v.c_str()), 30, 240);
         else if (k == "resolution") g.reglages.resolution = v == "auto" ? 0 : atoi(v.c_str());
-        else if (k == "native_resolution") g.reglages.natif = !(v == "false" || v == "0" || v == "non" || v == "off");
+        else if (k == "native_resolution") {   // ancien « Comme la console » : 67 % (si render_scale manque)
+            if ((v == "false" || v == "0" || v == "non" || v == "off") && !echelle_lue) g.reglages.echelle = 67;
+        } else if (k == "render_scale") {
+            g.reglages.echelle = std::clamp(atoi(v.c_str()), 67, 100);
+            echelle_lue = true;
+        }
+        else if (k == "dlss") {
+            g.reglages.dlss = 0;
+            for (int i = 1; i < 6; i++)
+                if (v == DLSS_MODES[i]) g.reglages.dlss = i;
+        } else if (k == "dlss_model") g.reglages.dlss_modele = v == "dlss45" ? 2 : 1;
+        else if (k == "fsr") {
+            g.reglages.fsr = 0;
+            for (int i = 1; i < 6; i++)
+                if (v == FSR_MODES[i]) g.reglages.fsr = i;
+        } else if (k == "fsr_version") g.reglages.fsr_version = v == "fsr4" ? 4 : v == "fsr3" ? 3 : 0;
+        else if (k == "gpu") g.reglages.gpu = v.empty() || minuscules(v) == "auto" ? std::string("auto") : v;
         else if (k == "window_mode") g.reglages.sans_bordure = !(v == "windowed" || v == "window" || v == "fenetre");
         else if (k == "language") g.reglages.langue = v.empty() ? "auto" : v;
         else if (k == "vibration") g.reglages.vibration = std::clamp(atoi(v.c_str()), 0, 100);
-        else if (k.rfind("key_", 0) == 0) {
+        else if (k.rfind("pad_", 0) == 0) {
+            for (int i = 0; i < NB_PAD; i++)
+                if (k == PAD_CLES[i])
+                    for (int e = 0; e < P_NB; e++)
+                        if (v == ENTREES_PAD[e]) {
+                            g.reglages.manette[i] = (uint8_t)e;
+                            g.reglages.manette_ecrite = true;
+                        }
+        } else if (k.rfind("key_", 0) == 0) {
             for (int i = 0; i < NB_TOUCHES; i++)
                 if (k == TOUCHES_CLES[i]) {
                     const unsigned long sc = strtoul(v.c_str(), nullptr, 0);
@@ -363,7 +605,13 @@ void reglages_ecrire() {
     std::vector<std::pair<std::string, std::string>> cles = {
         {"refresh_rate", std::to_string(g.reglages.hz)},
         {"resolution", g.reglages.resolution ? std::to_string(g.reglages.resolution) : "auto"},
-        {"native_resolution", g.reglages.natif ? "true" : "false"},
+        {"native_resolution", "true"},   // jeux construits avant render_scale : rendu natif
+        {"render_scale", std::to_string(g.reglages.echelle)},
+        {"dlss", DLSS_MODES[std::clamp(g.reglages.dlss, 0, 5)]},
+        {"dlss_model", g.reglages.dlss_modele == 2 ? "dlss45" : "dlss4"},
+        {"fsr", FSR_MODES[std::clamp(g.reglages.fsr, 0, 5)]},
+        {"fsr_version", g.reglages.fsr_version == 4 ? "fsr4" : g.reglages.fsr_version == 3 ? "fsr3" : "auto"},
+        {"gpu", g.reglages.gpu},
         {"window_mode", g.reglages.sans_bordure ? "borderless" : "windowed"},
         {"language", g.reglages.langue},
         {"vibration", std::to_string(g.reglages.vibration)},
@@ -374,8 +622,13 @@ void reglages_ecrire() {
             snprintf(b, sizeof b, "0x%X", g.reglages.touches[i]);
             cles.push_back({TOUCHES_CLES[i], b});
         }
-    bool section_clavier = false;
-    for (const std::string& l : v) section_clavier = section_clavier || trim(l) == "[keyboard]";
+    if (g.reglages.manette_ecrite)   // boutons de la manette : seulement une fois que le joueur en a changé un
+        for (int i = 0; i < NB_PAD; i++) cles.push_back({PAD_CLES[i], ENTREES_PAD[std::min<int>(g.reglages.manette[i], P_NB - 1)]});
+    bool section_clavier = false, section_manette = false;
+    for (const std::string& l : v) {
+        section_clavier = section_clavier || trim(l) == "[keyboard]";
+        section_manette = section_manette || trim(l) == "[controller]";
+    }
     for (auto& [k, val] : cles) {
         bool fait = false;
         for (std::string& l : v) {
@@ -393,6 +646,59 @@ void reglages_ecrire() {
             v.push_back("; Valeur : position de la touche (scancode ; 0xE0.. : touche étendue ; 0 : aucune touche).");
             v.push_back("; Keyboard keys, one per controller button: set from the launcher's Controls page.");
             v.push_back("; Value: position of the key (scancode; 0xE0..: extended key; 0: no key).");
+        }
+        if (!fait && k.rfind("pad_", 0) == 0 && !section_manette) {
+            section_manette = true;
+            v.push_back("");
+            v.push_back("[controller]");
+            v.push_back("; Boutons de la manette, un par bouton de la Switch : réglés depuis la page Contrôles du launcher (onglet");
+            v.push_back("; Manette). Valeur : entrée repérée par sa position (south : bouton du bas, A d'une manette Xbox, ✕ d'une");
+            v.push_back("; PlayStation, B d'une Nintendo ; east, west, north, leftshoulder, lefttrigger, start, back, dpad_up… ; none).");
+            v.push_back("; Controller buttons, one per Switch button: set from the launcher's Controls page (Controller tab).");
+            v.push_back("; Value: input by position (south: bottom button, A on Xbox, ✕ on PlayStation, B on Nintendo; east, west,");
+            v.push_back("; north, leftshoulder, lefttrigger, start, back, dpad_up…; none).");
+        }
+        if (!fait && k == "fsr") {   // apparu après la 1.0.3 : expliqué (comme le jeu le fait, settings.cpp kCleFsr)
+            const std::vector<std::string> bloc = {
+                "",
+                "; FSR d'AMD à la place de l'anticrénelage du jeu, sur toute carte graphique : off, native, quality (rendu 3D",
+                "; à 67 %), balanced (59 %), performance (50 %) ou ultra_performance (33 %). fsr_version : auto (FSR 4 sur les",
+                "; cartes AMD qui le proposent, sinon FSR 3.1), fsr3 ou fsr4. Le DLSS passe devant sur une carte NVIDIA RTX.",
+                "; AMD FSR instead of the game's anti-aliasing, on any graphics card: off, native, quality (3D rendering at",
+                "; 67%), balanced (59%), performance (50%) or ultra_performance (33%). fsr_version: auto (FSR 4 on the AMD",
+                "; cards that offer it, FSR 3.1 otherwise), fsr3 or fsr4. DLSS takes priority on an NVIDIA RTX card.",
+                k + " = " + val};
+            auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
+            if (pos != v.end()) {   // avant la ligne vide qui précède la section
+                while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
+                v.insert(pos, bloc.begin(), bloc.end());
+            } else {
+                v.insert(v.end(), bloc.begin(), bloc.end());
+            }
+            continue;
+        }
+        if (!fait && k == "fsr_version") {   // juste après fsr, qui vient d'être écrit
+            auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l).rfind("fsr =", 0) == 0; });
+            v.insert(pos != v.end() ? pos + 1 : v.end(), k + " = " + val);
+            continue;
+        }
+        if (!fait && k == "gpu") {   // apparu après la 1.0.3 : expliqué (comme le jeu le fait, settings.cpp kCleGpu),
+            // avant la section des touches s'il y en a une
+            const std::vector<std::string> bloc = {
+                "",
+                "; Carte graphique : auto (la carte dédiée qui a le plus de mémoire vidéo) ou le nom de la carte, choisie dans",
+                "; la page Graphismes du launcher. Le DLSS ne sert que sur une carte NVIDIA RTX.",
+                "; Graphics card: auto (the dedicated card with the most video memory) or the card's name, chosen in the",
+                "; launcher's Graphics page. DLSS only works on an NVIDIA RTX card.",
+                k + " = " + val};
+            auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
+            if (pos != v.end()) {   // avant la ligne vide qui précède la section
+                while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
+                v.insert(pos, bloc.begin(), bloc.end());
+            } else {
+                v.insert(v.end(), bloc.begin(), bloc.end());
+            }
+            continue;
         }
         if (!fait) v.push_back(k + " = " + val);
     }
@@ -766,6 +1072,171 @@ void finir_mise_a_jour() {
     PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
 }
 
+// ---------------------------------------------------------------- emplacement du jeu (issue GitHub n° 14, deplacer.py)
+// argument entre guillemets : des barres obliques inverses finales (« D:\ ») sont doublées, sinon la dernière
+// échapperait le guillemet fermant
+std::wstring entre_guillemets(const std::wstring& p) {
+    size_t n = 0;
+    while (n < p.size() && p[p.size() - 1 - n] == L'\\') n++;
+    return L"\"" + p + std::wstring(n, L'\\') + L"\"";
+}
+
+// lance une commande sans fenêtre et rend sa sortie (vide si elle n'a pas démarré)
+std::string sortie_commande(std::wstring cmd, DWORD delai_ms) {
+    std::string sortie;
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE lecture = nullptr, ecriture = nullptr;
+    if (!CreatePipe(&lecture, &ecriture, &sa, 0)) return sortie;
+    SetHandleInformation(lecture, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = si.hStdError = ecriture;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g.dossier_exe.c_str(), &si, &pi)) {
+        CloseHandle(lecture), CloseHandle(ecriture);
+        return sortie;
+    }
+    CloseHandle(ecriture);
+    CloseHandle(pi.hThread);
+    char b[4096];
+    DWORD n = 0;
+    while (ReadFile(lecture, b, sizeof b, &n, nullptr) && n) sortie.append(b, n);
+    CloseHandle(lecture);
+    WaitForSingleObject(pi.hProcess, delai_ms);
+    CloseHandle(pi.hProcess);
+    return sortie;
+}
+
+// reste de la ligne qui suit `marque` dans une sortie au protocole « @… » (vide : absente)
+std::string apres_marque(const std::string& sortie, const char* marque) {
+    const size_t k = sortie.find(marque);
+    if (k == std::string::npos) return {};
+    const std::string v = sortie.substr(k + strlen(marque));
+    return v.substr(0, v.find_first_of("\r\n"));
+}
+
+// processus détaché, depuis le dossier temporaire (il ne tient pas le dossier d'installation) : il survit au launcher
+bool lancer_detache(std::wstring cmd) {
+    wchar_t temp[MAX_PATH + 1] = L"";
+    GetTempPathW(MAX_PATH, temp);
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    const DWORD drapeaux = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, drapeaux | CREATE_BREAKAWAY_FROM_JOB, nullptr, temp, &si, &pi) &&
+        !CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, drapeaux, nullptr, temp, &si, &pi))
+        return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
+// copie annulée, en échec ou restée en plan : le dossier commencé est retiré (deplacer.py --abandonner ne supprime
+// qu'un dossier qui porte sa marque, jamais celui d'où il tourne)
+void abandonner_deplacement() {
+    if (g.dep_vers.empty()) return;
+    const std::wstring cmd = commande_python(g.recomp + L"\\launcher\\deplacer.py");
+    if (!cmd.empty()) lancer_detache(cmd + L" --abandonner --vers " + entre_guillemets(g.dep_vers));
+    ini_ecrire(L"deplacement_vers", L"");
+    g.dep_vers.clear();
+}
+
+// au démarrage : un déplacement resté en plan (launcher fermé pendant la copie) ; après un déplacement réussi, la clé
+// désigne ce dossier-ci : elle est seulement effacée
+void deplacement_au_demarrage() {
+    const std::wstring vers = ini_lire(L"deplacement_vers", L"");
+    if (vers.empty()) return;
+    if (_wcsicmp(vers.c_str(), g.dossier_exe.c_str()) != 0) {
+        jlog(L"move: unfinished copy left by the last run, removed");
+        g.dep_vers = vers;
+        abandonner_deplacement();
+    } else {
+        ini_ecrire(L"deplacement_vers", L"");
+    }
+}
+
+// Emplacement du jeu (page Réglages) : le joueur choisit un dossier ; deplacer.py --verifier dit où l'installation ira
+// et si c'est un autre volume ; une question ; puis deplacer.py --copier, tâche suivie par la page Construction (rien à
+// copier sur le même volume). Ensuite finir_deplacement ferme le launcher. Jamais dans un dossier de développement.
+// LANCEUR_DEPLACER_VERS (vérification) : dossier choisi, sans dialogue ni question.
+void deplacer() {
+    if (!g.paquet || g.sources || g.cons.active || g.jeu_lance) return;
+    std::wstring choix;
+    const wchar_t* essai = _wgetenv(L"LANCEUR_DEPLACER_VERS");
+    if (essai) {
+        choix = essai;
+    } else {
+        IFileOpenDialog* d = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return;
+        DWORD options = 0;
+        d->GetOptions(&options);
+        d->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        d->SetTitle(T("dep_dialogue"));
+        if (SUCCEEDED(d->Show(g.hwnd))) {
+            IShellItem* r = nullptr;
+            if (SUCCEEDED(d->GetResult(&r))) {
+                PWSTR p = nullptr;
+                if (SUCCEEDED(r->GetDisplayName(SIGDN_FILESYSPATH, &p)) && p) choix = p;
+                CoTaskMemFree(p);
+                r->Release();
+            }
+        }
+        d->Release();
+    }
+    if (choix.empty() || g.cons.active || g.jeu_lance) return;
+    const std::wstring script = commande_python(g.recomp + L"\\launcher\\deplacer.py");
+    if (script.empty()) {
+        g.statut_jeu = T("pas_de_python");
+        return;
+    }
+    const std::wstring base = script + L" --racine " + entre_guillemets(g.dossier_exe);
+    const std::string sortie = sortie_commande(base + L" --verifier --vers " + entre_guillemets(choix), 20000);
+    const std::wstring dest = wide(apres_marque(sortie, "@destination "));
+    if (dest.empty()) {
+        const std::wstring e = wide(apres_marque(sortie, "@erreur "));
+        jlog(L"move refused: %ls", e.empty() ? L"deplacer.py gave no answer" : e.c_str());
+        const std::wstring m = std::wstring(T("dep_refus")) + (e.empty() ? L"deplacer.py" : e);
+        if (essai) g.statut_jeu = m;
+        else MessageBoxW(g.hwnd, m.c_str(), NOM, MB_OK | MB_ICONWARNING);
+        return;
+    }
+    const bool autre = apres_marque(sortie, "@volume ") != "meme";
+    if (!essai) {
+        wchar_t q[1600];
+        swprintf(q, 1600, T(autre ? "dep_question_autre" : "dep_question_meme"), dest.c_str());
+        if (MessageBoxW(g.hwnd, q, NOM, MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+    }
+    g.dep_vers = dest, g.dep_autre_volume = autre;
+    ini_ecrire(L"deplacement_vers", dest);   // launcher fermé pendant la copie : retirée au prochain démarrage
+    jlog(L"move requested (%ls)", autre ? L"other drive: copy, then the old folder is deleted" : L"same drive: the folder is renamed");
+    g.page = Page::Construction;
+    lancer_tache(Tache::Deplacement, base + L" --copier --vers " + entre_guillemets(dest), g.dossier_exe,
+                 g.dossier_exe + L"\\deplacement.log", NORMAL_PRIORITY_CLASS);
+}
+
+// Copie faite (ou rien à copier) : deplacer.py --finir attend la fermeture du launcher, renomme le dossier ou supprime
+// l'ancien, puis relance le launcher. Autre volume : c'est le Python du nouveau dossier qui le lance, pour que l'ancien
+// dossier puisse être supprimé en entier.
+void finir_deplacement() {
+    const std::wstring python = g.dep_vers + L"\\outils\\python\\python.exe", script = g.dep_vers + L"\\recomp\\launcher\\deplacer.py";
+    std::wstring cmd;
+    if (g.dep_autre_volume && existe(python) && existe(script)) cmd = L"\"" + python + L"\" -u -X utf8 \"" + script + L"\"";
+    else cmd = commande_python(g.recomp + L"\\launcher\\deplacer.py");
+    if (!cmd.empty())
+        cmd += L" --finir --pid " + std::to_wstring(GetCurrentProcessId()) + L" --racine " + entre_guillemets(g.dossier_exe) +
+               L" --vers " + entre_guillemets(g.dep_vers);
+    if (cmd.empty() || !lancer_detache(cmd)) {
+        jlog(L"move: deplacer.py --finir not started (error %lu)", GetLastError());
+        abandonner_deplacement();
+        g.statut_jeu = T("dep_echec");
+        return;
+    }
+    jlog(L"move: the launcher closes, the folder is moved next");
+    g.quitter_sans_question = true;
+    PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+}
+
 void annuler_construction() {
     std::lock_guard<std::mutex> l(g.cons.lk);
     if (!g.cons.active || !g.cons.job) return;
@@ -778,6 +1249,7 @@ void lancer_jeu();
 // JOUER : d'abord les shaders compilés pour ce GPU (au premier lancement, après une mise à jour ou un nouveau pilote ;
 // sinon fini en une fraction de seconde), puis le jeu
 void jouer() {
+    manettes_fermer();   // les manettes sont au jeu (onglet Manette ouvert : SDL arrêté dans le launcher)
     // Le jeu engage environ 12 Go de mémoire validable (RAM + fichier d'échange ; 12,06 Go mesurés après 3 min 30 de
     // partie le 2026-11-11). S'il en reste moins de 13, il s'arrêterait
     // au bout de quelques secondes (vu le 2026-11-11 : 8,6 Go libres juste après une construction) : on le dit avant
@@ -854,6 +1326,86 @@ void fond_relancer() {
     if (g.fond_video && compter(g.extraits + L"\\extrait_*.mp4") > 0) video_demarrer(g.extraits);
 }
 
+// ---------------------------------------------------------------- raccourci sur le bureau (issue GitHub n° 14)
+// Un fichier « StarFox Remake [recompiled].lnk » sur le bureau du joueur, vers ce lanceur.exe (avec son icône). Créé ou
+// retiré depuis la page Réglages. Au démarrage, un raccourci dont la cible n'existe plus (dossier déplacé) est refait
+// vers ce launcher. LANCEUR_BUREAU (vérification) : un autre dossier que le bureau.
+std::wstring chemin_exe() {
+    wchar_t b[2048];
+    GetModuleFileNameW(nullptr, b, 2048);
+    return b;
+}
+
+std::wstring raccourci_chemin() {
+    std::wstring bureau;
+    wchar_t b[MAX_PATH + 1] = L"";
+    if (const wchar_t* e = _wgetenv(L"LANCEUR_BUREAU")) bureau = e;
+    else if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_DESKTOPDIRECTORY, nullptr, SHGFP_TYPE_CURRENT, b))) bureau = b;
+    return bureau.empty() ? bureau : bureau + L"\\" + NOM + L".lnk";
+}
+
+// cible d'un raccourci (vide : illisible)
+std::wstring raccourci_cible(const std::wstring& lnk) {
+    std::wstring cible;
+    IShellLinkW* l = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&l)))) return cible;
+    IPersistFile* f = nullptr;
+    if (SUCCEEDED(l->QueryInterface(IID_PPV_ARGS(&f)))) {
+        wchar_t b[2048] = L"";
+        if (SUCCEEDED(f->Load(lnk.c_str(), STGM_READ)) && SUCCEEDED(l->GetPath(b, 2048, nullptr, SLGP_RAWPATH))) cible = b;
+        f->Release();
+    }
+    l->Release();
+    return cible;
+}
+
+bool raccourci_creer() {
+    const std::wstring lnk = raccourci_chemin(), exe = chemin_exe();
+    if (lnk.empty()) return false;
+    IShellLinkW* l = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&l)))) return false;
+    l->SetPath(exe.c_str());
+    l->SetWorkingDirectory(parent(exe).c_str());
+    l->SetDescription(NOM);
+    l->SetIconLocation(exe.c_str(), 0);
+    bool ok = false;
+    IPersistFile* f = nullptr;
+    if (SUCCEEDED(l->QueryInterface(IID_PPV_ARGS(&f)))) {
+        ok = SUCCEEDED(f->Save(lnk.c_str(), TRUE));
+        f->Release();
+    }
+    l->Release();
+    return ok;
+}
+
+int g_raccourci = -1;   // dernier état lu pour la page Réglages (-1 : à relire)
+ULONGLONG g_raccourci_t = 0;
+
+int raccourci_lire() {   // 0 aucun, 1 vers ce launcher, 2 vers un autre dossier
+    const std::wstring lnk = raccourci_chemin();
+    if (lnk.empty() || !existe(lnk)) return 0;
+    return _wcsicmp(raccourci_cible(lnk).c_str(), chemin_exe().c_str()) == 0 ? 1 : 2;
+}
+
+void raccourci_basculer() {   // présent, vers ce launcher : retiré ; sinon créé, ou refait vers ce launcher
+    if (raccourci_lire() == 1) {
+        jlog(L"desktop shortcut %ls", DeleteFileW(raccourci_chemin().c_str()) ? L"removed" : L"not removed");
+    } else {
+        const bool ok = raccourci_creer();
+        jlog(L"desktop shortcut %ls", ok ? L"created" : L"not created");
+        if (!ok) g.statut_jeu = T("rac_echec");
+    }
+    g_raccourci = -1;
+}
+
+void raccourci_suivre() {
+    const std::wstring lnk = raccourci_chemin();
+    if (lnk.empty() || !existe(lnk)) return;
+    const std::wstring cible = raccourci_cible(lnk);
+    if (cible.empty() || existe(cible)) return;   // illisible, ou vers un launcher qui existe (celui-ci ou un autre)
+    jlog(L"desktop shortcut %ls", raccourci_creer() ? L"updated (the folder moved)" : L"not updated");
+}
+
 // ---------------------------------------------------------------- actions
 template <class T> void cycler(T& v, std::initializer_list<T> valeurs, int sens) {
     std::vector<T> l(valeurs);
@@ -916,7 +1468,30 @@ void action(int z) {
         g.capture = z - Z_TOUCHE0;
         return;
     }
+    if (z >= Z_PAD0 && z <= Z_PAD_FIN) {   // onglet Manette : ce bouton attend un appui sur la manette, ou un clic sur
+        g.capture_pad = z - Z_PAD0;        // une entrée du dessin (avec ou sans manette branchée)
+        g.pad_tenues = manettes().appuyees;
+        return;
+    }
+    if ((z >= Z_PADG0 && z <= Z_PADG_FIN) || (z >= Z_PADD0 && z <= Z_PADD_FIN)) {
+        // ‹ › : entrée libre précédente ou suivante (celles des autres boutons sont sautées, « Aucun » reste toujours
+        // possible) : pas d'échange en cascade en faisant défiler ; pour échanger deux boutons, appuyer sur la manette
+        const bool suiv = z >= Z_PADD0;
+        const int i = z - (suiv ? Z_PADD0 : Z_PADG0);
+        int e = g.reglages.manette[i];
+        for (int n = 0; n < P_NB; n++) {
+            e = (e + (suiv ? 1 : P_NB - 1)) % P_NB;
+            bool prise = false;
+            for (int k = 0; k < NB_PAD; k++) prise |= k != i && e != P_AUCUNE && g.reglages.manette[k] == e;
+            if (!prise) break;
+        }
+        pad_affecter(i, e);
+        return;
+    }
     switch (z) {
+    case Z_ONGLET_CLAVIER: g.onglet_manette = false; return;
+    case Z_ONGLET_MANETTE: g.onglet_manette = true; return;
+    case Z_PAD_DEFAUT: pad_par_defaut(); return;
     case Z_PRESET_G:
     case Z_PRESET_D: {   // deux préréglages : l'un puis l'autre ; depuis des touches personnalisées, ‹ WASD, › ZQSD
         const int p = prereglage_courant();
@@ -926,7 +1501,7 @@ void action(int z) {
     case Z_PRINCIPAL:
         if (g.jeu_lance) return;
         if (g.cons.active) {
-            if (g.cons.tache == Tache::Construction) basculer(Page::Construction);
+            if (g.cons.tache == Tache::Construction || g.cons.tache == Tache::Deplacement) basculer(Page::Construction);
             return;
         }
         if (g.jeu_pret) return jouer();   // même s'il reste des étapes à refaire : la reconstruction est un choix
@@ -966,7 +1541,28 @@ void action(int z) {
     case Z_HZ_G:
     case Z_HZ_D: cycler(g.reglages.hz, {60, 90, 120}, z == Z_HZ_D ? 1 : -1); reglages_ecrire(); return;
     case Z_NATIF_G:
-    case Z_NATIF_D: g.reglages.natif = !g.reglages.natif; reglages_ecrire(); return;
+    case Z_NATIF_D: cycler(g.reglages.echelle, {100, 85, 75, 67}, z == Z_NATIF_D ? 1 : -1); reglages_ecrire(); return;
+    case Z_DLSS_G:
+    case Z_DLSS_D: cycler(g.reglages.dlss, {0, 1, 2, 3, 4, 5}, z == Z_DLSS_D ? 1 : -1); reglages_ecrire(); return;
+    case Z_DLSSM_G:
+    case Z_DLSSM_D: g.reglages.dlss_modele = g.reglages.dlss_modele == 2 ? 1 : 2; reglages_ecrire(); return;
+    case Z_FSR_G:
+    case Z_FSR_D: cycler(g.reglages.fsr, {0, 1, 2, 3, 4, 5}, z == Z_FSR_D ? 1 : -1); reglages_ecrire(); return;
+    case Z_FSRV_G:
+    case Z_FSRV_D: cycler(g.reglages.fsr_version, {0, 4, 3}, z == Z_FSRV_D ? 1 : -1); reglages_ecrire(); return;
+    case Z_GPU_G:
+    case Z_GPU_D: {   // Automatique, puis chaque carte (nom complet dans recomp.ini)
+        if (!g.cartes_pretes.load(std::memory_order_acquire) || g.cartes.empty()) return;
+        bool nommee = false;
+        const int c = carte_du_jeu(&nommee);
+        const int n = (int)g.cartes.size(), i = nommee ? c : -1;   // -1 : Automatique
+        const int j = z == Z_GPU_D ? (i + 2) % (n + 1) - 1 : (i + n + 1) % (n + 1) - 1;
+        g.reglages.gpu = j < 0 ? std::string("auto") : g.cartes[j].nom;
+        reglages_ecrire();
+        jlog(L"graphics card: %ls (DLSS %ls)", wide(g.reglages.gpu).c_str(), dlss_possible() ? L"possible" : L"not possible");
+        return;
+    }
+    case Z_MENU_GRAPHISMES: return basculer(Page::Graphismes);
     case Z_LANGUE_G:
     case Z_LANGUE_D: {
         int i = 0;
@@ -992,6 +1588,8 @@ void action(int z) {
     case Z_VIB_D: cycler(g.reglages.vibration, {0, 25, 50, 75, 100}, z == Z_VIB_D ? 1 : -1); reglages_ecrire(); return;
     case Z_MENU_RAPPORT: rapport_de_bug(); return;
     case Z_DESINSTALLER: desinstaller(); return;
+    case Z_DEPLACER: deplacer(); return;
+    case Z_RACCOURCI: raccourci_basculer(); return;
     }
 }
 
@@ -1059,11 +1657,22 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         g.zone_appui = Z_AUCUNE;
         const int attente = g.capture;   // un clic met fin à l'attente d'une touche (page Contrôles)
         g.capture = -1;
-        if (z != Z_AUCUNE && z == a && !(attente >= 0 && z == Z_TOUCHE0 + attente)) action(z);
+        const int attente_pad = g.capture_pad;   // ou d'un appui sur la manette (onglet Manette)
+        g.capture_pad = -1;
+        if (z != Z_AUCUNE && z == a) {
+            if (z >= Z_ENTREE0 && z <= Z_ENTREE_FIN)   // entrée du dessin : donnée au bouton qui attendait, ou attente
+                pad_entree_cliquee(z - Z_ENTREE0, attente_pad);
+            else if (!(attente >= 0 && z == Z_TOUCHE0 + attente) && !(attente_pad >= 0 && z == Z_PAD0 + attente_pad))
+                action(z);
+        }
         return 0;
     }
     case WM_SYSKEYDOWN:
     case WM_KEYDOWN:
+        if (g.capture_pad >= 0) {   // onglet Manette : Échap annule l'attente d'un appui sur la manette
+            if (w == VK_ESCAPE) g.capture_pad = -1;
+            return 0;
+        }
         if (g.capture >= 0) {   // page Contrôles : la touche pressée est donnée à l'action choisie (Échap : annuler)
             if (w == VK_ESCAPE) {
                 g.capture = -1;
@@ -1113,10 +1722,21 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             t = g.cons.tache;
             ok = !g.cons.echec && !g.cons.annulee;
         }
-        jlog(L"%ls: %ls%ls", t == Tache::Shaders ? L"shaders" : t == Tache::MiseAJour ? L"update" : L"build",
+        jlog(L"%ls: %ls%ls",
+             t == Tache::Shaders ? L"shaders" : t == Tache::MiseAJour ? L"update" : t == Tache::Deplacement ? L"move" : L"build",
                 ok ? L"finished" : g.cons.annulee ? L"canceled" : L"failed: ", ok || g.cons.annulee ? L"" : g.cons.erreur.c_str());
         if (t == Tache::Shaders) {   // même en cas d'échec : le jeu compile alors ses shaders au besoin
             if (!g.cons.annulee && !g.sans_jeu) lancer_jeu();
+            return 0;
+        }
+        if (t == Tache::Deplacement) {
+            if (ok) {
+                finir_deplacement();
+            } else {   // rien n'a été déplacé : le dossier commencé est retiré
+                abandonner_deplacement();
+                std::lock_guard<std::mutex> lk(g.cons.lk);
+                if (!g.cons.annulee) g.statut_jeu = std::wstring(T("dep_refus")) + (g.cons.erreur.empty() ? L"?" : g.cons.erreur);
+            }
             return 0;
         }
         if (t == Tache::MiseAJour) {
@@ -1191,8 +1811,8 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_CLOSE:
         if (g.cons.active && !_wgetenv(L"LANCEUR_CAPTURE_QUITTER") && !g.quitter_sans_question) {
-            const wchar_t* q = g.langue == Langue::Fr ? L"Une tâche est en cours (construction, shaders ou mise à jour). L'arrêter et quitter ?"
-                                                      : L"A task is running (build, shaders or update). Stop it and quit?";
+            const wchar_t* q = g.langue == Langue::Fr ? L"Une tâche est en cours (construction, shaders, mise à jour ou déplacement). L'arrêter et quitter ?"
+                                                      : L"A task is running (build, shaders, update or move). Stop it and quit?";
             if (MessageBoxW(h, q, NOM, MB_YESNO | MB_ICONWARNING) != IDYES) return 0;
         }
         annuler_construction();
@@ -1209,6 +1829,11 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 int fils_effectifs() { return g.fils ? g.fils : std::max(1, g.fils_max - 1); }
 int touches_prereglage_courant() { return prereglage_courant(); }   // pour dessin.cpp (page Contrôles)
+int raccourci_etat() {   // pour dessin.cpp (page Réglages) : relu au plus une fois par seconde
+    const ULONGLONG t = GetTickCount64();
+    if (g_raccourci < 0 || t - g_raccourci_t > 1000) g_raccourci = raccourci_lire(), g_raccourci_t = t;
+    return g_raccourci;
+}
 
 }  // namespace lz
 
@@ -1233,6 +1858,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     jlog(L"--- launcher %ls started (%ls): game copy %ls, game %ls", g.version.c_str(), g.paquet ? L"package" : L"sources",
             g.copie.empty() ? L"missing" : g.copie_ok ? L"recognized" : L"not recognized",
             g.jeu_pret ? (g.jeu_obsolete ? L"ready, rebuild offered" : L"ready") : L"not built");
+    deplacement_au_demarrage();
+    // raccourci du bureau suivi quand le dossier a été déplacé ; en vérification, seulement avec un bureau d'essai
+    if (_wgetenv(L"LANCEUR_BUREAU") || !(_wgetenv(L"LANCEUR_ACTION") || _wgetenv(L"LANCEUR_CAPTURE") || _wgetenv(L"LANCEUR_HZ")))
+        raccourci_suivre();
+    std::thread(cartes_lister).detach();   // cartes graphiques (page Graphismes)
     if (const wchar_t* k = _wgetenv(L"LANCEUR_STATUT")) {   // vérification : afficher un message d'état (capture)
         char cle[64] = "";
         WideCharToMultiByte(CP_UTF8, 0, k, -1, cle, sizeof cle, nullptr, nullptr);
@@ -1243,7 +1873,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (const wchar_t* p = _wgetenv(L"LANCEUR_PAGE")) {   // vérification : ouvrir une page au démarrage
         if (!wcscmp(p, L"reglages")) g.page = Page::Reglages;
         else if (!wcscmp(p, L"controles")) g.page = Page::Controles;
+        else if (!wcscmp(p, L"manette")) g.page = Page::Controles, g.onglet_manette = true;
         else if (!wcscmp(p, L"construction")) g.page = Page::Construction;
+        else if (!wcscmp(p, L"graphismes")) g.page = Page::Graphismes;
     }
 
     WNDCLASSEXW wc{};
@@ -1313,6 +1945,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         } else if (!wcscmp(a, L"shaders")) {   // compilation des shaders seule, sans le jeu
             g.sans_jeu = true;
             jouer();
+        } else if (!wcscmp(a, L"deplacer")) {   // déplacement vers LANCEUR_DEPLACER_VERS, sans dialogue ni question
+            deplacer();
+        } else if (!wcscmp(a, L"raccourci")) {   // raccourci créé ou retiré (LANCEUR_BUREAU)
+            raccourci_basculer();
         }
     }
 
@@ -1330,6 +1966,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             continue;
         }
         if (g.sx >= 0) g.zone_survol = zone_sous(g.sx, g.sy);
+        // onglet Manette ouvert, sans partie ni construction en cours : manettes lues (dessin, attente d'un appui) ;
+        // sinon SDL est arrêté et les manettes sont rendues (au jeu)
+        if (g.page == Page::Controles && g.onglet_manette && !g.jeu_lance && !g.cons.active) {
+            manettes_lire();
+            pad_suivre_capture();
+        } else {
+            manettes_fermer();
+            g.capture_pad = -1;
+        }
         dessin_image();   // Present attend le balayage de l'écran : ≈ 60 images par seconde
     }
     video_arreter();

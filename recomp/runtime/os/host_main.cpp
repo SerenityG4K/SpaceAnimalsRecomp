@@ -39,11 +39,41 @@ std::mutex g_log_lock;
 FILE* g_logfile = nullptr;
 const auto g_t0 = std::chrono::steady_clock::now();
 
+// Chemin du profil Windows (le dossier personnel, qui porte le nom d'utilisateur) remplacé par %USERPROFILE% dans
+// chaque ligne du journal : un
+// recomp_run.log joint à la main à une issue publique ne donne plus le nom d'utilisateur (issue GitHub n° 19 ; le
+// rapport de bug du launcher l'anonymisait déjà, rapport.py). Sans allocation : vlog sert aussi pendant un plantage.
+// Appelé sous g_log_lock. RECOMP_LOG_PATHS=1 : chemins laissés tels quels.
+void masquer_profil(char* msg, size_t taille) {
+    static char profil[520];
+    static size_t n = (size_t)-1;
+    if (n == (size_t)-1) {
+        const wchar_t* w = getenv("RECOMP_LOG_PATHS") ? nullptr : _wgetenv(L"USERPROFILE");
+        const int k = w ? WideCharToMultiByte(CP_UTF8, 0, w, -1, profil, (int)sizeof profil, nullptr, nullptr) : 0;
+        n = k > 5 ? (size_t)k - 1 : 0;   // au moins « C:\xy »
+    }
+    if (!n) return;
+    static const char remplacement[] = "%USERPROFILE%";
+    const size_t r = sizeof remplacement - 1;
+    for (char* p = msg; *p;) {
+        if ((p[0] | 0x20) == (profil[0] | 0x20) && !_strnicmp(p, profil, n)) {
+            const size_t reste = strlen(p + n);
+            if (r > n && (size_t)(p - msg) + r + reste + 1 > taille) return;   // ne tiendrait pas : ligne laissée
+            memmove(p + r, p + n, reste + 1);
+            memcpy(p, remplacement, r);
+            p += r;
+        } else {
+            p++;
+        }
+    }
+}
+
 void vlog(const char* tag, const char* fmt, va_list ap) {
     char msg[4096];
     vsnprintf(msg, sizeof msg, fmt, ap);
     double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - g_t0).count();
     std::lock_guard<std::mutex> lk(g_log_lock);
+    masquer_profil(msg, sizeof msg);
     char head[64];
     snprintf(head, sizeof head, "[%9.3f] [%-6s] ", t, tag);
     fputs(head, stderr);
@@ -513,6 +543,17 @@ std::string lire_registre(HKEY racine, const char* cle, const char* valeur) {
     while (!r.empty() && r.back() == ' ') r.pop_back();
     return r;
 }
+// Écran à mise à l'échelle Windows (125 %, 150 %…) : le jeu se déclare compatible DPI, écran par écran. Jusqu'à la
+// 1.0.3, il ne l'était pas et Windows lui donnait des tailles en points : sur un écran 2560×1440 à 150 %, une fenêtre
+// « plein écran » de 1707×960 où l'image 1080p était réduite, puis étirée par Windows à 2560×1440, donc floue (journal
+// de l'issue GitHub n° 10, 2026-11-12). Les tailles sont maintenant en pixels réels ; resolution = auto et la taille de
+// la fenêtre gardent le choix d'avant (present.cpp : gfx_screen_size, window_thread). À appeler avant toute fenêtre.
+const char* g_dpi_mode = "not DPI aware";
+void dpi_compatible() {
+    if (SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) g_dpi_mode = "per-monitor DPI aware";
+    else if (SetProcessDPIAware()) g_dpi_mode = "DPI aware for the main screen";   // Windows 10 avant 1703
+}
+
 void journal_systeme() {
     char exe[MAX_PATH] = {};
     GetModuleFileNameA(nullptr, exe, MAX_PATH);
@@ -591,6 +632,7 @@ bool version_du_jeu_a_jour() {
 }
 
 int main(int argc, char** argv) {
+    dpi_compatible();   // avant toute fenêtre (et avant SDL)
     SetConsoleOutputCP(CP_UTF8);
     std::string manifest, logpath = "recomp_run.log";
     double dump_after = 0;
@@ -636,6 +678,7 @@ int main(int argc, char** argv) {
     }
     g_logfile = fopen(logpath.c_str(), "w");
     journal_systeme();           // version, Windows, processeur, mémoire : en tête de chaque journal (rapport de bug)
+    HLOG("main", "Windows display scaling of the main screen: %u %% (%s)", GetDpiForSystem() * 100 / 96, g_dpi_mode);
     settings_init(argc, argv);   // recomp.ini, RECOMP_*, --refresh / --resolution / --native-res / --config
     version_du_jeu_a_jour();   // note seulement dans le journal un jeu construit par une autre version
     mem_marge_init();            // marge de mémoire engagée d'avance (memory.cpp), rendue si Windows en refuse au jeu

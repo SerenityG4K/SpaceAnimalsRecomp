@@ -11,9 +11,10 @@ dev, travail = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 if "scratchpad" not in travail and "sar_verif" not in travail:
     sys.exit("refus : dossier de travail inattendu")
 echecs = []
+RACCOURCI = "StarFox Remake [recompiled].lnk"
 
 
-def fabriquer(nom, avec_copie, sources=False):
+def fabriquer(nom, avec_copie, sources=False, raccourci_ici=True):
     base = os.path.join(travail, nom)
     shutil.rmtree(base, ignore_errors=True)
     racine = os.path.join(base, "install [x] y", "SpaceAnimalsRecomp-9.9.9")
@@ -34,9 +35,14 @@ def fabriquer(nom, avec_copie, sources=False):
     if sources:
         open(os.path.join(racine, "recomp", "launcher", "lanceur.cpp"), "w").write("// sources")
     env = dict(os.environ)
-    for cle, d in (("APPDATA", "appdata"), ("ProgramData", "programdata"), ("TEMP", "temp"), ("TMP", "temp")):
+    for cle, d in (("APPDATA", "appdata"), ("ProgramData", "programdata"), ("TEMP", "temp"), ("TMP", "temp"),
+                   ("LANCEUR_BUREAU", "bureau")):   # bureau d'essai : jamais celui du PC
         env[cle] = os.path.join(base, d)
         os.makedirs(env[cle], exist_ok=True)
+    # raccourci du launcher sur le bureau (page Réglages) : un faux .lnk où le chemin de lanceur.exe est écrit en UTF-16,
+    # comme dans un vrai ; vers cette installation, ou vers une autre
+    cible = os.path.join(racine if raccourci_ici else os.path.join(base, "autre installation"), "lanceur.exe")
+    open(os.path.join(env["LANCEUR_BUREAU"], RACCOURCI), "wb").write(b"L\x00\x00\x00" + cible.encode("utf-16-le") + b"\x00\x00")
     os.makedirs(os.path.join(env["ProgramData"], "StarFoxRecomp", "gcc-abc", "bin"))
     open(os.path.join(env["ProgramData"], "StarFoxRecomp", "gcc-abc", "bin", "clang++.exe"), "wb").write(b"c" * 3000)
     open(os.path.join(env["TEMP"], "recomp_textures_123.tmp"), "wb").write(b"t" * 500)
@@ -64,6 +70,7 @@ def existe(*p):
 base, racine, env = fabriquer("liste", True)
 code, sortie = lancer(racine, env, "--lister")
 verifier("lister", [("code 0", code == 0), ("jeu listé", "built game" in sortie), ("copie signalée", "never deleted" in sortie),
+                    ("raccourci du bureau listé", "desktop shortcut" in sortie),
                     ("rien supprimé", existe(racine, "recomp", "build", "full", "recomp_main.exe"))])
 
 # 2. nettoyage : la place revient, le paquet, les réglages, la copie et les sauvegardes restent
@@ -78,6 +85,7 @@ verifier("nettoyer", [
     ("compilateur supprimé", not existe(env["ProgramData"], "StarFoxRecomp")),
     ("fichier temporaire supprimé", not existe(env["TEMP"], "recomp_textures_123.tmp")),
     ("réglages gardés", existe(racine, "recomp", "build", "full", "recomp.ini")),
+    ("raccourci du bureau gardé", existe(env["LANCEUR_BUREAU"], RACCOURCI)),
     ("paquet gardé", existe(racine, "lanceur.exe") and existe(racine, "recomp", "fullbuild.py") and existe(racine, "outils", "python", "python.exe")),
     ("copie du jeu gardée", existe(racine, "Mon jeu [0400E88025B1A000][v131072].nup")),
     ("sauvegarde reprise dans APPDATA", os.path.exists(sauve) and os.path.getsize(sauve) == 34057),
@@ -93,6 +101,7 @@ reste = sorted(os.listdir(racine)) if os.path.isdir(racine) else None
 verifier("désinstaller avec copie", [
     ("code 0", code == 0), ("@fini", "@fini uninstalled" in sortie),
     ("il ne reste que la copie du jeu", reste == ["Mon jeu [0400E88025B1A000][v131072].nup"]),
+    ("raccourci du bureau supprimé", not existe(env["LANCEUR_BUREAU"], RACCOURCI)),
     ("compilateur supprimé", not existe(env["ProgramData"], "StarFoxRecomp")),
     ("sauvegardes gardées", os.path.exists(sauve) and os.path.getsize(sauve) == 34057),
 ])
@@ -100,7 +109,7 @@ if reste != ["Mon jeu [0400E88025B1A000][v131072].nup"]:
     print("   reste :", reste, "\n" + sortie[-600:])
 
 # 4. désinstallation complète, sauvegardes comprises, sans copie du jeu dans le dossier : plus rien
-base, racine, env = fabriquer("tout", False)
+base, racine, env = fabriquer("tout", False, raccourci_ici=False)
 os.makedirs(os.path.join(env["APPDATA"], "SpaceAnimalsRecomp", "save"))
 open(os.path.join(env["APPDATA"], "SpaceAnimalsRecomp", "save", "save_game_data.save"), "wb").write(b"s" * 100)
 code, sortie = lancer(racine, env, "--desinstaller", "--oui", "--sauvegardes")
@@ -108,6 +117,7 @@ time.sleep(4)
 verifier("désinstaller tout", [
     ("code 0", code == 0),
     ("dossier d'installation supprimé", not os.path.exists(racine)),
+    ("raccourci d'une autre installation gardé", existe(env["LANCEUR_BUREAU"], RACCOURCI)),
     ("sauvegardes supprimées", not existe(env["APPDATA"], "SpaceAnimalsRecomp")),
     ("compilateur supprimé", not existe(env["ProgramData"], "StarFoxRecomp")),
 ])

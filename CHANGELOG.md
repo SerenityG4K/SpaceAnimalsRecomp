@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.1.0 — FSR and DLSS, PlayStation and Switch controllers, better performance
+
+Thanks again to everyone who opened an issue: most of this comes from your reports.
+
+- **AMD FSR (experimental)**: upscaling for all graphics cards. FSR 3.1 on most cards, FSR 4 on some Radeon cards
+  (we couldn't try FSR 4 ourselves: tell us how it goes).
+- **NVIDIA DLSS (experimental)**, RTX cards only: DLAA or upscaling, with the DLSS 4 or DLSS 4.5 model.
+- **PlayStation, Switch Pro and Joy-Con controllers** should now work, USB or Bluetooth (#3, #16).
+- **Controller remapping** (#8): **CONTROLS › CONTROLLER** in the launcher. Click a button, then press the new one or
+  click it on the drawing.
+- **Improved performance** in busy scenes, and shorter hitches when the scene changes or a lot happens on screen
+  (#10, #25: tell us if combat feels smoother).
+- **Graphics card choice** in **GRAPHICS** (Auto takes the dedicated card with the most video memory).
+- **3D rendering** at 100, 85, 75 or 67 % (experimental). It replaces the "Like the console" setting, which gave a
+  black or grey 3D scene (#5).
+- **Game location and desktop shortcut** (#14) in **SETTINGS**: **Move…** moves the whole install to another folder,
+  without rebuilding the game.
+
+Also in this version:
+
+- Fixed: blue patches on the ground in Corneria city. Ground markings, cracks and explosion marks now look like on
+  the console.
+- Fixed: **UNINSTALL** left the install folder behind.
+- #17, #19: should fix a rare crash, seen against Andross and at the end of the tutorial.
+- #24: the build now keeps an eye on memory while it runs, instead of guessing at the start. It could fill all the
+  memory on PCs with many CPU threads (seen on Linux with Proton).
+- #18: the game no longer picks Microsoft's "Vulkan on Direct3D 12" layer instead of your real graphics driver. This
+  should also help laptops with two graphics chips that showed a black screen (#23).
+- #10: sharper picture on scaled screens (125 %, 150 %…).
+- #5: the bug report no longer contains the path or the file name of your copy of the game, and the game's log no
+  longer shows your Windows user name.
+- If you see a new picture defect, `fast_rendering = false` in `recomp\build\full\recomp.ini` turns this version's
+  rendering optimizations off. Please open an issue too.
+- Updating from 1.0.3: say yes to the update, then **REBUILD NOW ›**. Only the last build steps run again (about
+  2 minutes: the game itself isn't recompiled). Without rebuilding, only the launcher changes are active. The update
+  also downloads the controller, FSR and DLSS libraries (about 96 MB) from their official sources.
+
+This software uses NVIDIA DLSS. The DLSS library stays under NVIDIA's license, not the GPL (see the README).
+
 ## 1.0.3 — less RAM, better AMD support, faster build
 
 Thanks to everyone who opened an issue: most of this comes from your reports.
