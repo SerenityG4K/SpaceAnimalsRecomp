@@ -3,6 +3,7 @@
 // rendu tourne ; sera remplacée par le moteur de rendu (Vulkan) quand les commandes NVN seront
 // traduites. Fermer la fenêtre termine le processus.
 #include "gfx.h"
+#include "menu.h"
 #include "settings.h"
 
 #define NOMINMAX
@@ -16,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <thread>
 
 namespace hos {
@@ -51,7 +53,8 @@ double echelle_ecran() {
 // Plein écran sans bordure (recomp.ini : window_mode) : fenêtre sans cadre couvrant l'écran où elle se
 // trouve, pour présenter l'image pixel pour pixel. Une fenêtre à cadre de la taille de l'écran n'a
 // qu'une zone utile plus petite (2560×1421 sur un écran 1440p) : l'image y était réduite, donc floue.
-bool g_borderless = false;
+std::atomic<bool> g_borderless{false};   // écrit par le fil de la fenêtre, lu aussi par le menu en jeu
+constexpr UINT WM_PLEIN_ECRAN = WM_APP + 1;   // menu en jeu (menu.cpp) : wp = 1 plein écran sans bordure, 0 fenêtré
 WINDOWPLACEMENT g_wp_windowed{sizeof(WINDOWPLACEMENT)};
 void set_borderless(HWND h, bool on) {
     if (on == g_borderless) return;
@@ -69,6 +72,12 @@ void set_borderless(HWND h, bool on) {
     }
     g_borderless = on;
     HLOG("gfx", "window: %s", on ? "borderless fullscreen" : "windowed");
+}
+
+// Touche enfoncée, donnée au menu en jeu (menu.h) : touche virtuelle, scancode (0xE0xx : touche étendue), répétition
+bool touche_menu(WPARAM wp, LPARAM lp) {
+    const unsigned sc = (unsigned)((lp >> 16) & 0xFF) | ((lp & (1 << 24)) ? 0xE000u : 0u);
+    return menu::touche((unsigned)wp, sc, (lp & (1 << 30)) != 0);
 }
 
 LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -111,13 +120,32 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             set_borderless(h, !g_borderless);
             return 0;
         }
+        if (touche_menu(wp, lp)) return 0;
         break;
     case WM_KEYDOWN:
         if (wp == VK_F11) {
             set_borderless(h, !g_borderless);
             return 0;
         }
+        if (touche_menu(wp, lp)) return 0;   // menu en jeu : F1 ou Inser l'ouvrent ; ouvert, il prend le clavier
         break;
+    case WM_MOUSEWHEEL: {   // menu en jeu : la molette fait défiler ses lignes (crans entiers, le reste est gardé)
+        static int reste = 0;
+        reste += GET_WHEEL_DELTA_WPARAM(wp);
+        const int crans = reste / WHEEL_DELTA;
+        reste -= crans * WHEEL_DELTA;
+        menu::molette(crans);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+        menu::clic(0);
+        break;
+    case WM_RBUTTONDOWN:
+        menu::clic(1);
+        break;
+    case WM_PLEIN_ECRAN:
+        set_borderless(h, wp != 0);
+        return 0;
     case WM_DPICHANGED: {   // fenêtre passée sur un écran à une autre mise à l'échelle (compatible DPI par écran)
         const RECT* r = (const RECT*)lp;
         if (g_borderless) {   // plein écran : couvrir le nouvel écran, pixel pour pixel
@@ -247,6 +275,43 @@ bool gfx_window_focused() {
     HWND f = GetForegroundWindow();
     return g_hwnd && f == g_hwnd;
 }
+
+// ---------------------------------------------------------------- services pour le menu en jeu (menu.h)
+namespace menu {
+namespace hote {
+
+std::string nom_touche(unsigned scancode) {
+    // nom de la touche sur le clavier du joueur, dans la langue de Windows (« A », « Espace », « Flèche haut »)
+    wchar_t w[64] = {};
+    const LONG lp = (LONG)((scancode & 0xFF) << 16) | ((scancode & 0xFF00) == 0xE000 ? (1 << 24) : 0);
+    const int n = GetKeyNameTextW(lp, w, 63);
+    char u[200] = {};
+    if (n > 0 && WideCharToMultiByte(CP_UTF8, 0, w, n, u, sizeof u - 1, nullptr, nullptr) > 0) return u;
+    snprintf(u, sizeof u, "0x%X", scancode);
+    return u;
+}
+bool plein_ecran() { return g_borderless; }
+void plein_ecran(bool oui) {   // la fenêtre est changée par son propre fil
+    if (g_hwnd) PostMessageW(g_hwnd, WM_PLEIN_ECRAN, oui ? 1 : 0, 0);
+}
+void quitter() {   // comme la croix de la fenêtre (WM_CLOSE : caches écrits, puis fin du processus)
+    if (g_hwnd) PostMessageW(g_hwnd, WM_CLOSE, 0, 0);
+}
+bool souris(float* x, float* y) {
+    POINT p;
+    RECT rc;
+    if (!g_hwnd || !gfx_window_focused() || !GetCursorPos(&p) || !ScreenToClient(g_hwnd, &p) || !GetClientRect(g_hwnd, &rc)) return false;
+    if (p.x < 0 || p.y < 0 || p.x >= rc.right || p.y >= rc.bottom) return false;
+    *x = (float)p.x, *y = (float)p.y;
+    return true;
+}
+double images_par_seconde() {
+    std::lock_guard<std::mutex> lk(g_lk);
+    return g_fps;
+}
+
+}  // namespace hote
+}  // namespace menu
 
 void gfx_present(const float rgba[4], uint64_t frame) {
     using namespace std::chrono;

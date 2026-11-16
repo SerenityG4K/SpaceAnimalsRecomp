@@ -152,7 +152,8 @@ SpaceAnimalsRecomp so far.
 | 🔧 | Frame rate | 90% | A steady 60 fps; 90 and 120 fps are not stable yet (55 to 118 fps in Corneria at 120 for now) |
 | 🔧 | Horizon OS services | 90% | Threads, files, controllers, applets, time and audio: everything the game has used so far |
 | 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD support improved in 1.0.3; Intel is untested |
-| 🔧 | Controls | 85% | Keyboard and controllers (Xbox, PlayStation, Switch Pro, Joy-Con), all remappable in the launcher; no mouse yet |
+| 🔧 | Controls | 85% | Keyboard and controllers (Xbox, PlayStation, Switch Pro, Joy-Con), all remappable in the launcher or in game; no mouse yet |
+| 🔧 | In-game menu | 80% | F1: settings while you play (display, rumble, volume, keys and buttons at once; the rest at the next launch). New, tested off the game only so far: report what breaks |
 | 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
 | 🔧 | NVIDIA DLSS | 70% | Experimental since 1.1.0, RTX cards only: DLAA or upscaling, DLSS 4 or 4.5 model |
 | 🔧 | AMD FSR | 70% | Experimental since 1.1.0, all cards: FSR 3.1, or FSR 4 on some Radeon cards (FSR 4 untested so far) |
@@ -179,7 +180,8 @@ Xbox B, and so on). The keys and buttons below are the default ones. You can cha
 - **KEYBOARD**: pick **WASD (QWERTY)** or **ZQSD (AZERTY)**, or click a key's box and press the key you want;
 - **CONTROLLER**: click a button, then press the new one or click it on the drawing of your controller.
 
-Changes apply the next time you start the game.
+Changes made in the launcher apply the next time you start the game. Changes made from the in-game menu (below) apply
+at once.
 
 | Switch | Keyboard | Xbox controller |
 |---|---|---|
@@ -196,6 +198,28 @@ Changes apply the next time you start the game.
 | Left stick (click) | W A S D (F) | Left stick |
 | Right stick (click) | I J K L (H) | Right stick |
 | D-pad | Arrow keys | D-pad |
+
+## In-game menu
+
+Press **F1** while you play (or **Insert**; on a controller, the centre button, or **Back and Start together**) to open
+the settings over the game. The same keys close it.
+
+- **Keyboard**: Up and Down choose a line, Left and Right change it, Q and E change tab, Enter confirms, Esc goes back.
+- **Controller**: D-pad or left stick, LB and RB for the tabs, the button you gave to the Switch's A confirms, the one
+  you gave to B goes back.
+- **Mouse**: point at a line, click the left or right half of a value to change it, click a tab, use the wheel to
+  scroll, right-click to go back.
+
+| Tab | Applies at once | Applies at the next launch |
+|---|---|---|
+| **GRAPHICS** | Display (full screen or windowed), FSR sharpening | Resolution, frames per second, 3D rendering scale, DLSS and its model, FSR and its version, graphics card |
+| **CONTROLS** | Rumble, controller buttons, keyboard keys | |
+| **GAME** | Volume, FPS counter, menu size, Quit the game | Game language |
+
+Lines that wait for the next launch are marked in the menu. The game keeps running while the menu is open, and it
+gets no input from you: pause it first (+). What you change is written to `recomp.ini` when the menu closes, so the
+launcher shows the same values. The volume is the launcher's setting: it is only kept after the session when the game
+was started from the launcher.
 
 ## Building from source
 
@@ -239,8 +263,11 @@ debugging switches (`RECOMP_*` environment variables), are in [docs/DEV-NOTES-fr
   (BSD), [python-lz4](https://github.com/python-lz4/python-lz4) (BSD), [glslang](https://github.com/KhronosGroup/glslang)
   (BSD-3-Clause and Apache 2.0), the Vulkan headers (Apache 2.0), [GCC](https://gcc.gnu.org) through
   [WinLibs](https://winlibs.com) (GPL 3 with the GCC Runtime Library Exception), [Python](https://www.python.org) (PSF License),
-  [SDL](https://www.libsdl.org) (zlib), the [AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK)
-  (MIT) and [NVIDIA DLSS](https://github.com/NVIDIA/DLSS) (NVIDIA's license). This software uses NVIDIA DLSS.
+  [SDL](https://www.libsdl.org) (zlib), [Dear ImGui](https://github.com/ocornut/imgui) (MIT), the
+  [AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) (MIT) and
+  [NVIDIA DLSS](https://github.com/NVIDIA/DLSS) (NVIDIA's license). This software uses NVIDIA DLSS.
+- The in-game menu follows the one of [Longshot](https://git.magicbean.dev/MagicBeanDev/Longshot) by MagicBeanDev
+  (GPL 3), another Switch 2 static recompilation: its design and parts of its code, adapted to this game.
 
 ## License
 

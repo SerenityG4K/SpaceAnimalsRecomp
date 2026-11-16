@@ -14,6 +14,10 @@ using MixFn = void (*)(float* dst, uint32_t frames);
 void start(MixFn mix);
 // Vrai quand le périphérique est ouvert : c'est alors lui qui consomme les flux du jeu.
 bool active();
+// Gain de sortie en % (0 à 100) : RECOMP_VOLUME au démarrage (le réglage du launcher), puis le menu en jeu (menu.cpp),
+// qui le change pendant la partie.
+int volume();
+void set_volume(int pourcent);
 
 }  // namespace audio_out
 }  // namespace hos

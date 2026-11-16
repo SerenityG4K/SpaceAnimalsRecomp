@@ -3697,3 +3697,100 @@ array texture. `RECOMP_GPU_SYNC=1`: the game waits for the GPU thread at every s
 silently. `nvn_exec.cpp`: `CopyTextureToBuffer`, never executed, is logged if the game emits it.
 `RECOMP_SHADER_WATCH=hash,hash`: the draws that use those shaders (frame, material, first target), the first time and
 then every 600 frames.
+
+
+## In-game menu (F1): settings while playing (2026-11-16; not published)
+
+Request: the menu of the other Switch 2 recompilations, which gives the settings without leaving the game. Model:
+Longshot (MagicBeanDev, GPLv3, https://git.magicbean.dev/MagicBeanDev/Longshot: `gpu/vk/vk_menu.cpp`, `vk_imgui.cpp`,
+`vk_ui.h`). Same principle, rewritten for this game: Dear ImGui is used for drawing only (its draw lists, not its
+windows or input), the menu reads the keyboard, the controller and the mouse itself, and it is drawn over the window's
+image at the last step of the presentation. Closed, it costs nothing: no Dear ImGui frame, no render pass.
+
+**Files.**
+- `runtime/os/menu.cpp`: the lines, the input, the drawing. Neither Windows nor Vulkan (the host's services are in the
+  `hote` namespace of `menu.h`): that is what lets it be tried outside the game.
+- `runtime/os/menu_ui.h`: the look, the launcher's (its colours, Bahnschrift), with drawn keys and buttons.
+- `runtime/os/menu_vk.cpp`: Dear ImGui and its Vulkan backend on the engine's device; fonts; textures.
+- `runtime/os/settings_ecrire.cpp`: writing `recomp.ini` (the lines of the changed keys are replaced in place, the rest
+  is kept: comments, order, line endings; the file is written beside it, then put in place in one step).
+- `runtime/third_party/imgui`: Dear ImGui 1.92.9b, unmodified (archive checked by its SHA-256, `README.txt`). Its
+  settings are in `runtime/os/menu_imconfig.h`, given to the whole runtime by `link.py`
+  (`-DIMGUI_USER_CONFIG=<os/menu_imconfig.h>`, in angle brackets: no quote to pass to g++ on Windows). A Dear ImGui
+  check that fails is written to the log (`menu`); it does not stop the game.
+
+**Opening.** F1 always; Insert too, unless the player gave it to an action; on a controller, the centre button (Guide,
+PS, Home) or Back and Start together. The first button of the chord reaches the game before the menu opens, so the
+game often pauses, which is welcome. For the first nine seconds a "Settings F1" reminder is shown at the bottom left
+(not during the shader collection: `RECOMP_WINDOW_HIDDEN`; `RECOMP_NO_MENU_HINT=1` turns it off).
+
+**The game keeps running.** As in Longshot, the menu does not stop the game: it only takes its input away. Stopping
+the presenting thread and the game's counter (`rt_stall_begin`) was set aside: the game's other threads would go on,
+and nothing here could test it. To tell the player (help of the Game tab, README): pause first.
+
+**Input.**
+- Keyboard and mouse: the window procedure (`present.cpp`) gives the keys pressed (`menu::touche`: virtual key,
+  scancode, repeat), the wheel and the clicks; they wait in a queue that the presenting thread handles
+  (`menu::a_dessiner`). The cursor's position is asked for when drawing (`hote::souris`).
+- Controller: at every read `input.cpp` publishes the raw inputs, by position (one bit per `Settings::P_*`), without
+  the player's settings, and the left stick (`menu::manette`). The button given to A confirms and the one given to B
+  goes back, as in the game; the D-pad and the stick repeat while held.
+- Menu open, `host_poll_input` gives the game an empty controller (`menu::masquer`), and rumble is off. Menu just
+  closed, the game gets nothing while a button is still down: the one that closed the menu (Esc is +, the button given
+  to B) does not reach the game. Only buttons count for that wait, not sticks: a player holding the stick while
+  closing is back in control at once.
+
+**What applies at once, what waits.** The menu writes into the settings in use (`settings_vivants`) those the game
+reads again at every use: rumble, keys, buttons, FSR sharpening (`fsr.cpp` read it once: now read every frame), FPS
+counter, menu size; the window goes through a message to its thread (`WM_PLEIN_ECRAN`); the volume through
+`audio_out::set_volume` (the gain was read once when the audio thread started). The others are only read at start-up
+(resolution, frame rate, scale, DLSS, FSR, card, language): the menu leaves the settings in use alone (the `gpu` and
+`language` strings are read by other threads), writes them to `recomp.ini` and marks the line "at the next launch"
+while its value is not the one the run started with. Only the keys the player changed are written: a value forced by
+`RECOMP_*` or the command line does not leak into the file.
+
+**Volume.** It is a launcher setting (`lanceur.ini`, `RECOMP_VOLUME`). The launcher now gives the game the path of its
+file (`RECOMP_LANCEUR_INI`) and the menu writes the volume there; without the launcher it lasts for the session only
+(the menu says so). When the game exits (`WM_JEU_FINI`), the launcher reads `recomp.ini` and its volume again: without
+that, the next change made in the launcher erased the menu's (`reglages_ecrire` writes all of its keys).
+
+**Vulkan** (`vk_render.cpp`, four hooks). `menu::vk::init` after `vkCreateDevice`; `menu::vk::images_fenetre` at every
+swapchain created (views of its images) and before the old one is destroyed; `menu::vk::presenter` in `present`, after
+the copy of the game's picture, the display image in `TRANSFER_DST_OPTIMAL` before and after. Everything is recorded in
+the presentation's command buffer: no extra submission, no extra wait.
+- Textures (the glyph atlas): created and updated in that command buffer, before the pass; the backend's own upload (a
+  submission and `vkQueueWaitIdle`) is never used (`dd->Textures = nullptr`).
+- What is let go (staging buffers, old textures) is destroyed `NSLOT + 2` presentations later: a slot is only taken
+  again once the GPU has finished its submission, and each presentation moves on by one at least. The backend's vertex
+  buffers rotate over as many frames (`ImageCount`).
+- sRGB window images (the format `create_swapchain` prefers): the backend's fragment shader is replaced by its own
+  followed by the sRGB to linear conversion (`kFragSrgb`, GLSL source in a comment, compiled with glslang 16.6.0).
+  Longshot converts the vertex colours on 8 bits, which crushes dark colours; here the menu's dark colours stay right.
+- Dear ImGui could not start (a Vulkan function missing, no video memory left): the menu never opens, the game keeps
+  its input, and the log says why (`menu`).
+
+**Fonts.** Bahnschrift like the launcher (`%WINDIR%\Fonts\bahnschrift.ttf`, Windows 10 and 11), else Segoe UI, else
+Dear ImGui's vector font; `RECOMP_MENU_FONT=<.ttf file>` forces one. No font is shipped.
+
+**Build.** `link.py` compiles Dear ImGui with the runtime (five files, once: per-file cache), and now compiles the
+runtime side by side (eight at a time): the step barely gets longer. `preparer.py`: the `lier` step also depends on
+`third_party/imgui`. `build.py` is not touched (changing it would redo the game's recompilation). After an update only
+the `lier` step runs again. `verif/trace_gcc.py` takes the sources and flags from `link.py`.
+
+**New settings** (`recomp.ini`, `[menu]` section, appended to existing files): `show_fps` (true, false;
+`RECOMP_SHOW_FPS`) and `menu_size` (small, medium, large). The launcher does not know them and keeps them as they are.
+
+**Checked, and not checked.** This work was done on a Mac, without Windows:
+- every file touched and Dear ImGui compile for Windows (zig 0.17.1's clang, target `x86_64-windows-gnu`, `link.py`'s
+  options); the symbols of the menu, Dear ImGui and the settings are all defined across the objects;
+- a test bench outside the game (MoltenVK 1.4.2 on an Apple M2 Pro, offscreen image in `B8G8R8A8_SRGB` then
+  `B8G8R8A8_UNORM`) runs the real `menu.cpp`, the real `menu_vk.cpp` and the real `settings_ecrire.cpp` with scripted
+  input: 15 behaviour checks (opening, immediate settings, button swap, key assignment, Quit confirmation, game input
+  masked until release, Back + Start chord), at 720p, 1080p, 1440p (Large size, English), 960×540 (scrolling page) and
+  3440×1440 (600 frames), and 26 checks of the `recomp.ini` writing (CRLF kept, a key that prefixes another, key
+  sections, one-step write);
+- **not checked**: the build with the package's GCC, the link, and everything specific to Windows and to the game: the
+  window procedure, key names, the raw controller read (SDL3 and XInput), the volume written to `lanceur.ini`, the four
+  hooks of `vk_render.cpp` on a real swapchain (NVIDIA, AMD, Intel), the menu during a real session. To do before
+  publishing: `verifier.py rapide`, then a session with the menu opened and closed several times, a window change from
+  the menu, and `verif/trace_gcc.py` (list of the GCC files).

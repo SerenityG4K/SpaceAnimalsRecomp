@@ -69,7 +69,10 @@ DEPENDANCES = {
     "recompiler": (["images"], ["recomp/recomp.py", "recomp/build.py", "recomp/fullbuild.py", "recomp/hooks.txt",
                                 "recomp/lots.txt",
                                 "recomp/a64/*.py", "recomp/runtime/*.h"]),
-    "lier": (["recompiler"], ["recomp/link.py", "recomp/runtime/*.cpp", "recomp/runtime/os/*.cpp", "recomp/runtime/os/*.h"]),
+    "lier": (["recompiler"], ["recomp/link.py", "recomp/runtime/*.cpp", "recomp/runtime/os/*.cpp", "recomp/runtime/os/*.h",
+                              # Dear ImGui (menu en jeu), compilée avec le runtime par link.py
+                              "recomp/runtime/third_party/imgui/*.cpp", "recomp/runtime/third_party/imgui/*.h",
+                              "recomp/runtime/third_party/imgui/backends/*"]),
     "shaders": ([], ["recomp/shaders/*.py"]),
 }
 # étape refaite à chaque construction : recomp_main --precompile ne recompile que si le GPU, le pilote ou les shaders

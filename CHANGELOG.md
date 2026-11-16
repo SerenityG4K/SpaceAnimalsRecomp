@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **In-game menu**: press **F1** (or Insert; on a controller, the centre button, or Back and Start together) to change
+  settings while you play. Display mode, rumble, volume, keyboard keys, controller buttons, FSR sharpening, an FPS
+  counter and the menu's size apply at once. Resolution, frame rate, 3D rendering scale, DLSS, FSR, graphics card and
+  game language are saved and apply the next time the game starts (the menu marks them). The game keeps running while
+  the menu is open: pause it first. Everything is written to `recomp.ini`, and the launcher shows the same values.
+- Updating: **REBUILD NOW ›** runs the last build steps again (the game itself isn't recompiled).
+
 ## 1.1.0 — FSR and DLSS, PlayStation and Switch controllers, better performance
 
 Thanks again to everyone who opened an issue: most of this comes from your reports.

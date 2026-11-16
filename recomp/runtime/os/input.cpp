@@ -23,6 +23,7 @@
 // cherchée que là, sans y être, et seules les manettes Xbox marchaient. Joy-Con : une paire est réunie en une manette
 // (SDL_JOYSTICK_HIDAPI_COMBINE_JOY_CONS) ; un Joy-Con seul se tient à l'horizontale, comme une petite manette.
 #include "gfx.h"
+#include "menu.h"
 #include "settings.h"
 
 #define NOMINMAX
@@ -438,6 +439,10 @@ HostPad host_poll_input() {
     static const bool background = getenv("RECOMP_BACKGROUND_INPUT") != nullptr;
     const bool lire = background || gfx_window_focused();
     auto mix = [](int32_t a, int32_t b) { return a ? a : b; };   // le clavier prime
+    // pour le menu en jeu (menu.h) : entrées des manettes par position (un bit par Settings::P_*), sans les réglages du
+    // joueur, et stick gauche de la première manette qui le penche
+    uint32_t brut = 0;
+    int32_t brut_lx = 0, brut_ly = 0;
     if (g_sdl) {
         static int tour = 0;
         sdl::PumpEvents();
@@ -449,6 +454,8 @@ HostPad host_poll_input() {
             // chaque bouton de la Switch : l'entrée choisie (settings().pad ; par défaut, la disposition par position)
             for (int i = 0; i < Settings::PAD_NB; i++)
                 if (entree_sdl(pd.g, settings().pad[i])) p.buttons |= kBoutons[i];
+            for (int e = Settings::P_SUD; e < Settings::P_NB; e++)
+                if (entree_sdl(pd.g, e)) brut |= 1u << e;
             // SDL : y positif vers le bas ; Switch : vers le haut
             auto ax = [&](int a, bool inv, int32_t dz) {
                 int32_t v = sdl::GetGamepadAxis(pd.g, a);
@@ -459,9 +466,11 @@ HostPad host_poll_input() {
             p.ly = mix(p.ly, ax(sdl::LEFTY, true, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE));
             p.rx = mix(p.rx, ax(sdl::RIGHTX, false, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE));
             p.ry = mix(p.ry, ax(sdl::RIGHTY, true, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE));
+            brut_lx = mix(brut_lx, ax(sdl::LEFTX, false, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE));
+            brut_ly = mix(brut_ly, ax(sdl::LEFTY, true, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE));
         }
     }
-    appliquer_vibrations(lire);
+    appliquer_vibrations(lire && !menu::ouvert());   // pas de vibrations pendant que le menu en jeu est ouvert
     XINPUT_STATE st{};
     if (!g_sdl && g_xget && lire && g_xget(0, &st) == ERROR_SUCCESS) {
         p.xinput = true;
@@ -472,6 +481,17 @@ HostPad host_poll_input() {
         p.ly = mix(p.ly, dead(st.Gamepad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE));
         p.rx = mix(p.rx, dead(st.Gamepad.sThumbRX, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE));
         p.ry = mix(p.ry, dead(st.Gamepad.sThumbRY, XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE));
+        brut = e;
+        brut_lx = dead(st.Gamepad.sThumbLX, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+        brut_ly = dead(st.Gamepad.sThumbLY, XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE);
+    }
+    // Menu en jeu : il lit la manette lui-même (le clavier lui vient de la fenêtre) ; ouvert, le jeu ne reçoit rien, et
+    // rien non plus juste après sa fermeture tant qu'un bouton reste appuyé (celui qui l'a fermé ne passe pas au jeu).
+    menu::manette(brut, brut_lx, brut_ly);
+    if (menu::masquer((p.buttons & 0xFFFF) == 0)) {
+        const bool branchee = p.xinput;
+        p = HostPad{};
+        p.xinput = branchee;
     }
     // diagnostic : RECOMP_AUTOPRESS=1 appuie sur A 100 ms toutes les 2 s (tests sans écran) ;
     // RECOMP_AUTOPRESS_UNTIL=s : seulement pendant les s premières secondes (écran titre), le jeu se

@@ -313,7 +313,8 @@ bool evaluer(VkCommandBuffer cb, const dlss::Evaluation& e, uint64_t serie) {
     if (!g.pret) return false;
     static const bool lineaire = getenv("RECOMP_FSR_LINEAR") != nullptr;
     static const bool debug = getenv("RECOMP_FSR_DEBUG") != nullptr;
-    static const float nettete = (float)settings().fsr_sharpness / 100.0f;   // recomp.ini fsr_sharpness, RECOMP_FSR_SHARPNESS
+    // recomp.ini fsr_sharpness, RECOMP_FSR_SHARPNESS ; relue à chaque image : le menu en jeu la change (menu.cpp)
+    const float nettete = (float)std::clamp(settings().fsr_sharpness, 0, 100) / 100.0f;
     const uint32_t ow = e.sortie.w, oh = e.sortie.h;
     if (e.rw < 32 || e.rh < 32 || ow < 32 || oh < 32) return false;
     // plans de la caméra : ceux de la matrice de la vue (vk_render.cpp, dlss_plans_camera), sinon des valeurs neutres

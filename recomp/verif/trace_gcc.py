@@ -29,6 +29,7 @@ os.makedirs(TRAV)
 
 sys.path.insert(0, RECOMP)
 import build  # noqa: E402
+import link  # noqa: E402  (sources et drapeaux de Dear ImGui, compilée avec le runtime)
 
 env = dict(os.environ)
 env["PATH"] = os.pathsep.join([os.path.join(GCC, "bin"), r"C:\Windows\System32", r"C:\Windows"])
@@ -80,10 +81,11 @@ def compiler(src, flags, nom):
 # 1. runtime (options de link.py)
 rt_flags = build.BASE_FLAGS + ["-O2", "-g1", "-Wall", "-Wno-unused-function",
                                "-I" + os.path.join(build.RUNTIME, "third_party"),
-                               "-D_WIN32_WINNT=0x0A00", "-DWINVER=0x0A00", "-Wa,-muse-unaligned-vector-move"]
+                               "-D_WIN32_WINNT=0x0A00", "-DWINVER=0x0A00", "-Wa,-muse-unaligned-vector-move"] + link.IMGUI_FLAGS
 rt = [os.path.join(build.RUNTIME, "runtime.cpp"), os.path.join(build.RUNTIME, "fp.cpp")]
 osdir = os.path.join(build.RUNTIME, "os")
 rt += sorted(os.path.join(osdir, f) for f in os.listdir(osdir) if f.endswith(".cpp"))
+rt += link.IMGUI_SOURCES
 # 2. code généré (options de fullbuild.py) : subsdk3, petit module, généré ici
 gen = os.path.join(TRAV, "gen")
 r = subprocess.run([sys.executable, "-X", "utf8", os.path.join(RECOMP, "recomp.py"), "gen", "subsdk3", "--out", gen,

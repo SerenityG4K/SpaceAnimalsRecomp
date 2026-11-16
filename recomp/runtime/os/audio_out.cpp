@@ -186,8 +186,6 @@ struct Dev {
 void render_thread() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
-    static const char* vol_env = getenv("RECOMP_VOLUME");
-    const float vol = vol_env ? std::clamp(atoi(vol_env), 0, 100) / 100.0f : 1.0f;
     Wav wav;
     if (const char* p = getenv("RECOMP_AUDIO_WAV")) wav.open(p);
     Dev d;
@@ -218,6 +216,7 @@ void render_thread() {
         float* out = (float*)p;
         g_mix(out, n);
         wav.write(out, n);
+        const float vol = (float)volume() / 100.0f;   // relu à chaque tampon : le menu en jeu le change
         if (vol != 1.0f)
             for (UINT32 i = 0; i < 2 * n; i++) out[i] *= vol;
         d.render->ReleaseBuffer(n, 0);
@@ -235,6 +234,18 @@ void start(MixFn mix) {
     std::thread(render_thread).detach();
 }
 bool active() { return g_active.load(std::memory_order_relaxed); }
+
+namespace {
+std::atomic<int>& volume_regle() {
+    static std::atomic<int> v{[] {
+        const char* e = getenv("RECOMP_VOLUME");
+        return e ? std::clamp(atoi(e), 0, 100) : 100;
+    }()};
+    return v;
+}
+}  // namespace
+int volume() { return volume_regle().load(std::memory_order_relaxed); }
+void set_volume(int pourcent) { volume_regle().store(std::clamp(pourcent, 0, 100), std::memory_order_relaxed); }
 
 }  // namespace audio_out
 }  // namespace hos

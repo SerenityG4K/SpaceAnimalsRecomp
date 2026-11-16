@@ -3742,3 +3742,102 @@ lent). `RECOMP_NAN_SCAN=n` : compte les pixels NaN ou infinis des cibles flottan
 remplissait la mémoire de zéros en silence. `nvn_exec.cpp` : `CopyTextureToBuffer`, jamais exécutée, est notée si le
 jeu l'émet. `RECOMP_SHADER_WATCH=hash,hash` : les dessins qui emploient ces shaders (image, matériau, première cible),
 la première fois puis toutes les 600 images.
+
+
+## Menu en jeu (F1) : les réglages pendant la partie (2026-11-16 ; pas publié)
+
+Demande : le menu des autres recompilations Switch 2, qui donne les réglages sans quitter le jeu. Modèle : Longshot
+(MagicBeanDev, GPLv3, https://git.magicbean.dev/MagicBeanDev/Longshot : `gpu/vk/vk_menu.cpp`, `vk_imgui.cpp`,
+`vk_ui.h`). Même principe, réécrit pour ce jeu : Dear ImGui ne sert qu'à dessiner (ses listes de dessin, pas ses
+fenêtres ni ses entrées), le menu lit lui-même le clavier, la manette et la souris, et il est dessiné par-dessus l'image
+de la fenêtre à la dernière étape de la présentation. Fermé, il ne coûte rien : aucune image de Dear ImGui, aucune passe.
+
+**Fichiers.**
+- `runtime/os/menu.cpp` : les lignes, les entrées, le dessin. Ni Windows ni Vulkan (les services de l'hôte sont dans
+  l'espace `hote` de `menu.h`) : c'est ce qui permet de l'essayer hors du jeu.
+- `runtime/os/menu_ui.h` : l'allure, celle du launcher (ses couleurs, Bahnschrift), touches et boutons dessinés.
+- `runtime/os/menu_vk.cpp` : Dear ImGui et son backend Vulkan sur le périphérique du moteur ; polices ; textures.
+- `runtime/os/settings_ecrire.cpp` : écriture de `recomp.ini` (les lignes des clés changées sont remplacées en place,
+  le reste est gardé : commentaires, ordre, fins de ligne ; fichier écrit à côté puis mis en place d'un coup).
+- `runtime/third_party/imgui` : Dear ImGui 1.92.9b, sans modification (archive vérifiée par son SHA-256, `README.txt`).
+  Ses réglages sont dans `runtime/os/menu_imconfig.h`, donné à tout le runtime par `link.py`
+  (`-DIMGUI_USER_CONFIG=<os/menu_imconfig.h>`, entre chevrons : aucun guillemet à faire passer à g++ sous Windows). Une
+  vérification de Dear ImGui qui échoue est notée dans le journal (`menu`), elle n'arrête pas la partie.
+
+**Ouverture.** F1 toujours ; Inser aussi, sauf si le joueur l'a donnée à une action ; à la manette, le bouton central
+(Guide, PS, Home) ou Back et Start ensemble. Le premier bouton de l'accord part au jeu avant que le menu s'ouvre : le
+jeu se met donc souvent en pause, ce qui tombe bien. Les neuf premières secondes, un rappel « Réglages F1 » est montré
+en bas à gauche (pas pendant le relevé des shaders : `RECOMP_WINDOW_HIDDEN` ; `RECOMP_NO_MENU_HINT=1` le coupe).
+
+**Le jeu continue.** Comme dans Longshot, le menu n'arrête pas le jeu : il lui retire seulement ses entrées. Arrêter
+le fil qui présente et le compteur du jeu (`rt_stall_begin`) a été écarté : les autres fils du jeu continueraient, et
+rien ne permettait de l'essayer. À dire au joueur (aide de l'onglet Jeu, README) : mettre en pause d'abord.
+
+**Entrées.**
+- Clavier et souris : la procédure de fenêtre (`present.cpp`) donne les touches enfoncées (`menu::touche` : touche
+  virtuelle, scancode, répétition), la molette et les clics ; ils attendent dans une file que le fil qui présente
+  traite (`menu::a_dessiner`). La position du curseur est demandée au dessin (`hote::souris`).
+- Manette : `input.cpp` publie à chaque lecture les entrées brutes, par position (un bit par `Settings::P_*`), sans
+  les réglages du joueur, et le stick gauche (`menu::manette`). Le bouton donné à A valide, celui donné à B revient,
+  comme dans le jeu ; la croix et le stick se répètent quand on les tient.
+- Menu ouvert, `host_poll_input` rend une manette vide au jeu (`menu::masquer`), et les vibrations sont coupées. Menu
+  juste fermé, le jeu ne reçoit rien tant qu'un bouton reste appuyé : celui qui a fermé le menu (Échap vaut +, le
+  bouton donné à B) ne passe pas au jeu. Seuls les boutons comptent pour cette attente, pas les sticks : un joueur qui
+  tient son stick en fermant reprend la main tout de suite.
+
+**Ce qui vaut tout de suite, ce qui attend.** Le menu écrit dans les réglages en service (`settings_vivants`) ceux que
+le jeu relit à chaque usage : vibrations, touches, boutons, netteté du FSR (`fsr.cpp` la lisait une fois : relue à
+chaque image), compteur d'images, taille du menu ; la fenêtre passe par un message à son fil (`WM_PLEIN_ECRAN`) ; le
+volume par `audio_out::set_volume` (le gain était lu une fois au démarrage du fil audio). Les autres ne sont lus qu'au
+démarrage (résolution, cadence, échelle, DLSS, FSR, carte, langue) : le menu ne touche pas aux réglages en service
+(les chaînes `gpu` et `language` sont lues par d'autres fils), il les écrit dans `recomp.ini` et marque la ligne « au
+prochain lancement » tant que sa valeur n'est pas celle du départ. Seules les clés que le joueur a changées sont
+écrites : une valeur imposée par `RECOMP_*` ou la ligne de commande ne passe pas dans le fichier.
+
+**Volume.** C'est un réglage du launcher (`lanceur.ini`, `RECOMP_VOLUME`). Le launcher donne maintenant au jeu le
+chemin de son fichier (`RECOMP_LANCEUR_INI`) et le menu y écrit le volume ; sans launcher, il ne vaut que pour la partie
+(le menu le dit). À la fin de la partie (`WM_JEU_FINI`), le launcher relit `recomp.ini` et son volume : sans cela, le
+prochain changement fait dans le launcher effaçait ceux du menu (`reglages_ecrire` écrit toutes ses clés).
+
+**Vulkan** (`vk_render.cpp`, quatre points d'accroche). `menu::vk::init` après `vkCreateDevice` ;
+`menu::vk::images_fenetre` à chaque swapchain créée (vues de ses images) et avant la destruction de l'ancienne ;
+`menu::vk::presenter` dans `present`, après la copie de l'image du jeu, l'image d'écran en `TRANSFER_DST_OPTIMAL` avant
+et après. Tout s'enregistre dans le tampon de commandes de la présentation : pas de soumission ni d'attente de plus.
+- Textures (l'atlas des lettres) : créées et mises à jour dans ce tampon de commandes, avant la passe ; l'envoi du
+  backend (une soumission et `vkQueueWaitIdle`) ne sert jamais (`dd->Textures = nullptr`).
+- Ce qui est abandonné (tampons de transit, anciennes textures) est détruit `NSLOT + 2` présentations plus tard : un
+  emplacement n'est repris que quand le GPU a fini sa soumission, et chaque présentation en avance d'un au moins. Les
+  tampons de sommets du backend tournent sur autant d'images (`ImageCount`).
+- Images de fenêtre en sRGB (le format que `create_swapchain` préfère) : le shader de fragments du backend est remplacé
+  par le sien suivi du passage du sRGB à la lumière linéaire (`kFragSrgb`, source GLSL en commentaire, compilé par
+  glslang 16.6.0). Longshot convertit les couleurs des sommets sur 8 bits, ce qui écrase les couleurs sombres ; ici les
+  couleurs sombres du menu restent justes.
+- Dear ImGui n'a pas pu démarrer (fonction Vulkan absente, plus de mémoire vidéo) : le menu ne s'ouvre jamais, le jeu
+  garde ses entrées, et le journal dit pourquoi (`menu`).
+
+**Polices.** Bahnschrift comme le launcher (`%WINDIR%\Fonts\bahnschrift.ttf`, Windows 10 et 11), sinon Segoe UI, sinon
+la police vectorielle de Dear ImGui ; `RECOMP_MENU_FONT=<fichier .ttf>` en impose une. Aucune police n'est fournie.
+
+**Construction.** `link.py` compile Dear ImGui avec le runtime (cinq fichiers, une seule fois : cache par fichier), et
+compile maintenant le runtime côte à côte (huit à la fois) : l'étape ne rallonge presque pas. `preparer.py` : l'étape
+`lier` dépend aussi de `third_party/imgui`. `build.py` n'est pas touché (le changer referait la recompilation du jeu).
+Après une mise à jour, seule l'étape `lier` est refaite. `verif/trace_gcc.py` reprend les sources et les drapeaux de
+`link.py`.
+
+**Réglages nouveaux** (`recomp.ini`, section `[menu]`, ajoutée aux fichiers existants) : `show_fps` (true, false ;
+`RECOMP_SHOW_FPS`) et `menu_size` (small, medium, large). Le launcher ne les connaît pas et les garde tels quels.
+
+**Vérifié, et pas vérifié.** Ce travail a été fait sur un Mac, sans Windows :
+- tous les fichiers touchés et Dear ImGui compilent pour Windows (clang de zig 0.17.1, cible `x86_64-windows-gnu`, les
+  options de `link.py`) ; les symboles du menu, de Dear ImGui et des réglages sont tous définis entre les objets ;
+- un banc d'essai hors du jeu (MoltenVK 1.4.2 sur Apple M2 Pro, image hors écran `B8G8R8A8_SRGB` puis
+  `B8G8R8A8_UNORM`) fait tourner le vrai `menu.cpp`, le vrai `menu_vk.cpp` et le vrai `settings_ecrire.cpp` avec des
+  entrées scénarisées : 15 vérifications de comportement (ouverture, réglages immédiats, échange de boutons, touche
+  donnée, confirmation de Quitter, entrées du jeu masquées jusqu'au relâchement, accord Back + Start), en 720p, 1080p,
+  1440p (taille Grand, anglais), 960×540 (page qui défile) et 3440×1440 (600 images), et 26 vérifications de l'écriture
+  de `recomp.ini` (CRLF gardé, clé préfixe d'une autre, sections des touches, écriture d'un seul coup) ;
+- **pas vérifié** : la compilation par le GCC du paquet, l'édition de liens, et tout ce qui est propre à Windows et au
+  jeu : la procédure de fenêtre, le nom des touches, la lecture brute des manettes (SDL3 et XInput), le volume écrit
+  dans `lanceur.ini`, les quatre points d'accroche de `vk_render.cpp` sur une vraie swapchain (NVIDIA, AMD, Intel), le
+  menu pendant une vraie partie. À faire avant de publier : `verifier.py rapide`, puis une partie avec le menu ouvert
+  et fermé plusieurs fois, un changement de fenêtre depuis le menu, et `verif/trace_gcc.py` (liste des fichiers du GCC).

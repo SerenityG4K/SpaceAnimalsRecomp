@@ -4,11 +4,14 @@
   python link.py [--modules main,sdk,...] [-O 2] [--out build/full/recomp_main.exe]
 
 Objets des modules : build/full/<module>/objs.txt (produits par fullbuild.py) ; runtime et couche
-hôte (runtime/*.cpp, runtime/os/*.cpp) compilés ici. Un module absent de la liste reste chargé
+hôte (runtime/*.cpp, runtime/os/*.cpp) compilés ici, avec Dear ImGui (runtime/third_party/imgui : le
+menu en jeu, runtime/os/menu.cpp). Un module absent de la liste reste chargé
 en mémoire (manifest) mais ses fonctions ne sont pas appelables : utile pour tester le
 démarrage avant la fin du build de main.
 """
 import argparse
+import concurrent.futures as cf
+import hashlib
 import os
 import subprocess
 import sys
@@ -20,6 +23,22 @@ import build  # noqa: E402
 
 FULL = os.path.join(HERE, "build", "full")
 ALL = ["main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "sdk"]
+
+# Dear ImGui (third_party/imgui, licence MIT) : le dessin du menu en jeu (runtime/os/menu.cpp, menu_vk.cpp). Ses sources
+# sont compilées avec le runtime, une fois (cache par fichier de build.py). Ses réglages sont dans os/menu_imconfig.h,
+# donné à tout le runtime pour que Dear ImGui et le menu voient les mêmes. Repris par verif/trace_gcc.py.
+IMGUI = os.path.join(build.RUNTIME, "third_party", "imgui")
+IMGUI_SOURCES = [os.path.join(IMGUI, f) for f in ("imgui.cpp", "imgui_draw.cpp", "imgui_tables.cpp", "imgui_widgets.cpp",
+                                                  os.path.join("backends", "imgui_impl_vulkan.cpp"))]
+# (entre chevrons, cherché par -I runtime : aucun guillemet à faire passer dans la ligne de commande de Windows)
+IMGUI_FLAGS = ["-I" + IMGUI, "-DIMGUI_USER_CONFIG=<os/menu_imconfig.h>"]
+
+
+def imgui_empreinte():
+    """Drapeau propre aux sources de Dear ImGui : l'empreinte de ses réglages, qui ne sont pas dans leur dossier (un
+    changement de os/menu_imconfig.h les recompile : les drapeaux entrent dans la clé du cache de build.py)."""
+    with open(os.path.join(build.RUNTIME, "os", "menu_imconfig.h"), "rb") as f:
+        return "-DMENU_IMCONFIG=" + hashlib.sha256(f.read()).hexdigest()[:12]
 
 
 def main():
@@ -51,6 +70,7 @@ def main():
     rt = [os.path.join(build.RUNTIME, "runtime.cpp"), os.path.join(build.RUNTIME, "fp.cpp")]
     osdir = os.path.join(build.RUNTIME, "os")
     rt += sorted(os.path.join(osdir, f) for f in os.listdir(osdir) if f.endswith(".cpp"))
+    rt += IMGUI_SOURCES
     rtobj = os.path.join(FULL, "rt")
     os.makedirs(rtobj, exist_ok=True)
     flags = build.BASE_FLAGS + ["-O" + a.O, "-g1", "-Wall", "-Wno-unused-function",
@@ -59,16 +79,20 @@ def main():
                                 "-D_WIN32_WINNT=0x0A00", "-DWINVER=0x0A00",
                                 # GCC suppose la pile alignée sur 32 octets pour l'AVX, Windows ne l'aligne que sur 16 :
                                 # les écritures vectorielles alignées (vmovdqa) deviennent non alignées (même vitesse)
-                                "-Wa,-muse-unaligned-vector-move"]
+                                "-Wa,-muse-unaligned-vector-move"] + IMGUI_FLAGS
+    flags_imgui = flags + [imgui_empreinte()]
     errs = []
-    for s in rt:
-        o = os.path.join(rtobj, os.path.splitext(os.path.basename(s))[0] + ".o")
-        _, err = build.compile_one("g++", s, o, flags)
-        if err:
-            errs.append((s, err))
-        elif _ and os.path.exists(o):
-            pass
-        objs.append(o)
+    # compilés côte à côte (comme les lots du jeu) : la première fois, Dear ImGui ne rallonge presque pas l'étape
+    with cf.ThreadPoolExecutor(max(1, min(os.cpu_count() or 1, 8))) as ex:
+        futs = []
+        for s in rt:
+            o = os.path.join(rtobj, os.path.splitext(os.path.basename(s))[0] + ".o")
+            futs.append((s, o, ex.submit(build.compile_one, "g++", s, o, flags_imgui if s in IMGUI_SOURCES else flags)))
+        for s, o, f in futs:
+            _, err = f.result()
+            if err:
+                errs.append((s, err))
+            objs.append(o)
     if errs:
         for s, e in errs:
             print(f"--- {s}\n{e[:6000]}")

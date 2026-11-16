@@ -7,10 +7,15 @@
 //   3. variables d'environnement RECOMP_REFRESH, RECOMP_RESOLUTION, RECOMP_NATIVE_RES, RECOMP_WINDOW,
 //      RECOMP_LANGUAGE (développement) ;
 //   4. options --refresh <Hz>, --resolution <auto|720|1080|1440|2160>, --native-res <0|1>, --window, --language.
-// Les réglages sont lus une fois au lancement : un changement s'applique au lancement suivant.
+// Les réglages sont lus une fois au lancement : un changement s'applique au lancement suivant. Sauf ceux que le menu en
+// jeu (menu.cpp, F1) change pendant la partie : fenêtre, vibrations, touches du clavier, boutons de la manette, netteté
+// du FSR, compteur d'images, taille du menu (settings_vivants) ; il écrit aussi les autres dans recomp.ini, pour le
+// lancement suivant (settings_enregistrer).
 #pragma once
 #include <cstdint>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace hos {
 
@@ -85,12 +90,53 @@ struct Settings {
     // textures sautés, caches d'enregistrement et d'appels indirects, attente active entre fils du jeu) : false les
     // coupe toutes d'un coup (comme la 1.0.3), à essayer si un défaut d'image ou un plantage apparaît.
     bool fast_rendering = true;
+    // Menu en jeu (menu.cpp) : compteur d'images par seconde dans le coin de l'image, et taille du menu (1 petit,
+    // 2 moyen, 3 grand : sur un téléviseur, de loin).
+    bool show_fps = false;
+    int menu_size = 2;
     std::string file;                // fichier de réglages utilisé
 };
+
+// Écriture de recomp.ini, la même dans le jeu (settings.cpp, settings_ecrire.cpp) et dans le launcher (lanceur.cpp, qui
+// a ses propres copies : TOUCHES_CLES, PAD_CLES, ENTREES_PAD, DLSS_MODES, FSR_MODES).
+// noms des actions dans les clés key_… et pad_… (ordre de Settings::keys ; les 16 premières sont les boutons)
+inline const char* const kNomsActions[Settings::K_NB] = {
+    "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "lstick", "rstick", "up", "down", "left", "right",
+    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"};
+// entrées des manettes (Settings::P_*), valeurs des clés pad_… ; même ordre que ENTREES_PAD (launcher/lanceur.cpp)
+inline const char* const PAD_ENTREES[Settings::P_NB] = {
+    "none", "south", "east", "west", "north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
+    "rightshoulder", "dpad_up", "dpad_down", "dpad_left", "dpad_right", "misc1", "right_paddle1", "left_paddle1",
+    "right_paddle2", "left_paddle2", "touchpad", "lefttrigger", "righttrigger"};
+// codes de langue de la console (nn::settings::LanguageCode), écriture canonique
+inline const char* const kLanguages[] = {"ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "nl",
+                                         "pt", "pt-BR", "ru", "ko", "zh-Hans", "zh-Hant"};
+constexpr int kNbLanguages = (int)(sizeof kLanguages / sizeof kLanguages[0]);
+// valeurs des clés dlss et fsr, dans l'ordre de Settings::dlss et Settings::fsr
+inline const char* const kModesDlss[6] = {"off", "dlaa", "quality", "balanced", "performance", "ultra_performance"};
+inline const char* const kModesFsr[6] = {"off", "native", "quality", "balanced", "performance", "ultra_performance"};
 
 const Settings& settings();
 void settings_init(int argc, char** argv);   // à appeler tôt dans main(), après l'ouverture du journal
 // Code de langue rendu au jeu (nn::oe::GetDesiredLanguage) : réglage, ou langue de Windows si « auto »
 std::string language_code();
+
+// ---- menu en jeu (menu.cpp) ----
+// Les réglages en service, modifiables : le menu y écrit ceux qui s'appliquent tout de suite (des entiers et des
+// booléens lus à chaque usage par les autres fils ; jamais les chaînes gpu et language, lues au démarrage seulement).
+Settings& settings_vivants();
+// Lignes « clé = valeur » de recomp.ini pour ces réglages (settings_ecrire.cpp) : toutes celles que le menu et le
+// launcher changent, touches (key_…) et boutons (pad_…) compris.
+std::vector<std::pair<std::string, std::string>> settings_lignes(const Settings& s);
+// `contenu` (le texte de recomp.ini) avec ces clés : chaque ligne « clé = … » est remplacée, une clé absente est
+// ajoutée à la fin (touches et boutons sous leur section, comme le launcher) ; commentaires, ordre et fins de ligne
+// gardés.
+std::string ini_remplacer(const std::string& contenu, const std::vector<std::pair<std::string, std::string>>& cles);
+// Écrit ces clés dans le fichier de réglages utilisé (settings().file), d'un seul coup (fichier à côté, puis mis en
+// place). Faux si le fichier n'a pas pu être écrit (il reste alors tel qu'il était).
+bool settings_enregistrer(const std::vector<std::pair<std::string, std::string>>& cles);
+// Volume du jeu (0 à 100), réglage du launcher (lanceur.ini, RECOMP_VOLUME) : écrit dans le fichier du launcher quand
+// c'est lui qui a lancé le jeu (RECOMP_LANCEUR_INI). Faux sinon : le volume ne vaut alors que pour cette partie.
+bool settings_volume_enregistrer(int volume);
 
 }  // namespace hos

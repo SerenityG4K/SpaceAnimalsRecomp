@@ -1283,6 +1283,8 @@ void lancer_jeu() {
     if (existe(journal)) MoveFileExW(journal.c_str(), (g.jeu + L"\\recomp_run_precedent.log").c_str(), MOVEFILE_REPLACE_EXISTING);
     // la copie choisie : le jeu la reprend si le manifeste pointe vers un ancien emplacement (dossier déplacé, issue n° 4)
     if (!g.copie.empty() && existe(g.copie)) SetEnvironmentVariableW(L"RECOMP_NUP", g.copie.c_str());
+    // menu en jeu (F1) : il écrit le volume changé pendant la partie dans lanceur.ini (runtime/os/settings.cpp)
+    SetEnvironmentVariableW(L"RECOMP_LANCEUR_INI", g.ini.c_str());
     // environnement : celui du launcher, plus le volume choisi
     std::vector<wchar_t> env;
     if (g.volume != 100) {
@@ -1702,6 +1704,10 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_JEU_FINI:
         g.jeu_lance = false;
+        // le menu en jeu (F1) a pu changer des réglages pendant la partie : recomp.ini et le volume sont relus, sans
+        // quoi le prochain changement fait ici les effacerait (reglages_ecrire et config_ecrire écrivent tout)
+        reglages_lire();
+        g.volume = std::clamp(_wtoi(ini_lire(L"volume", std::to_wstring(g.volume).c_str()).c_str()), 0, 100);
         jlog(L"game exited: code %d%ls", (int)w, (int)w == 4 ? L" (out of memory)" : (int)w ? L" (see recomp_run.log)" : L"");
         if ((int)w == 4) {   // le jeu manquait de mémoire (Windows a refusé ses réservations) : autres programmes ouverts
             g.statut_jeu = T("jeu_memoire");

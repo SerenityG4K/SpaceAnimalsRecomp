@@ -29,6 +29,8 @@
 #include "dlss.h"
 #include "fsr.h"
 #include "dlss_spirv.h"
+#include "menu.h"
+#include "menu_vk.h"
 
 // runtime.cpp : pause du compteur du jeu pendant un long blocage du pilote. Pas déclarées dans cpu.h : cet en-tête
 // entre dans l'empreinte de chaque objet du jeu recompilé (build.py, GEN_HEADERS) ; y toucher ferait recompiler tout
@@ -597,6 +599,7 @@ bool create_swapchain(HWND hwnd, VkSwapchainKHR old = VK_NULL_HANDLE) {
     vkGetSwapchainImagesKHR(g.dev, g.sc, &n, g.scimgs.data());
     g.scfmt = sf.format;
     g.scext = ext;
+    menu::vk::images_fenetre(g.scfmt, g.scimgs);   // menu en jeu (menu_vk.cpp) : vues des nouvelles images
     {
         DEVMODEW dm{};
         dm.dmSize = sizeof dm;
@@ -1072,6 +1075,12 @@ bool init(HWND hwnd) {
     HLOG("vk", "uniform buffers: alignment %llu, max size %u, %u per stage",
          (unsigned long long)g.ubo_align, p2.properties.limits.maxUniformBufferRange,
          p2.properties.limits.maxPerStageDescriptorUniformBuffers);
+    if (hwnd) {   // menu en jeu (menu.h, F1) : dessiné sur les images de la fenêtre, à la présentation
+        menu::vk::Acces acces;
+        acces.inst = g.inst, acces.pd = g.pd, acces.dev = g.dev, acces.famille = g.qf, acces.file = g.q;
+        acces.gipa = vkGetInstanceProcAddr, acces.gdpa = vkGetDeviceProcAddr, acces.en_vol = Vk::NSLOT;
+        menu::vk::init(acces);
+    }
     if (hwnd && !create_swapchain(hwnd) && !g.sc_stale) return false;
     if (!create_layouts()) return false;
     // emplacements de soumission (voir Vk::Slot) et sémaphore chronologique des soumissions
@@ -7525,6 +7534,7 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
         if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.pd, g.surf, &caps) == VK_SUCCESS && caps.currentExtent.width &&
             caps.currentExtent.height) {
             vkDeviceWaitIdle(g.dev);
+            menu::vk::images_fenetre(VK_FORMAT_UNDEFINED, {});   // vues des images de l'ancienne swapchain (menu en jeu)
             for (VkSemaphore sm : g.sem_img) vkDestroySemaphore(g.dev, sm, nullptr);   // recréés avec les images
             g.sem_img.clear();
             VkSwapchainKHR old = g.sc;
@@ -7604,6 +7614,9 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
         VkClearColorValue c{{0.1f, 0.0f, 0.1f, 1.0f}};
         vkCmdClearColorImage(g.cb, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1, &ib.subresourceRange);
     }
+    // Menu en jeu (menu.h, F1), compteur d'images : par-dessus l'image du jeu, à la taille de la fenêtre. L'image
+    // d'écran est en TRANSFER_DST_OPTIMAL avant et après ; rien n'est enregistré quand rien ne se montre.
+    if (have) menu::vk::presenter(g.cb, idx, g.scext.width, g.scext.height);
     ib.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     ib.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     ib.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -7838,4 +7851,12 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
 }
 
 }  // namespace vkr
+
+// Menu en jeu (menu.h) : la technique en service, dite sous les lignes de l'onglet Graphismes
+std::string menu::hote::technique() {
+    if (!dlss::pret()) return "";
+    const char* d = dlss::description();
+    return d && *d ? d : dlss::technique();
+}
+
 }  // namespace hos

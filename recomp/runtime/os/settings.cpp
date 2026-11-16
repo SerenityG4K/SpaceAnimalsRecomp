@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -160,19 +161,18 @@ const char* const kCleGpu = R"(
 gpu = auto
 )";
 
-// noms des actions dans les clés key_… et pad_… (ordre de Settings::keys ; les 16 premières sont les boutons)
-const char* const kNomsActions[Settings::K_NB] = {
-    "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "lstick", "rstick", "up", "down", "left", "right",
-    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"};
-// entrées des manettes (Settings::P_*), valeurs des clés pad_… ; même ordre que ENTREES_PAD (launcher/lanceur.cpp)
-const char* const PAD_ENTREES[Settings::P_NB] = {
-    "none", "south", "east", "west", "north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
-    "rightshoulder", "dpad_up", "dpad_down", "dpad_left", "dpad_right", "misc1", "right_paddle1", "left_paddle1",
-    "right_paddle2", "left_paddle2", "touchpad", "lefttrigger", "righttrigger"};
-
-// codes de langue de la console (nn::settings::LanguageCode), écriture canonique
-const char* const kLanguages[] = {"ja", "en-US", "en-GB", "fr", "fr-CA", "de", "it", "es", "es-419", "nl",
-                                  "pt", "pt-BR", "ru", "ko", "zh-Hans", "zh-Hant"};
+// Apparu avec le menu en jeu (F1)
+const char* const kCleMenu = R"(
+[menu]
+; Menu en jeu (F1, ou Inser ; à la manette : bouton central, ou Back et Start ensemble) : il change ces réglages
+; pendant la partie. show_fps : compteur d'images par seconde dans le coin de l'image, true ou false. menu_size :
+; taille du menu, small, medium ou large.
+; In-game menu (F1, or Insert; on a controller: the centre button, or Back and Start together): it changes these
+; settings while playing. show_fps: frames-per-second counter in the corner of the picture, true or false. menu_size:
+; size of the menu, small, medium or large.
+show_fps = false
+menu_size = medium
+)";
 
 std::string trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
@@ -249,7 +249,7 @@ void apply(const std::string& key, const std::string& val, const char* src) {
             HLOG("cfg", "%s: render_scale = '%s' invalid (67 to 100): ignored", src, v.c_str());
         }
     } else if (k == "dlss") {
-        static const char* const modes[] = {"off", "dlaa", "quality", "balanced", "performance", "ultra_performance"};
+        const char* const* modes = kModesDlss;
         const std::string m = lower(v);
         int i = 0;
         while (i < 6 && m != modes[i]) i++;
@@ -265,7 +265,7 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         else if (m == "dlss45" || m == "dlss4.5" || m == "4.5" || m == "45" || m == "m") g_settings.dlss_modele = 2;
         else HLOG("cfg", "%s: dlss_model = '%s' invalid (dlss4, dlss45): ignored", src, v.c_str());
     } else if (k == "fsr") {
-        static const char* const modes[] = {"off", "native", "quality", "balanced", "performance", "ultra_performance"};
+        const char* const* modes = kModesFsr;
         const std::string m = lower(v);
         int i = 0;
         while (i < 6 && m != modes[i]) i++;
@@ -317,6 +317,16 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         bool b;
         if (parse_bool(v, &b)) g_settings.fast_rendering = b;
         else HLOG("cfg", "%s: fast_rendering = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "show_fps") {
+        bool b;
+        if (parse_bool(v, &b)) g_settings.show_fps = b;
+        else HLOG("cfg", "%s: show_fps = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "menu_size") {
+        const std::string m = lower(v);
+        if (m == "small" || m == "1" || m == "petit") g_settings.menu_size = 1;
+        else if (m == "medium" || m == "2" || m == "moyen") g_settings.menu_size = 2;
+        else if (m == "large" || m == "3" || m == "grand") g_settings.menu_size = 3;
+        else HLOG("cfg", "%s: menu_size = '%s' invalid (small, medium, large): ignored", src, v.c_str());
     } else if (k == "cold_page_release") {
         bool b;
         if (parse_bool(v, &b)) g_settings.cold_page_release = b;
@@ -365,6 +375,7 @@ void load_file(const std::string& path, bool create) {
             fputs(kCleFsr, w);
             fputs(kCleRendu, w);
             fputs(kCleGpu, w);
+            fputs(kCleMenu, w);
             fclose(w);
             HLOG("cfg", "%s created with default values", path.c_str());
         }
@@ -403,6 +414,7 @@ void load_file(const std::string& path, bool create) {
         if (!vues.count("fsr")) ajout += kCleFsr;
         if (!vues.count("fast_rendering")) ajout += kCleRendu;
         if (!vues.count("gpu")) ajout += kCleGpu;
+        if (!vues.count("show_fps")) ajout += kCleMenu;
         if (!ajout.empty()) {
             if (FILE* w = fopen(path.c_str(), "ab")) {
                 fputs(ajout.c_str(), w);
@@ -416,6 +428,14 @@ void load_file(const std::string& path, bool create) {
 }  // namespace
 
 const Settings& settings() { return g_settings; }
+Settings& settings_vivants() { return g_settings; }
+
+bool settings_volume_enregistrer(int volume) {
+    // lanceur.ini du launcher qui a lancé le jeu (lanceur.cpp, lancer_jeu) : il relit son volume à la fin de la partie
+    const wchar_t* ini = _wgetenv(L"RECOMP_LANCEUR_INI");
+    if (!ini || !*ini) return false;
+    return WritePrivateProfileStringW(L"lanceur", L"volume", std::to_wstring(std::max(0, std::min(100, volume))).c_str(), ini) != 0;
+}
 
 std::string language_code() {
     if (g_settings.language != "auto") return g_settings.language;
@@ -472,6 +492,7 @@ void settings_init(int argc, char** argv) {
     if (const char* e = getenv("RECOMP_ZERO_PAGE_RELEASE")) apply("zero_page_release", e, "RECOMP_ZERO_PAGE_RELEASE");
     if (const char* e = getenv("RECOMP_COLD_PAGE_RELEASE")) apply("cold_page_release", e, "RECOMP_COLD_PAGE_RELEASE");
     if (const char* e = getenv("RECOMP_FAST_RENDERING")) apply("fast_rendering", e, "RECOMP_FAST_RENDERING");
+    if (const char* e = getenv("RECOMP_SHOW_FPS")) apply("show_fps", e, "RECOMP_SHOW_FPS");
     for (int i = 1; i + 1 < argc; i++) {
         std::string a = argv[i];
         if (a == "--refresh") apply("refresh_rate", argv[++i], "command line");
