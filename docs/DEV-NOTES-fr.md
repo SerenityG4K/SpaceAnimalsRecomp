@@ -3841,3 +3841,8 @@ Après une mise à jour, seule l'étape `lier` est refaite. `verif/trace_gcc.py`
   dans `lanceur.ini`, les quatre points d'accroche de `vk_render.cpp` sur une vraie swapchain (NVIDIA, AMD, Intel), le
   menu pendant une vraie partie. À faire avant de publier : `verifier.py rapide`, puis une partie avec le menu ouvert
   et fermé plusieurs fois, un changement de fenêtre depuis le menu, et `verif/trace_gcc.py` (liste des fichiers du GCC).
+
+**Première construction sous Windows (2026-11-16).** Compilé et lié par le GCC du paquet avec `preparer.py` (Windows 11,
+NVIDIA RTX 3070 Ti). Une correction a été nécessaire : `fsr.cpp` utilisait `std::clamp` sans `<algorithm>`. Le jeu
+démarre et le menu y fonctionne ; aucun relevé ligne par ligne n'a été gardé. Reste de la liste ci-dessus :
+`verifier.py rapide`, AMD et Intel, et `verif/trace_gcc.py`.

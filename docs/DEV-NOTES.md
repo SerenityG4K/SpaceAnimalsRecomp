@@ -3794,3 +3794,8 @@ the `lier` step runs again. `verif/trace_gcc.py` takes the sources and flags fro
   hooks of `vk_render.cpp` on a real swapchain (NVIDIA, AMD, Intel), the menu during a real session. To do before
   publishing: `verifier.py rapide`, then a session with the menu opened and closed several times, a window change from
   the menu, and `verif/trace_gcc.py` (list of the GCC files).
+
+**First build on Windows (2026-11-16).** Built and linked with the package's GCC through `preparer.py` (Windows 11,
+NVIDIA RTX 3070 Ti). One fix was needed: `fsr.cpp` used `std::clamp` without `<algorithm>`. The game starts and the
+menu works there; no row-by-row record was kept. Left from the list above: `verifier.py rapide`, AMD and Intel, and
+`verif/trace_gcc.py`.
