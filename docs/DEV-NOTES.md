@@ -3797,5 +3797,8 @@ the `lier` step runs again. `verif/trace_gcc.py` takes the sources and flags fro
 
 **First build on Windows (2026-11-16).** Built and linked with the package's GCC through `preparer.py` (Windows 11,
 NVIDIA RTX 3070 Ti). One fix was needed: `fsr.cpp` used `std::clamp` without `<algorithm>`. The game starts and the
-menu works there; no row-by-row record was kept. Left from the list above: `verifier.py rapide`, AMD and Intel, and
-`verif/trace_gcc.py`.
+menu works there; no row-by-row record was kept. `verifier.py rapide` on that PC: `python`, `runtime` (858 MB, no
+warning), `sauvegardes`, `launcher`, `desinstaller`, `rapport`, `precompile` and `deplace` pass; `versions`, `depot` and
+`paquet` fail on files that are not in the public repository (`recomp/depot/`, `launcher/extraits/`); `deplacement`
+fails (same-volume and other-volume file comparison), in code this work does not touch. Left from the list above: AMD
+and Intel, and `verif/trace_gcc.py`.

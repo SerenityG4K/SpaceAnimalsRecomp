@@ -3844,5 +3844,8 @@ Après une mise à jour, seule l'étape `lier` est refaite. `verif/trace_gcc.py`
 
 **Première construction sous Windows (2026-11-16).** Compilé et lié par le GCC du paquet avec `preparer.py` (Windows 11,
 NVIDIA RTX 3070 Ti). Une correction a été nécessaire : `fsr.cpp` utilisait `std::clamp` sans `<algorithm>`. Le jeu
-démarre et le menu y fonctionne ; aucun relevé ligne par ligne n'a été gardé. Reste de la liste ci-dessus :
-`verifier.py rapide`, AMD et Intel, et `verif/trace_gcc.py`.
+démarre et le menu y fonctionne ; aucun relevé ligne par ligne n'a été gardé. `verifier.py rapide` sur ce PC : `python`,
+`runtime` (858 Mo, aucun avertissement), `sauvegardes`, `launcher`, `desinstaller`, `rapport`, `precompile` et `deplace`
+passent ; `versions`, `depot` et `paquet` échouent sur des fichiers absents du dépôt public (`recomp/depot/`,
+`launcher/extraits/`) ; `deplacement` échoue (comparaison des fichiers, même volume et autre volume), dans du code que
+ce travail ne touche pas. Reste de la liste ci-dessus : AMD et Intel, et `verif/trace_gcc.py`.
