@@ -30,6 +30,7 @@
 #include "ffx/upscalers/include/ffx_upscale.h"
 #include "ffx/api/include/vk/ffx_api_vk.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
