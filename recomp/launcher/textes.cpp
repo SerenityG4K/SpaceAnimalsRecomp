@@ -166,10 +166,18 @@ const Texte TEXTES[] = {
     {"stick_g", L"Stick gauche", L"Left stick"},
     {"stick_d", L"Stick droit", L"Right stick"},
     {"croix", L"Croix", L"D-pad"},
-    {"ctl_note", L"Cliquez sur une touche pour la changer ; une touche déjà prise est échangée. Les changements valent au "
-                 L"prochain lancement du jeu. Boutons de la manette : onglet MANETTE.",
-     L"Click a key to change it; a key already in use is swapped. Changes apply the next time the game starts. "
-     L"Controller buttons: CONTROLLER tab."},
+    {"slsr", L"SL · SR", L"SL · SR"},
+    {"sl_g", L"SL (Joy-Con G)", L"SL (left Joy-Con)"},
+    {"sr_g", L"SR (Joy-Con G)", L"SR (left Joy-Con)"},
+    {"sl_d", L"SL (Joy-Con D)", L"SL (right Joy-Con)"},
+    {"sr_d", L"SR (Joy-Con D)", L"SR (right Joy-Con)"},
+    {"mod_ctrl", L"Ctrl", L"Ctrl"},
+    {"mod_maj", L"Maj", L"Shift"},
+    {"mod_alt", L"Alt", L"Alt"},
+    {"ctl_note", L"Cliquez sur une touche pour la changer ; une touche déjà prise est échangée. Ctrl, Maj ou Alt tenus en "
+                 L"même temps : une combinaison (Maj + W et W font deux actions). Valable au prochain lancement du jeu.",
+     L"Click a key to change it; a key already in use is swapped. Hold Ctrl, Shift or Alt with it for a combination "
+     L"(Shift + W and W do two actions). Applies the next time the game starts."},
     // onglet Manette (2026-11-12) : manettes Xbox, PlayStation, Switch Pro et Joy-Con (SDL3)
     {"ong_clavier", L"CLAVIER", L"KEYBOARD"},
     {"ong_manette", L"MANETTE", L"CONTROLLER"},
@@ -186,12 +194,15 @@ const Texte TEXTES[] = {
     {"sou_milieu", L"Clic milieu", L"Middle click"},
     {"sou_arriere", L"Bouton arrière", L"Back button"},
     {"sou_avant", L"Bouton avant", L"Forward button"},
+    {"sou_molette_haut", L"Molette vers le haut", L"Wheel up"},
+    {"sou_molette_bas", L"Molette vers le bas", L"Wheel down"},
     {"sou_aucun", L"Aucun", L"None"},
-    {"sou_note", L"La manette émulée devient une paire de Joy-Con 2 et la souris le Joy-Con 2 droit posé sur la table : "
-                 L"le jeu passe de lui-même en visée à la souris. Le clavier garde ses touches. Valable au prochain "
-                 L"lancement du jeu.",
-     L"The emulated controller becomes a pair of Joy-Con 2 and the mouse the right Joy-Con 2 lying on the desk: the game "
-     L"switches to mouse aiming by itself. The keyboard keeps its keys. Applies the next time the game starts."},
+    {"sou_note", L"La souris devient le Joy-Con 2 droit posé sur la table : le jeu passe de lui-même en visée à la souris. "
+                 L"Dans ce mode, le jeu met le boost et le frein sur le stick droit (haut, bas), l'inclinaison sur le "
+                 L"stick gauche (gauche, droite). Valable au prochain lancement du jeu.",
+     L"The mouse becomes the right Joy-Con 2 lying on the desk: the game switches to mouse aiming by itself. In this "
+     L"mode the game puts boost and brake on the right stick (up, down), tilt on the left stick (left, right). Applies "
+     L"the next time the game starts."},
     {"pad_branchee", L"Manette : %ls", L"Controller: %ls"},
     {"pad_autres", L"  (+ %d autre(s))", L"  (+ %d more)"},
     {"pad_aucune", L"Aucune manette branchée : cliquez sur un bouton (dessin ou liste), puis sur celui du dessin qui doit "

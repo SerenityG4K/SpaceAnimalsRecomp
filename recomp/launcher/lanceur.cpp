@@ -444,7 +444,8 @@ std::vector<std::string> lignes_fichier(const std::wstring& p) {
 const char* const TOUCHES_CLES[NB_TOUCHES] = {
     "key_a", "key_b", "key_x", "key_y", "key_l", "key_r", "key_zl", "key_zr", "key_plus", "key_minus", "key_lstick", "key_rstick",
     "key_up", "key_down", "key_left", "key_right", "key_ls_up", "key_ls_down", "key_ls_left", "key_ls_right",
-    "key_rs_up", "key_rs_down", "key_rs_left", "key_rs_right"};
+    "key_rs_up", "key_rs_down", "key_rs_left", "key_rs_right", "key_left_sl", "key_left_sr", "key_right_sl",
+    "key_right_sr"};
 // ---------------------------------------------------------------- boutons de la manette (page Contrôles, onglet Manette)
 // Une entrée de la manette par bouton de la Switch (« pad_a = east »…), écrites dans recomp.ini dès que le joueur en
 // change une. Noms des entrées : mêmes que PAD_ENTREES du jeu (runtime/os/settings.cpp), ordre de EntreePad.
@@ -456,11 +457,33 @@ const char* const ENTREES_PAD[P_NB] = {
     "right_paddle2", "left_paddle2", "touchpad", "lefttrigger", "righttrigger"};
 // ---------------------------------------------------------------- souris (page Contrôles, onglet Souris)
 // Mode souris du jeu (mouse_keyboard, runtime/os/hle_kbm.cpp) : la souris du PC devient le Joy-Con 2 droit posé comme
-// une souris. Chaque bouton de la souris appuie sur un bouton de la Switch (« mouse_left = r »… ; valeur : nom de
-// l'action, TOUCHES_CLES sans « key_ », ou none), comme Settings::mouse_buttons du jeu (runtime/os/settings.cpp).
+// une souris. Chaque bouton de la souris et chaque sens de la molette fait une action de la manette (« mouse_left = r »,
+// « mouse_wheel_up = rs_up »… ; valeur : nom de l'action, TOUCHES_CLES sans « key_ », ou none), comme
+// Settings::mouse_buttons du jeu (runtime/os/settings.cpp).
 const char* const SOURIS_CLES[NB_BOUTONS_SOURIS] = {"mouse_left", "mouse_right", "mouse_middle", "mouse_back",
-                                                     "mouse_forward"};
-std::string souris_bouton_nom(int b) { return b >= 0 && b < NB_PAD ? std::string(TOUCHES_CLES[b] + 4) : "none"; }
+                                                     "mouse_forward", "mouse_wheel_up", "mouse_wheel_down"};
+std::string souris_bouton_nom(int b) { return b >= 0 && b < NB_TOUCHES ? std::string(TOUCHES_CLES[b] + 4) : "none"; }
+// Valeur d'une touche dans recomp.ini : « 0x11 », « shift+0x11 », « ctrl+alt+0x11 »… ; lecture : touche_lire
+std::string touche_texte(unsigned t) {
+    char b[48];
+    snprintf(b, sizeof b, "%s%s%s0x%X", t & MODIF_CTRL ? "ctrl+" : "", t & MODIF_SHIFT ? "shift+" : "",
+             t & MODIF_ALT ? "alt+" : "", t & 0xFFFF);
+    return b;
+}
+bool touche_lire(std::string v, unsigned* t) {
+    for (char& c : v) c = (char)tolower((unsigned char)c);
+    unsigned mods = 0;
+    for (bool vu = true; vu;) {
+        vu = false;
+        for (auto [nom, bit] : {std::pair<const char*, unsigned>{"ctrl+", MODIF_CTRL}, {"shift+", MODIF_SHIFT}, {"alt+", MODIF_ALT}})
+            if (v.rfind(nom, 0) == 0) v = v.substr(strlen(nom)), mods |= bit, vu = true;
+    }
+    char* fin = nullptr;
+    const unsigned long sc = strtoul(v.c_str(), &fin, 0);
+    if (fin == v.c_str() || !(sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF))) return false;
+    *t = (unsigned)sc | (sc ? mods : 0);
+    return true;
+}
 
 // Deux préréglages, définis par la lettre gravée sur la touche et résolus sur le clavier réglé dans Windows :
 //   WASD (QWERTY) : stick gauche W A S D, Y sur Z, L sur Q, + sur M ;
@@ -471,14 +494,16 @@ std::string souris_bouton_nom(int b) { return b >= 0 && b < NB_PAD ? std::string
 struct Lettre { UINT vk; unsigned fixe; };
 const Lettre PRESETS[2][NB_TOUCHES] = {
     {{'C', 0}, {'X', 0}, {'V', 0}, {'Z', 0}, {'Q', 0}, {'E', 0}, {'R', 0}, {'T', 0}, {'M', 0}, {'N', 0}, {'F', 0}, {'H', 0},
-     {0, 0xE048}, {0, 0xE050}, {0, 0xE04B}, {0, 0xE04D}, {'W', 0}, {'S', 0}, {'A', 0}, {'D', 0}, {'I', 0}, {'K', 0}, {'J', 0}, {'L', 0}},
+     {0, 0xE048}, {0, 0xE050}, {0, 0xE04B}, {0, 0xE04D}, {'W', 0}, {'S', 0}, {'A', 0}, {'D', 0}, {'I', 0}, {'K', 0}, {'J', 0}, {'L', 0},
+     {0, 0}, {0, 0}, {0, 0}, {0, 0}},
     {{'C', 0}, {'X', 0}, {'V', 0}, {'W', 0}, {'A', 0}, {'E', 0}, {'R', 0}, {'T', 0}, {VK_OEM_COMMA, 0}, {'N', 0}, {'F', 0}, {'H', 0},
-     {0, 0xE048}, {0, 0xE050}, {0, 0xE04B}, {0, 0xE04D}, {'Z', 0}, {'S', 0}, {'Q', 0}, {'D', 0}, {'I', 0}, {'K', 0}, {'J', 0}, {'L', 0}}};
+     {0, 0xE048}, {0, 0xE050}, {0, 0xE04B}, {0, 0xE04D}, {'Z', 0}, {'S', 0}, {'Q', 0}, {'D', 0}, {'I', 0}, {'K', 0}, {'J', 0}, {'L', 0},
+     {0, 0}, {0, 0}, {0, 0}, {0, 0}}};
 void touches_prereglage(int p, unsigned* t) {
     const ReglagesJeu defaut;
     for (int i = 0; i < NB_TOUCHES; i++) {
         const Lettre& l = PRESETS[p][i];
-        const unsigned sc = l.fixe ? l.fixe : MapVirtualKeyW(l.vk, MAPVK_VK_TO_VSC);
+        const unsigned sc = l.fixe ? l.fixe : l.vk ? MapVirtualKeyW(l.vk, MAPVK_VK_TO_VSC) : 0;
         t[i] = sc ? sc : defaut.touches[i];   // lettre absente de ce clavier : position par défaut
     }
 }
@@ -499,7 +524,7 @@ void touche_affecter(int action, unsigned sc) {
     t[action] = sc;
     g.reglages.touches_ecrites = true;
     reglages_ecrire();
-    jlog(L"controls: %hs = 0x%X", TOUCHES_CLES[action], sc);
+    jlog(L"controls: %hs = %hs", TOUCHES_CLES[action], touche_texte(sc).c_str());
 }
 void touches_choisir_prereglage(int p) {
     touches_prereglage(p, g.reglages.touches);
@@ -591,7 +616,7 @@ void reglages_lire() {
             for (int i = 0; i < NB_BOUTONS_SOURIS; i++)
                 if (k == SOURIS_CLES[i]) {
                     g.reglages.souris_boutons[i] = -1;
-                    for (int b = 0; b < NB_PAD; b++)
+                    for (int b = 0; b < NB_TOUCHES; b++)
                         if (v == TOUCHES_CLES[b] + 4) g.reglages.souris_boutons[i] = b;
                 }
         }
@@ -606,8 +631,8 @@ void reglages_lire() {
         } else if (k.rfind("key_", 0) == 0) {
             for (int i = 0; i < NB_TOUCHES; i++)
                 if (k == TOUCHES_CLES[i]) {
-                    const unsigned long sc = strtoul(v.c_str(), nullptr, 0);
-                    if (sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF)) g.reglages.touches[i] = (unsigned)sc;
+                    unsigned t = 0;
+                    if (touche_lire(v, &t)) g.reglages.touches[i] = t;
                     g.reglages.touches_ecrites = true;
                 }
         }
@@ -638,9 +663,7 @@ void reglages_ecrire() {
     for (int i = 0; i < NB_BOUTONS_SOURIS; i++) cles.push_back({SOURIS_CLES[i], souris_bouton_nom(g.reglages.souris_boutons[i])});
     if (g.reglages.touches_ecrites)   // touches du clavier : seulement une fois que le joueur en a changé une
         for (int i = 0; i < NB_TOUCHES; i++) {
-            char b[16];
-            snprintf(b, sizeof b, "0x%X", g.reglages.touches[i]);
-            cles.push_back({TOUCHES_CLES[i], b});
+            cles.push_back({TOUCHES_CLES[i], touche_texte(g.reglages.touches[i])});
         }
     if (g.reglages.manette_ecrite)   // boutons de la manette : seulement une fois que le joueur en a changé un
         for (int i = 0; i < NB_PAD; i++) cles.push_back({PAD_CLES[i], ENTREES_PAD[std::min<int>(g.reglages.manette[i], P_NB - 1)]});
@@ -1512,8 +1535,8 @@ void basculer(Page p) { g.page = g.page == p ? Page::Aucune : p; }
 void action(int z) {
     if (z >= Z_SOURIS_B0 && z <= Z_SOURIS_B_FIN) {   // onglet Souris : ‹ › du bouton de la Switch d'un bouton de la souris
         const int i = (z - Z_SOURIS_B0) / 2, sens = (z - Z_SOURIS_B0) % 2 ? 1 : -1;
-        int& b = g.reglages.souris_boutons[i];   // aucun (-1), puis A … croix → (K_RIGHT)
-        b = (b + 1 + sens + NB_PAD + 1) % (NB_PAD + 1) - 1;
+        int& b = g.reglages.souris_boutons[i];   // aucune (-1), puis A … croix →, sticks, SL et SR (K_RSR)
+        b = (b + 1 + sens + NB_TOUCHES + 1) % (NB_TOUCHES + 1) - 1;
         reglages_ecrire();
         return;
     }
@@ -1717,7 +1740,7 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         const int a = g.zone_appui;
         g.zone_appui = Z_AUCUNE;
         const int attente = g.capture;   // un clic met fin à l'attente d'une touche (page Contrôles)
-        g.capture = -1;
+        g.capture = -1, g.capture_mod = 0;
         const int attente_pad = g.capture_pad;   // ou d'un appui sur la manette (onglet Manette)
         g.capture_pad = -1;
         if (z != Z_AUCUNE && z == a) {
@@ -1735,13 +1758,19 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         }
         if (g.capture >= 0) {   // page Contrôles : la touche pressée est donnée à l'action choisie (Échap : annuler)
+            // avec Ctrl, Maj ou Alt tenus : la combinaison (« Maj + W ») ; une touche modificatrice appuyée puis
+            // relâchée seule : elle-même (WM_KEYUP)
             if (w == VK_ESCAPE) {
-                g.capture = -1;
+                g.capture = -1, g.capture_mod = 0;
             } else if (!(l & (1 << 30))) {   // pas une répétition
                 const unsigned sc = (unsigned)((l >> 16) & 0xFF) | ((l & (1 << 24)) ? 0xE000u : 0u);
-                if (sc & 0xFF) {
-                    touche_affecter(g.capture, sc);
-                    g.capture = -1;
+                if (w == VK_SHIFT || w == VK_CONTROL || w == VK_MENU) {
+                    if (!g.capture_mod) g.capture_mod = sc;
+                } else if (sc & 0xFF) {
+                    const unsigned mods = (GetKeyState(VK_CONTROL) < 0 ? MODIF_CTRL : 0) |
+                                          (GetKeyState(VK_SHIFT) < 0 ? MODIF_SHIFT : 0) | (GetKeyState(VK_MENU) < 0 ? MODIF_ALT : 0);
+                    touche_affecter(g.capture, sc | mods);
+                    g.capture = -1, g.capture_mod = 0;
                 }
             }
             return 0;
@@ -1750,6 +1779,18 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (w == VK_RETURN) action(Z_PRINCIPAL);
         else if (w == VK_ESCAPE) g.page = Page::Aucune;
         return 0;
+    case WM_SYSKEYUP:
+    case WM_KEYUP:   // attente d'une touche : une touche modificatrice relâchée sans autre touche est donnée seule
+        if (g.capture >= 0 && g.capture_mod) {
+            const unsigned sc = (unsigned)((l >> 16) & 0xFF) | ((l & (1 << 24)) ? 0xE000u : 0u);
+            if (sc == g.capture_mod) {
+                touche_affecter(g.capture, sc);
+                g.capture = -1, g.capture_mod = 0;
+            }
+            return 0;
+        }
+        if (g.capture >= 0) return 0;
+        break;
     case WM_DPICHANGED: {
         g.dpi = dpi_fenetre((float)HIWORD(w), zone_de_travail(h));
         const RECT* r = (const RECT*)l;   // position proposée par Windows ; la taille suit notre échelle

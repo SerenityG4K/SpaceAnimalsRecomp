@@ -40,9 +40,13 @@ enum class Langue { Fr, En };
 // zones cliquables, déclarées par le dessin à chaque image
 // Touches du clavier : une par action de la manette (page Contrôles). Même ordre que Settings::keys du jeu
 // (runtime/os/settings.h) et que TOUCHES_CLES (lanceur.cpp).
-constexpr int NB_TOUCHES = 24;
+// Puis SL et SR de chaque Joy-Con. Une touche peut demander Ctrl, Maj, Alt (MODIF_*, bits 16 à 18 ; « shift+0x11 » dans
+// recomp.ini) : W et Maj+W font alors deux actions.
+constexpr int NB_TOUCHES = 28;
 enum Touche { K_A, K_B, K_X, K_Y, K_L, K_R, K_ZL, K_ZR, K_PLUS, K_MINUS, K_LSTICK, K_RSTICK, K_UP, K_DOWN, K_LEFT, K_RIGHT,
-              K_LS_UP, K_LS_DOWN, K_LS_LEFT, K_LS_RIGHT, K_RS_UP, K_RS_DOWN, K_RS_LEFT, K_RS_RIGHT };
+              K_LS_UP, K_LS_DOWN, K_LS_LEFT, K_LS_RIGHT, K_RS_UP, K_RS_DOWN, K_RS_LEFT, K_RS_RIGHT, K_LSL, K_LSR, K_RSL,
+              K_RSR };
+constexpr unsigned MODIF_CTRL = 1u << 16, MODIF_SHIFT = 1u << 17, MODIF_ALT = 1u << 18, MODIF_MASK = MODIF_CTRL | MODIF_SHIFT | MODIF_ALT;
 // Manette (page Contrôles, onglet Manette) : les 16 boutons de la Switch (ordre K_A … K_RIGHT), chacun donné à une entrée
 // de la manette, repérée par sa position comme SDL le fait (P_SUD : bouton du bas, A d'une manette Xbox, ✕ d'une
 // PlayStation, B d'une Nintendo). Mêmes valeurs que Settings::P_* du jeu (runtime/os/settings.h) ; noms dans recomp.ini :
@@ -51,10 +55,11 @@ constexpr int NB_PAD = 16;
 enum EntreePad { P_AUCUNE, P_SUD, P_EST, P_OUEST, P_NORD, P_BACK, P_GUIDE, P_START, P_STICK_G, P_STICK_D, P_EPAULE_G,
                  P_EPAULE_D, P_HAUT, P_BAS, P_GAUCHE, P_DROITE, P_MISC1, P_PALETTE_D1, P_PALETTE_G1, P_PALETTE_D2,
                  P_PALETTE_G2, P_PAVE, P_GACHETTE_G, P_GACHETTE_D, P_NB };
-// Souris (page Contrôles, onglet Souris) : boutons de la souris (gauche, droit, milieu, arrière, avant), chacun donné à
-// un bouton de la Switch (ordre K_A … K_RIGHT, -1 : aucun). Clés mouse_left … de recomp.ini (SOURIS_CLES, lanceur.cpp),
-// mêmes que Settings::mouse_buttons du jeu (runtime/os/settings.h).
-constexpr int NB_BOUTONS_SOURIS = 5;
+// Souris (page Contrôles, onglet Souris) : boutons de la souris (gauche, droit, milieu, arrière, avant) et molette (vers
+// le haut, vers le bas), chacun donné à une action de la manette (ordre K_A … K_RSR : boutons, directions des sticks,
+// SL, SR ; -1 : aucune). Clés mouse_left … de recomp.ini (SOURIS_CLES, lanceur.cpp), mêmes que Settings::mouse_buttons
+// du jeu (runtime/os/settings.h).
+constexpr int NB_BOUTONS_SOURIS = 7;
 
 enum Zone : int {
     Z_AUCUNE = 0, Z_PRINCIPAL, Z_MENU_REGLAGES, Z_MENU_CONTROLES, Z_MENU_CONSTRUCTION, Z_MENU_QUITTER, Z_COPIE,
@@ -110,7 +115,8 @@ struct ReglagesJeu {   // recomp.ini du jeu
     int vibration = 100;        // vibrations de la manette, en % (0 : aucune)
     // touches du clavier par action (scancodes, 0xE0xx : touche étendue ; 0 : aucune) ; par défaut les positions du jeu
     unsigned touches[NB_TOUCHES] = {0x2E, 0x2D, 0x2F, 0x2C, 0x10, 0x12, 0x13, 0x14, 0x32, 0x31, 0x21, 0x23,
-                                    0xE048, 0xE050, 0xE04B, 0xE04D, 0x11, 0x1F, 0x1E, 0x20, 0x17, 0x25, 0x24, 0x26};
+                                    0xE048, 0xE050, 0xE04B, 0xE04D, 0x11, 0x1F, 0x1E, 0x20, 0x17, 0x25, 0x24, 0x26,
+                                    0, 0, 0, 0};
     bool touches_ecrites = false;   // recomp.ini contient des clés key_… (ou le joueur vient de changer une touche)
     // entrée de la manette de chaque bouton de la Switch (pad_…) ; par défaut, la disposition par position du jeu
     uint8_t manette[NB_PAD] = {P_EST, P_SUD, P_NORD, P_OUEST, P_EPAULE_G, P_EPAULE_D, P_GACHETTE_G, P_GACHETTE_D,
@@ -120,7 +126,7 @@ struct ReglagesJeu {   // recomp.ini du jeu
     // la souris en % (mouse_speed) ; bouton de la Switch de chaque bouton de la souris (mouse_left …)
     bool souris = false;
     int souris_vitesse = 100;
-    int souris_boutons[NB_BOUTONS_SOURIS] = {K_R, K_ZR, K_RSTICK, -1, -1};
+    int souris_boutons[NB_BOUTONS_SOURIS] = {K_R, K_ZR, K_RSTICK, -1, -1, -1, -1};
 };
 
 // Manettes vues par le launcher (manette.cpp, SDL3 : onglet Manette de la page Contrôles)
@@ -163,6 +169,7 @@ struct App {
     Langue langue = Langue::Fr;
     Page page = Page::Aucune;
     int capture = -1;   // page Contrôles : action dont on attend la nouvelle touche ; -1 : aucune
+    unsigned capture_mod = 0;   // touche modificatrice appuyée pendant l'attente (donnée seule si relâchée seule)
     int onglet_controles = 0;      // page Contrôles : onglet 0 Clavier, 1 Manette, 2 Souris
     int capture_pad = -1;          // onglet Manette : bouton de la Switch qui attend un appui sur la manette ; -1 : aucun
     uint32_t pad_tenues = 0;       // entrées déjà appuyées quand l'attente a commencé (ne comptent qu'une fois relâchées)

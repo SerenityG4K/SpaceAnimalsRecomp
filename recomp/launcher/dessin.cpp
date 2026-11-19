@@ -838,8 +838,17 @@ void page_graphismes() {
     texte_lignes(T("gra_note"), F_PETIT, PX0 + 24, y + 12, PX1 - PX0 - 48, GRIS);
 }
 
-// Nom d'une touche d'après son scancode (0xE0xx : touche étendue), sur le clavier réglé dans Windows
-std::wstring nom_touche(UINT sc) {
+// Nom d'une touche d'après son scancode (0xE0xx : touche étendue), sur le clavier réglé dans Windows ; avec ses
+// modificateurs (MOD_*) : « Ctrl + Maj + W »
+std::wstring nom_touche_seule(UINT sc);
+std::wstring nom_touche(UINT t) {
+    std::wstring s;
+    if (t & MODIF_CTRL) s += T("mod_ctrl"), s += L" + ";
+    if (t & MODIF_SHIFT) s += T("mod_maj"), s += L" + ";
+    if (t & MODIF_ALT) s += T("mod_alt"), s += L" + ";
+    return s + nom_touche_seule(t & 0xFFFF);
+}
+std::wstring nom_touche_seule(UINT sc) {
     switch (sc) {
     case 0: return L"—";
     case 0xE048: return L"↑";
@@ -1359,7 +1368,15 @@ void case_touche(float x0, float x1, float y, int action, const wchar_t* prefixe
 // une souris : le jeu vise alors à la souris de lui-même, comme sur la console ; ses boutons appuient sur des boutons de
 // la Switch (par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris).
 // bouton de la Switch d'un bouton de la souris : -1 = aucun
-std::wstring nom_bouton_souris(int b) { return b >= 0 && b < NB_PAD ? nom_bouton_switch(b) : std::wstring(T("sou_aucun")); }
+// action de la manette d'une entrée de la souris : -1 = aucune ; bouton, direction d'un stick, SL ou SR
+std::wstring nom_bouton_souris(int b) {
+    static const wchar_t* const sens[4] = {L" ↑", L" ↓", L" ←", L" →"};
+    if (b >= 0 && b < NB_PAD) return nom_bouton_switch(b);
+    if (b >= K_LS_UP && b <= K_RS_RIGHT) return std::wstring(T(b < K_RS_UP ? "stick_g" : "stick_d")) + sens[(b - K_LS_UP) % 4];
+    static const char* const slsr[4] = {"sl_g", "sr_g", "sl_d", "sr_d"};
+    if (b >= K_LSL && b <= K_RSR) return T(slsr[b - K_LSL]);
+    return T("sou_aucun");
+}
 
 void page_souris() {
     float y = PY0 + 60;
@@ -1373,7 +1390,7 @@ void page_souris() {
     selecteur(y, v, Z_SOURIS_VIT_G, Z_SOURIS_VIT_D, g.reglages.souris);
     y += pas + 6;
     static const char* const boutons[NB_BOUTONS_SOURIS] = {"sou_gauche", "sou_droit", "sou_milieu", "sou_arriere",
-                                                           "sou_avant"};
+                                                           "sou_avant", "sou_molette_haut", "sou_molette_bas"};
     for (int i = 0; i < NB_BOUTONS_SOURIS; i++) {
         libelle(y, boutons[i], nullptr);
         selecteur(y, nom_bouton_souris(g.reglages.souris_boutons[i]).c_str(), Z_SOURIS_B0 + 2 * i, Z_SOURIS_B0 + 2 * i + 1,
@@ -1421,9 +1438,11 @@ void page_controles() {
         {T("stick_g"), {K_LS_UP, K_LS_LEFT, K_LS_DOWN, K_LS_RIGHT, K_LSTICK}, T("stick_g"), 0},
         {T("stick_d"), {K_RS_UP, K_RS_LEFT, K_RS_DOWN, K_RS_RIGHT, K_RSTICK}, T("stick_d"), 0},
         {T("croix"), {K_UP, K_LEFT, K_DOWN, K_RIGHT}, T("croix"), 0},
+        {T("slsr"), {K_LSL, K_LSR, K_RSL, K_RSR}, L"—", 0},   // SL et SR de chaque Joy-Con (mode souris)
     };
     static const wchar_t* const sens[5] = {L"▲", L"◀", L"▼", L"▶", L"●"};
-    const float pas = 23, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
+    static const wchar_t* const slsr[4] = {L"L·SL", L"L·SR", L"R·SL", L"R·SR"};
+    const float pas = 22, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
     for (size_t i = 0; i < L.size(); i++) {
         if (i % 2 == 0) rect(c0 - 8, y - 2, PX1 - 24, y + 21, VERT, 0.035f);
         texte(L[i].bouton, F_GRAS, c0, y + 1, BLANC, 1.f, 0.f, 0, c1 - c0 - 6);
@@ -1436,7 +1455,8 @@ void page_controles() {
                 texte(ou + nom_touche(L[i].confort), F_PETIT, c1 + 2 * lc + esp + 10, y + 3, GRIS, 1.f, 0.f, 0, c1f - (c1 + 2 * lc + esp + 10));
         } else {
             for (size_t k = 0; k < L[i].actions.size(); k++)
-                case_touche(c1 + k * (lc + esp), c1 + k * (lc + esp) + lc, y, L[i].actions[k], sens[k]);
+                case_touche(c1 + k * (lc + esp), c1 + k * (lc + esp) + lc, y, L[i].actions[k],
+                            L[i].actions[0] == K_LSL ? slsr[k] : sens[k]);
         }
         // bouton de la manette : réglé dans l'onglet Manette (A … − : une entrée ; sticks et croix : le texte fixe)
         const std::wstring m = L[i].actions.size() == 1 ? nom_entree(g.reglages.manette[L[i].actions[0]], 0) : L[i].manette;

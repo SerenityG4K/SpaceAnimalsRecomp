@@ -48,10 +48,16 @@ struct Settings {
     // Contrôles du launcher) : scancodes, c'est-à-dire la position physique de la touche (0xE0xx : touche étendue, les
     // flèches par exemple) ; 0 = aucune touche. Valeurs par défaut : celles du jeu depuis la 1.0.0, par position
     // (W A S D sur un clavier QWERTY, Z Q S D sur un AZERTY). Même ordre que TOUCHES_CLES (launcher/lanceur.cpp).
+    // Puis SL et SR de chaque Joy-Con (K_LSL … K_RSR, aucune touche par défaut). Une touche peut demander des
+    // modificateurs (MODIF_CTRL, MODIF_SHIFT, MODIF_ALT, bits 16 à 18 ; « shift+0x11 » dans recomp.ini) : Maj+W et W peuvent
+    // faire deux actions, la combinaison la plus précise l'emporte (input.cpp, touches_actives).
     enum { K_A, K_B, K_X, K_Y, K_L, K_R, K_ZL, K_ZR, K_PLUS, K_MINUS, K_LSTICK, K_RSTICK, K_UP, K_DOWN, K_LEFT, K_RIGHT,
-           K_LS_UP, K_LS_DOWN, K_LS_LEFT, K_LS_RIGHT, K_RS_UP, K_RS_DOWN, K_RS_LEFT, K_RS_RIGHT, K_NB };
+           K_LS_UP, K_LS_DOWN, K_LS_LEFT, K_LS_RIGHT, K_RS_UP, K_RS_DOWN, K_RS_LEFT, K_RS_RIGHT, K_LSL, K_LSR, K_RSL,
+           K_RSR, K_NB };
+    static constexpr unsigned MODIF_CTRL = 1u << 16, MODIF_SHIFT = 1u << 17, MODIF_ALT = 1u << 18,
+                              MODIF_MASK = MODIF_CTRL | MODIF_SHIFT | MODIF_ALT;
     unsigned keys[K_NB] = {0x2E, 0x2D, 0x2F, 0x2C, 0x10, 0x12, 0x13, 0x14, 0x32, 0x31, 0x21, 0x23,
-                           0xE048, 0xE050, 0xE04B, 0xE04D, 0x11, 0x1F, 0x1E, 0x20, 0x17, 0x25, 0x24, 0x26};
+                           0xE048, 0xE050, 0xE04B, 0xE04D, 0x11, 0x1F, 0x1E, 0x20, 0x17, 0x25, 0x24, 0x26, 0, 0, 0, 0};
     // Boutons de la manette (recomp.ini, clés pad_a… écrites par la page Contrôles du launcher, onglet Manette) : pour
     // chaque bouton de la Switch, dans l'ordre K_A … K_RIGHT, l'entrée de la manette qui le fait (input.cpp), repérée
     // par sa position comme SDL le fait : P_SUD est le bouton du bas (A d'une manette Xbox, ✕ d'une PlayStation, B
@@ -90,10 +96,11 @@ struct Settings {
     // toujours la manette (keys) ; les boutons de la souris appuient sur des boutons de la manette (mouse_buttons).
     bool mouse_keyboard = false;
     int mouse_speed = 100;   // déplacements de la souris envoyés au jeu, en % (10 à 1000)
-    // bouton de la Switch (indice K_A … K_RIGHT, -1 : aucun) de chaque bouton de la souris : gauche, droit, milieu,
-    // arrière (X1), avant (X2). Par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris.
-    enum { M_GAUCHE, M_DROIT, M_MILIEU, M_ARRIERE, M_AVANT, M_NB };
-    int8_t mouse_buttons[M_NB] = {K_R, K_ZR, K_RSTICK, -1, -1};
+    // action de la manette (indice K_A … K_RSR : bouton, direction d'un stick, SL ou SR ; -1 : aucune) de chaque entrée
+    // de la souris : boutons gauche, droit, milieu, arrière (X1), avant (X2), molette vers le haut et vers le bas (un
+    // appui bref par cran). Par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris.
+    enum { M_GAUCHE, M_DROIT, M_MILIEU, M_ARRIERE, M_AVANT, M_MOLETTE_HAUT, M_MOLETTE_BAS, M_NB };
+    int8_t mouse_buttons[M_NB] = {K_R, K_ZR, K_RSTICK, -1, -1, -1, -1};
     std::string file;                // fichier de réglages utilisé
 };
 

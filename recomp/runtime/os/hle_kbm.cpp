@@ -207,10 +207,39 @@ void hid_six_axis_state(CPUState* ctx) {
 
 }  // namespace
 
+// ---------------------------------------------------------------- molette
+// Chaque cran de la molette (WM_INPUT) devient un appui bref sur l'action choisie (mouse_wheel_up / _down) : 80 ms
+// appuyé, 40 ms relâché avant le cran suivant, assez pour que le jeu (60 lectures par seconde) voie chaque appui.
+namespace {
+struct Molette {
+    int crans = 0;   // appuis en attente
+    bool appui = false;
+    std::chrono::steady_clock::time_point t{};
+};
+std::mutex g_molette_lk;
+Molette g_molette[2];   // 0 vers le haut, 1 vers le bas
+
+void molette_cran(int sens, int n) {
+    std::lock_guard<std::mutex> lk(g_molette_lk);
+    g_molette[sens].crans = std::min(g_molette[sens].crans + n, 4);
+}
+bool molette_appui(int sens) {
+    using namespace std::chrono;
+    std::lock_guard<std::mutex> lk(g_molette_lk);
+    Molette& m = g_molette[sens];
+    const auto t = steady_clock::now();
+    if (m.appui && t - m.t >= milliseconds(80)) m.appui = false, m.t = t;
+    else if (!m.appui && m.crans > 0 && t - m.t >= milliseconds(40)) m.appui = true, m.crans--, m.t = t;
+    return m.appui;
+}
+}  // namespace
+
 // ---------------------------------------------------------------- boutons de la souris (input.cpp)
 uint32_t kbm_mouse_buttons() {
     if (!settings().mouse_keyboard || !g_captured.load() || !gfx_window_focused()) return 0;
     uint32_t b = 0;
+    if (molette_appui(0)) b |= 1u << Settings::M_MOLETTE_HAUT;
+    if (molette_appui(1)) b |= 1u << Settings::M_MOLETTE_BAS;
     if (down_vk(VK_LBUTTON)) b |= 1u << Settings::M_GAUCHE;
     if (down_vk(VK_RBUTTON)) b |= 1u << Settings::M_DROIT;
     if (down_vk(VK_MBUTTON)) b |= 1u << Settings::M_MILIEU;
@@ -245,6 +274,10 @@ bool kbm_wndproc(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp, intptr_t* 
         if (!(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {   // (une tablette ou un bureau à distance : absolu, ignoré)
             g_dx += ri.data.mouse.lLastX;
             g_dy += ri.data.mouse.lLastY;
+        }
+        if ((ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) && g_captured.load()) {   // molette : crans de 120
+            const int d = (short)ri.data.mouse.usButtonData;
+            if (d) molette_cran(d > 0 ? 0 : 1, std::max(1, std::abs(d) / WHEEL_DELTA));
         }
         break;   // DefWindowProc fait le ménage du message
     }

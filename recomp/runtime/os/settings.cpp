@@ -134,14 +134,16 @@ const char* const kCleSouris = R"(
 ; droit posé comme une souris : le jeu passe dans son mode souris (sensibilité réglable dans ses options). Le curseur
 ; de Windows est retenu dans la fenêtre tant qu'elle est active (Alt+Tab le rend). Le clavier pilote la manette comme
 ; d'habitude (touches key_...). mouse_speed : vitesse de la souris, en % (10 à 1000). mouse_left, mouse_right,
-; mouse_middle, mouse_back, mouse_forward : bouton de la Switch de chaque bouton de la souris (a, b, x, y, l, r, zl,
-; zr, plus, minus, lstick, rstick, up, down, left, right, ou none).
+; mouse_middle, mouse_back, mouse_forward, mouse_wheel_up, mouse_wheel_down : action de la manette de chaque entrée
+; de la souris (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down, left, right, ls_up, ls_down,
+; ls_left, ls_right, rs_up, rs_down, rs_left, rs_right, left_sl, left_sr, right_sl, right_sr, ou none).
 ; Mouse and keyboard: true or false. The emulated controller becomes a pair of Joy-Con 2 and the PC mouse the right
 ; Joy-Con 2 laid down as a mouse: the game enters its mouse mode (sensitivity set in its options). The Windows cursor is
 ; held in the window while it is active (Alt+Tab releases it). The keyboard drives the controller as usual (key_...
 ; keys). mouse_speed: mouse speed, in % (10 to 1000). mouse_left, mouse_right, mouse_middle, mouse_back,
-; mouse_forward: Switch button of each mouse button (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down,
-; left, right, or none).
+; mouse_forward, mouse_wheel_up, mouse_wheel_down: controller action of each mouse input (a, b, x, y, l, r, zl, zr,
+; plus, minus, lstick, rstick, up, down, left, right, ls_up, ls_down, ls_left, ls_right, rs_up, rs_down, rs_left,
+; rs_right, left_sl, left_sr, right_sl, right_sr, or none).
 mouse_keyboard = false
 mouse_speed = 100
 mouse_left = r
@@ -149,6 +151,8 @@ mouse_right = zr
 mouse_middle = rstick
 mouse_back = none
 mouse_forward = none
+mouse_wheel_up = none
+mouse_wheel_down = none
 )";
 
 // Apparu après la 1.0.3 (FSR d'AMD, 2026-11-12)
@@ -183,10 +187,12 @@ const char* const kCleGpu = R"(
 gpu = auto
 )";
 
-// noms des actions dans les clés key_… et pad_… (ordre de Settings::keys ; les 16 premières sont les boutons)
+// noms des actions dans les clés key_… et pad_… (ordre de Settings::keys ; les 16 premières sont les boutons, puis les
+// directions des sticks, puis SL et SR de chaque Joy-Con)
 const char* const kNomsActions[Settings::K_NB] = {
     "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "lstick", "rstick", "up", "down", "left", "right",
-    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"};
+    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right", "left_sl", "left_sr",
+    "right_sl", "right_sr"};
 // entrées des manettes (Settings::P_*), valeurs des clés pad_… ; même ordre que ENTREES_PAD (launcher/lanceur.cpp)
 const char* const PAD_ENTREES[Settings::P_NB] = {
     "none", "south", "east", "west", "north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
@@ -348,16 +354,18 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         long n;
         if (parse_int(v, &n) && n >= 10 && n <= 1000) g_settings.mouse_speed = (int)n;
         else HLOG("cfg", "%s: mouse_speed = '%s' invalid (10 to 1000): ignored", src, v.c_str());
-    } else if (k.rfind("mouse_", 0) == 0) {   // bouton de la Switch d'un bouton de la souris
-        static const char* const souris[Settings::M_NB] = {"left", "right", "middle", "back", "forward"};
+    } else if (k.rfind("mouse_", 0) == 0) {   // action de la manette d'une entrée de la souris
+        static const char* const souris[Settings::M_NB] = {"left", "right", "middle", "back", "forward", "wheel_up",
+                                                           "wheel_down"};
         int i = 0, b = 0;
         while (i < Settings::M_NB && k.compare(6, std::string::npos, souris[i]) != 0) i++;
         const std::string m = lower(v);
-        while (b < Settings::PAD_NB && m != kNomsActions[b]) b++;
+        while (b < Settings::K_NB && m != kNomsActions[b]) b++;
         if (i >= Settings::M_NB) HLOG("cfg", "%s: unknown key '%s' ignored", src, k.c_str());
-        else if (b < Settings::PAD_NB || m == "none") g_settings.mouse_buttons[i] = (int8_t)(b < Settings::PAD_NB ? b : -1);
+        else if (b < Settings::K_NB || m == "none") g_settings.mouse_buttons[i] = (int8_t)(b < Settings::K_NB ? b : -1);
         else HLOG("cfg", "%s: %s = '%s' invalid (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down, "
-                         "left, right, none): ignored", src, k.c_str(), v.c_str());
+                         "left, right, ls_up … rs_right, left_sl, left_sr, right_sl, right_sr, none): ignored", src,
+                  k.c_str(), v.c_str());
     } else if (k == "cold_page_release") {
         bool b;
         if (parse_bool(v, &b)) g_settings.cold_page_release = b;
@@ -378,11 +386,21 @@ void apply(const std::string& key, const std::string& val, const char* src) {
     } else if (k.rfind("key_", 0) == 0) {   // touche du clavier d'une action de la manette (page Contrôles du launcher)
         int i = 0;
         while (i < Settings::K_NB && k.compare(4, std::string::npos, kNomsActions[i]) != 0) i++;
+        // « ctrl+shift+0x11 » : modificateurs (ctrl, shift, alt) puis le scancode
+        std::string r = lower(v);
+        unsigned mods = 0;
+        for (bool vu = true; vu;) {
+            vu = false;
+            for (auto [nom, bit] : {std::pair<const char*, unsigned>{"ctrl+", Settings::MODIF_CTRL},
+                                    {"shift+", Settings::MODIF_SHIFT}, {"alt+", Settings::MODIF_ALT}})
+                if (r.rfind(nom, 0) == 0) r = trim(r.substr(strlen(nom))), mods |= bit, vu = true;
+        }
         char* fin = nullptr;
-        const unsigned long sc = strtoul(v.c_str(), &fin, 0);
-        if (i < Settings::K_NB && fin != v.c_str() && (sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF))) g_settings.keys[i] = (unsigned)sc;
-        else HLOG("cfg", "%s: %s = '%s' invalid (key scancode such as 0x11; set it from the launcher's Controls page): ignored",
-                  src, k.c_str(), v.c_str());
+        const unsigned long sc = strtoul(r.c_str(), &fin, 0);
+        if (i < Settings::K_NB && fin != r.c_str() && (sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF)))
+            g_settings.keys[i] = (unsigned)sc | (sc ? mods : 0);
+        else HLOG("cfg", "%s: %s = '%s' invalid (key scancode such as 0x11, shift+0x11; set it from the launcher's "
+                         "Controls page): ignored", src, k.c_str(), v.c_str());
     } else {
         HLOG("cfg", "%s: unknown key '%s' ignored", src, k.c_str());
     }
@@ -552,8 +570,9 @@ void settings_init(int argc, char** argv) {
     if (s.mouse_keyboard) {
         auto nom = [](int8_t b) { return b < 0 ? "none" : kNomsActions[b]; };
         HLOG("cfg", "mouse mode: Joy-Con 2 pair, mouse = right Joy-Con 2 mouse at %d %%; buttons left %s, right %s, "
-             "middle %s, back %s, forward %s", s.mouse_speed, nom(s.mouse_buttons[0]), nom(s.mouse_buttons[1]),
-             nom(s.mouse_buttons[2]), nom(s.mouse_buttons[3]), nom(s.mouse_buttons[4]));
+             "middle %s, back %s, forward %s; wheel up %s, down %s", s.mouse_speed, nom(s.mouse_buttons[0]),
+             nom(s.mouse_buttons[1]), nom(s.mouse_buttons[2]), nom(s.mouse_buttons[3]), nom(s.mouse_buttons[4]),
+             nom(s.mouse_buttons[5]), nom(s.mouse_buttons[6]));
     }
     {   // touches du clavier changées par le joueur (page Contrôles du launcher)
         const Settings defaut;

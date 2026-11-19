@@ -3734,8 +3734,19 @@ User request: play with keyboard and mouse, using the game's mouse mode (Switch 
   The mouse buttons press Switch buttons (`input.cpp`; R and ZR by default, the two buttons under the fingers of a
   Joy-Con 2 held as a mouse); the keyboard drives the controller as before.
 * **Settings**: `mouse_keyboard` (false by default: Pro controller, nothing changes), `mouse_speed` (10 to 1000%),
-  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward` (`a` … `right`, `none`). Launcher:
-  Controls page, MOUSE tab.
+  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward`, `mouse_wheel_up`, `mouse_wheel_down`:
+  any controller action (`a` … `right`, `ls_up` … `rs_right`, `left_sl`, `left_sr`, `right_sl`, `right_sr`, `none`);
+  a wheel notch is a short press (80 ms). Launcher: Controls page, MOUSE tab.
+* **The game's mouse-mode layout** (interface texts, `ui_hud.locs_strings`, `HUD_TUTORIAL_PROMPT_R_MOUSE_…`): the
+  mouse steers; boost and brake on the right stick (up, down, held); tilt on the left stick (left, right; twice: barrel
+  roll; both held: hover); fire, alternate fire, torpedo and barrel roll from the game's action table
+  (`fire_lasers`, `mouse_alt_fire`, `fire_bomb`, `mouse_barrel_roll_left` / `_right`). Left-handed (`L_MOUSE`): the
+  sticks swapped. Hence the user's request: every input of both Joy-Con reachable from the keyboard and the mouse.
+* **Keyboard**: SL and SR of each Joy-Con added to the actions (`key_left_sl` … `key_right_sr`, bits 24 to 27 of the
+  Npad state, no key by default). A key can require Ctrl, Shift, Alt (`key_rs_up = shift+0x11`): `touches_actives`
+  (`input.cpp`) keeps the most specific combination of each key (W: left stick, Shift+W: right stick), and a modifier
+  key bound on its own does not count during a combination that uses it. The launcher captures the combination
+  (modifiers held), or the modifier key released on its own.
 * **Dead ends**: the game's USB mouse (variable above) does not aim; forcing the "joycon-dual-ms" style is not enough
   without a motion sensor. The slight smoothing of the aim comes from the game (reticle), not from the mouse.
 * **References**: Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) for Nmouse, Jcms and

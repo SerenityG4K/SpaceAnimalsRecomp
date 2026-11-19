@@ -3780,8 +3780,20 @@ Demande de l'utilisateur : jouer au clavier et à la souris, avec le mode souris
   défaut R et ZR, les deux boutons sous les doigts d'un Joy-Con 2 tenu en souris) ; le clavier pilote la manette comme
   avant.
 * **Réglages** : `mouse_keyboard` (faux par défaut : manette Pro, rien ne change), `mouse_speed` (10 à 1000 %),
-  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward` (`a` … `right`, `none`). Launcher : page
-  Contrôles, onglet SOURIS.
+  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward`, `mouse_wheel_up`, `mouse_wheel_down` :
+  n'importe quelle action de la manette (`a` … `right`, `ls_up` … `rs_right`, `left_sl`, `left_sr`, `right_sl`,
+  `right_sr`, `none`) ; un cran de molette est un appui bref (80 ms). Launcher : page Contrôles, onglet SOURIS.
+* **Disposition du jeu en mode souris** (textes de l'interface, `ui_hud.locs_strings`, `HUD_TUTORIAL_PROMPT_R_MOUSE_…`) :
+  la souris dirige ; boost et frein sur le stick droit (haut, bas, tenus) ; inclinaison sur le stick gauche (gauche,
+  droite ; deux fois : tonneau ; les deux tenus : vol stationnaire) ; tir, tir secondaire, torpille et tonneau
+  selon la table d'actions du jeu (`fire_lasers`, `mouse_alt_fire`, `fire_bomb`, `mouse_barrel_roll_left` / `_right`).
+  Main gauche (`L_MOUSE`) : les sticks échangés. D'où la demande de l'utilisateur : toutes les entrées des deux
+  Joy-Con atteignables au clavier et à la souris.
+* **Clavier** : SL et SR de chaque Joy-Con ajoutés aux actions (`key_left_sl` … `key_right_sr`, bits 24 à 27 de
+  l'état Npad, aucune touche par défaut). Une touche peut demander Ctrl, Maj, Alt (`key_rs_up = shift+0x11`) :
+  `touches_actives` (`input.cpp`) garde la combinaison la plus précise de chaque touche (W : stick gauche, Maj+W :
+  stick droit), et une touche modificatrice liée seule ne compte pas pendant une combinaison qui se sert d'elle. Le
+  launcher saisit la combinaison (modificateurs tenus), ou la touche modificatrice relâchée seule.
 * **Pistes écartées** : la souris USB du jeu (variable ci-dessus) ne vise pas ; le style « joycon-dual-ms » imposé
   ne suffit pas sans capteur de mouvement. Le léger lissage de la visée vient du jeu (réticule), pas de la souris.
 * **Références** : Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) pour Nmouse, Jcms et les

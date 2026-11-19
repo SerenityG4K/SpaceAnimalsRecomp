@@ -50,6 +50,8 @@ enum : uint64_t {
     BTN_LEFT = 1ull << 12, BTN_UP = 1ull << 13, BTN_RIGHT = 1ull << 14, BTN_DOWN = 1ull << 15,
     // directions des sticks (16-19 gauche, 20-23 droit : gauche, haut, droite, bas)
     BTN_LS_LEFT = 1ull << 16, BTN_RS_LEFT = 1ull << 20,
+    // SL et SR du Joy-Con gauche (24, 25) et du droit (26, 27), ordre K_LSL … K_RSR de Settings
+    BTN_LEFT_SL = 1ull << 24,
 };
 constexpr int32_t STICK_MAX = 0x7FFF;
 // bits des boutons de la Switch, dans l'ordre K_A … K_RIGHT de Settings (touches du clavier, boutons de la manette)
@@ -333,6 +335,43 @@ bool key_sc(UINT sc) {   // sc : scancode, 0xE0xx pour une touche étendue (flè
 }
 bool key_vk(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
+// Modificateur que la touche `sc` est elle-même (Ctrl, Maj, Alt, gauche ou droite), 0 sinon
+unsigned modificateur(unsigned sc) {
+    switch (sc) {
+    case 0x1D: case 0xE01D: return Settings::MODIF_CTRL;
+    case 0x2A: case 0x36: return Settings::MODIF_SHIFT;
+    case 0x38: case 0xE038: return Settings::MODIF_ALT;
+    }
+    return 0;
+}
+
+// Actions de la manette dont la touche (avec ses modificateurs) est appuyée. Une touche liée sans modificateur compte
+// aussi quand d'autres sont tenus (Maj tenu pour un boost, W pour monter) ; mais si la même touche est liée ailleurs
+// avec plus de modificateurs, tous tenus, cette combinaison plus précise l'emporte seule (W : stick gauche, Maj+W :
+// stick droit). Une touche modificatrice liée seule ne compte pas pendant une combinaison qui se sert d'elle.
+void touches_actives(bool actif[Settings::K_NB]) {
+    const unsigned* K = settings().keys;
+    const unsigned tenus = (key_vk(VK_CONTROL) ? Settings::MODIF_CTRL : 0) | (key_vk(VK_SHIFT) ? Settings::MODIF_SHIFT : 0) |
+                           (key_vk(VK_MENU) ? Settings::MODIF_ALT : 0);
+    bool brut[Settings::K_NB];
+    for (int i = 0; i < Settings::K_NB; i++) {
+        const unsigned sc = K[i] & 0xFFFF, m = K[i] & Settings::MODIF_MASK;
+        brut[i] = sc && (m & ~tenus) == 0 && key_sc(sc);
+    }
+    unsigned servis = 0;   // modificateurs d'une combinaison active
+    for (int i = 0; i < Settings::K_NB; i++) {
+        actif[i] = brut[i];
+        const unsigned m = K[i] & Settings::MODIF_MASK;
+        for (int j = 0; j < Settings::K_NB && actif[i]; j++) {
+            const unsigned mj = K[j] & Settings::MODIF_MASK;
+            if (j != i && brut[j] && (K[j] & 0xFFFF) == (K[i] & 0xFFFF) && mj != m && (mj & m) == m) actif[i] = false;
+        }
+        if (actif[i]) servis |= m;
+    }
+    for (int i = 0; i < Settings::K_NB; i++)
+        if (actif[i] && !(K[i] & Settings::MODIF_MASK) && (modificateur(K[i] & 0xFFFF) & servis)) actif[i] = false;
+}
+
 int32_t axis(bool neg, bool pos) { return (pos ? STICK_MAX : 0) - (neg ? STICK_MAX : 0); }
 
 int32_t dead(int32_t v, int32_t dz) {
@@ -412,10 +451,17 @@ HostPad host_poll_input() {
     HostPad p;
     if (gfx_window_focused()) {
         const unsigned* K = settings().keys;   // une touche par action (recomp.ini, page Contrôles du launcher)
-        static const uint64_t bits[] = {BTN_A, BTN_B, BTN_X, BTN_Y, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
-                                        BTN_LSTICK, BTN_RSTICK, BTN_UP, BTN_DOWN, BTN_LEFT, BTN_RIGHT};
+        // actions appuyées : touches du clavier (et leurs combinaisons), puis entrées de la souris en mode souris
+        // (hle_kbm.cpp), chacune donnée à une action de la manette (bouton, direction d'un stick, SL, SR)
+        bool actif[Settings::K_NB];
+        touches_actives(actif);
+        const uint32_t souris = kbm_mouse_buttons();
+        for (int i = 0; i < Settings::M_NB; i++)
+            if ((souris >> i & 1) && settings().mouse_buttons[i] >= 0) actif[settings().mouse_buttons[i]] = true;
         for (int i = 0; i <= Settings::K_RIGHT; i++)
-            if (key_sc(K[i])) p.buttons |= bits[i];
+            if (actif[i]) p.buttons |= kBoutons[i];
+        for (int i = Settings::K_LSL; i <= Settings::K_RSR; i++)
+            if (actif[i]) p.buttons |= BTN_LEFT_SL << (i - Settings::K_LSL);
         // touches de confort des menus, sauf si le joueur a donné cette touche à une action
         auto libre = [&](unsigned sc) {
             for (int i = 0; i < Settings::K_NB; i++)
@@ -426,14 +472,10 @@ HostPad host_poll_input() {
         if (libre(0x0E) && key_vk(VK_BACK)) p.buttons |= BTN_B;
         if (libre(0x01) && key_vk(VK_ESCAPE)) p.buttons |= BTN_PLUS;
         if (libre(0x0F) && key_vk(VK_TAB)) p.buttons |= BTN_MINUS;
-        p.lx = axis(key_sc(K[Settings::K_LS_LEFT]), key_sc(K[Settings::K_LS_RIGHT]));
-        p.ly = axis(key_sc(K[Settings::K_LS_DOWN]), key_sc(K[Settings::K_LS_UP]));
-        p.rx = axis(key_sc(K[Settings::K_RS_LEFT]), key_sc(K[Settings::K_RS_RIGHT]));
-        p.ry = axis(key_sc(K[Settings::K_RS_DOWN]), key_sc(K[Settings::K_RS_UP]));
-        // mode souris (hle_kbm.cpp) : chaque bouton de la souris appuie sur le bouton de la manette choisi
-        const uint32_t souris = kbm_mouse_buttons();
-        for (int i = 0; i < Settings::M_NB; i++)
-            if ((souris >> i & 1) && settings().mouse_buttons[i] >= 0) p.buttons |= kBoutons[settings().mouse_buttons[i]];
+        p.lx = axis(actif[Settings::K_LS_LEFT], actif[Settings::K_LS_RIGHT]);
+        p.ly = axis(actif[Settings::K_LS_DOWN], actif[Settings::K_LS_UP]);
+        p.rx = axis(actif[Settings::K_RS_LEFT], actif[Settings::K_RS_RIGHT]);
+        p.ry = axis(actif[Settings::K_RS_DOWN], actif[Settings::K_RS_UP]);
     }
     // Manette XInput lue seulement quand la fenêtre du jeu est active, comme le clavier : sinon une partie
     // jouée ailleurs avec la même manette pilotait aussi le jeu (le 2026-11-09, 17 appuis sur Start =
