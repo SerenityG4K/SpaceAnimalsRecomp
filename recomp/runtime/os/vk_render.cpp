@@ -180,6 +180,10 @@ struct Vk {
     VkExtent2D scext{};
     std::vector<VkImage> scimgs;
     HWND hwnd = nullptr;
+    bool ext_espace_couleur = false;   // VK_EXT_swapchain_colorspace activée (réglage hdr)
+    // HDR (réglage hdr) : l'écran propose le HDR10 (format 10 bits, ST 2084) ; -1 : pas encore regardé. La swapchain est
+    // alors créée en HDR10 et l'image du jeu, déjà en PQ (le jeu sort en HDR10 quand nn::vi le lui dit), y est copiée.
+    int hdr10 = -1;
     bool sc_stale = false;   // swapchain périmée (fenêtre réduite ou redimensionnée) : recréée à la présentation
     int last_present_w = 0, last_present_h = 0;   // journal de la mise à l'échelle de présentation
     // RECOMP_GPU_PROFILE=N : horodatages GPU de chaque dessin / calcul de l'image N, sommés par programme
@@ -566,6 +570,26 @@ bool create_swapchain(HWND hwnd, VkSwapchainKHR old = VK_NULL_HANDLE) {
     VkSurfaceFormatKHR sf = fmts.empty() ? VkSurfaceFormatKHR{VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR} : fmts[0];
     for (auto& f : fmts)
         if (f.format == VK_FORMAT_B8G8R8A8_SRGB) sf = f;
+    // HDR (réglage hdr) : HDR10, 10 bits et ST 2084 (PQ), comme la sortie HDR du jeu ; décidé une fois (le jeu choisit sa
+    // sortie au démarrage), gardé aux recréations
+    if (g.hdr10 < 0) {
+        g.hdr10 = 0;
+        if (settings().hdr && g.ext_espace_couleur) {
+            for (auto& f : fmts)
+                if (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+                    (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32))
+                    g.hdr10 = 1;
+            HLOG("vk", "HDR: %s", g.hdr10 ? "the display offers HDR10: HDR output"
+                                          : "the display offers no HDR10 (is HDR on in Windows' display settings?): SDR");
+        }
+    }
+    if (g.hdr10 == 1)
+        for (auto& f : fmts)
+            if (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT &&
+                (f.format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f.format == VK_FORMAT_A2R10G10B10_UNORM_PACK32)) {
+                sf = f;
+                break;
+            }
     RECT rc;
     GetClientRect(hwnd, &rc);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent
@@ -808,6 +832,16 @@ bool init(HWND hwnd) {
     app.pApplicationName = "recomp_main";
     app.apiVersion = VK_API_VERSION_1_3;
     std::vector<const char*> iext = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    if (hwnd && settings().hdr) {   // HDR : espaces de couleur de la swapchain (HDR10 ST 2084)
+        uint32_t ni = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &ni, nullptr);
+        std::vector<VkExtensionProperties> dispo(ni);
+        vkEnumerateInstanceExtensionProperties(nullptr, &ni, dispo.data());
+        for (auto& e : dispo)
+            if (!strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) g.ext_espace_couleur = true;
+        if (g.ext_espace_couleur) iext.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+        else HLOG("vk", "HDR: the Vulkan driver lacks VK_EXT_swapchain_colorspace: the game stays in SDR");
+    }
     // DLSS (dlss.cpp) : pas pour la précompilation des pipelines (sans fenêtre)
     const bool avec_dlss = hwnd && dlss::modele_demande();
     if (avec_dlss) {   // extensions d'instance demandées par NGX, s'il y en a
@@ -4186,6 +4220,12 @@ void snapshot(Image& im, uint64_t frame, const int32_t* crop) {
 // ================================================================ interface (vk_render.h)
 bool available() { return g.ok; }
 
+bool hdr_output() {
+    std::lock_guard<std::mutex> lk(g_vk_lk);
+    ensure_init();
+    return g.ok && g.hdr10 == 1;
+}
+
 void pool_flushed(uint64_t addr, uint64_t size) {
     if (size) flush_note(addr, addr + size);
 }
@@ -7509,6 +7549,15 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
     Image* src = get_image(texkey);
     if (src) image_to_general(*src);
     dbg_tex("presented", 0, texkey);
+    if (src) {   // format de l'image présentée : 10 bits (PQ) quand le jeu sort en HDR
+        static VkFormat vu = VK_FORMAT_UNDEFINED;
+        if (src->fmt != vu) {
+            vu = src->fmt;
+            HLOG("vk", "presented image: %ux%u, format %d (NVN %u)", src->w, src->h, (int)src->fmt, src->nvnfmt);
+            if (g.hdr10 == 1 && src->fmt != VK_FORMAT_A2B10G10R10_UNORM_PACK32 && src->fmt != VK_FORMAT_A2R10G10B10_UNORM_PACK32)
+                HLOG("vk", "HDR: this image is not 10-bit PQ: its colors are wrong on the HDR10 screen");
+        }
+    }
     uint32_t idx = 0;
     auto t_acq = std::chrono::steady_clock::now();
     // Swapchain périmée (fenêtre réduite, redimensionnée) : recréée dès que la fenêtre a une taille.

@@ -95,6 +95,11 @@ struct Settings {
     // du PC devient le capteur souris du Joy-Con 2 droit, que le jeu suit dans son mode souris. Le clavier pilote
     // toujours la manette (keys) ; les boutons de la souris appuient sur des boutons de la manette (mouse_buttons).
     bool mouse_keyboard = false;
+    // HDR (hle_gfx.cpp, vk_render.cpp) : le jeu sort en HDR10 quand l'écran le permet (HDR activé dans Windows) ;
+    // luminosité maximale de l'écran et blanc papier (blanc de l'interface et des scènes SDR), en nits, donnés au jeu.
+    bool hdr = false;
+    int hdr_peak = 1000;          // 400 à 10000
+    int hdr_paper_white = 203;    // 80 à 500
     int mouse_speed = 100;   // déplacements de la souris envoyés au jeu, en % (10 à 1000)
     // action de la manette (indice K_A … K_RSR : bouton, direction d'un stick, SL ou SR ; -1 : aucune) de chaque entrée
     // de la souris : boutons gauche, droit, milieu, arrière (X1), avant (X2), molette vers le haut et vers le bas (un

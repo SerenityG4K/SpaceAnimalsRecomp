@@ -155,14 +155,30 @@ void vi_swap_interval(CPUState* ctx) {   // (Layer*, int, int)
     if (n++ < 20) HLOG("gfx", "nn::vi::SetLayerExtendedSwapInterval(%d, %d)", (int32_t)A(1), (int32_t)A(2));
     R(ctx, 0);
 }
+// HDR (réglage hdr, 2026-11-19). Le jeu a sa sortie HDR : quand l'écran se dit HDR10 (bool vrai, format 1, luminosité
+// maximale en nits), il se calibre (« HDR auto-calibration: paperwhite 203, min 0, max 1000 »), donne ses métadonnées
+// (SetLayerNextHdr…LuminanceRangeMetadata : 0–blanc papier pour le contenu standard, 0–maximum pour l'étendu) et rend
+// son image finale en RGB10A2 codé en PQ (ST 2084), que vk_render.cpp copie sur une swapchain HDR10. Sans réglage ou
+// sans HDR10 à l'écran : SDR, comme avant (sinon : « HDR auto-calibration failed (SDR display?) »).
 void vi_hdr_status(CPUState* ctx) {   // (bool*, HdrOutputFormat*, u16*, Display const*)
-    if (A(0)) *P<uint8_t>(A(0)) = 0;
-    if (A(1)) *P<uint32_t>(A(1)) = 0;
-    if (A(2)) *P<uint16_t>(A(2)) = 0;
+    const bool hdr = settings().hdr && vkr::hdr_output();
+    if (A(0)) *P<uint8_t>(A(0)) = hdr ? 1 : 0;
+    if (A(1)) *P<uint32_t>(A(1)) = hdr ? 1 : 0;   // HDR10
+    if (A(2)) *P<uint16_t>(A(2)) = hdr ? (uint16_t)settings().hdr_peak : 0;
+    static std::atomic<int> n{0};
+    if (n++ == 0)
+        HLOG("gfx", "nn::vi::QueryDisplayHdrStatus → %s", hdr ? "HDR10 (game renders in HDR)" : "SDR");
     R(ctx, 0);
 }
-void vi_paper_white(CPUState* ctx) {
-    if (A(0)) *P<uint16_t>(A(0)) = 203;
+void vi_hdr_metadata(CPUState* ctx) {   // SetLayerNextHdr…ContentLuminanceRangeMetadata(Layer*, u16 min, u16 max)
+    static std::atomic<int> n{0};
+    if (n++ < 2)
+        HLOG("gfx", "nn::vi::SetLayerNextHdr…LuminanceRangeMetadata: %u to %u nits", (unsigned)(A(1) & 0xffff),
+             (unsigned)(A(2) & 0xffff));
+    R(ctx, 0);
+}
+void vi_paper_white(CPUState* ctx) {   // blanc papier (nits) : luminosité du blanc de l'interface et des scènes SDR
+    if (A(0)) *P<uint16_t>(A(0)) = (uint16_t)settings().hdr_paper_white;
     R(ctx, 0);
 }
 void vi_refresh_rate(CPUState* ctx) {   // nn::vi::RefreshRate : u32 en Hz (le moteur pré-remplit 60)
@@ -615,8 +631,8 @@ void gfx_init() {
         {"_ZN2nn2vi30QueryDisplayCurrentRefreshRateEPNS0_11RefreshRateEPKNS0_7DisplayE", vi_refresh_rate},
         {"_ZN2nn2vi31QueryDisplayBufferMaxResolutionEPNS0_19BufferMaxResolutionEPKNS0_7DisplayE", vi_max_resolution},
         {"_ZN2nn2vi36SetDisplay120HzRefreshRateCapabilityEPNS0_7DisplayEb", vi_120hz},
-        {"_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_ok},
-        {"_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_ok},
+        {"_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_hdr_metadata},
+        {"_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt", vi_hdr_metadata},
     };
     int n = 0;
     for (auto& o : ov) n += override_export(o.sym, o.fn);

@@ -151,6 +151,19 @@ const char* const kCleSouris = R"(
 mouse_keyboard = false
 )";
 
+// Apparu après la 1.1.0 (HDR, hle_gfx.cpp et vk_render.cpp)
+const char* const kCleHdr = R"(
+; HDR : true ou false. Le jeu a sa propre sortie HDR10 ; il s'en sert quand l'écran est en HDR (activé dans les
+; paramètres d'affichage de Windows), sinon il reste en SDR. hdr_peak : luminosité maximale de l'écran, en nits (400 à
+; 10000). hdr_paper_white : blanc papier, la luminosité du blanc de l'interface et des scènes SDR, en nits (80 à 500).
+; HDR: true or false. The game has its own HDR10 output; it uses it when the screen is in HDR (turned on in Windows'
+; display settings), otherwise it stays in SDR. hdr_peak: the screen's peak brightness, in nits (400 to 10000).
+; hdr_paper_white: paper white, the brightness of the interface and SDR scenes' white, in nits (80 to 500).
+hdr = false
+hdr_peak = 1000
+hdr_paper_white = 203
+)";
+
 // Apparu après la 1.0.3 (FSR d'AMD, 2026-11-12)
 const char* const kCleFsr = R"(
 ; FSR d'AMD à la place de l'anticrénelage du jeu, sur toute carte graphique (AMD, NVIDIA, Intel) : off, native (rendu
@@ -369,6 +382,16 @@ void apply(const std::string& key, const std::string& val, const char* src) {
             HLOG("cfg", "%s: mouse_keyboard needs Windows for now: off", src);
         }
 #endif
+    } else if (k == "hdr") {
+        bool b;
+        if (parse_bool(v, &b)) g_settings.hdr = b;
+        else HLOG("cfg", "%s: hdr = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "hdr_peak" || k == "hdr_paper_white") {
+        long n;
+        const bool pic = k == "hdr_peak";
+        const long lo = pic ? 400 : 80, hi = pic ? 10000 : 500;
+        if (parse_int(v, &n) && n >= lo && n <= hi) (pic ? g_settings.hdr_peak : g_settings.hdr_paper_white) = (int)n;
+        else HLOG("cfg", "%s: %s = '%s' invalid (%ld to %ld nits): ignored", src, k.c_str(), v.c_str(), lo, hi);
     } else if (k == "mouse_speed") {   // hors limites : ramené dedans, comme le launcher
         long n;
         if (parse_int(v, &n)) {
@@ -442,6 +465,7 @@ void load_file(const std::string& path, bool create) {
             fputs(kCleRendu, w);
             fputs(kCleGpu, w);
             fputs(kCleSouris, w);
+            fputs(kCleHdr, w);
             fclose(w);
             HLOG("cfg", "%s created with default values", path.c_str());
         }
@@ -481,6 +505,7 @@ void load_file(const std::string& path, bool create) {
         if (!vues.count("fast_rendering")) ajout += kCleRendu;
         if (!vues.count("gpu")) ajout += kCleGpu;
         if (!vues.count("mouse_keyboard")) ajout += kCleSouris;
+        if (!vues.count("hdr")) ajout += kCleHdr;
         if (!ajout.empty()) {
             if (FILE* w = fopen(path.c_str(), "ab")) {
                 fputs(ajout.c_str(), w);
@@ -541,6 +566,7 @@ void settings_init(int argc, char** argv) {
     if (const char* e = getenv("RECOMP_FSR_SHARPNESS")) apply("fsr_sharpness", e, "RECOMP_FSR_SHARPNESS");
     if (const char* e = getenv("RECOMP_GPU")) apply("gpu", e, "RECOMP_GPU");
     if (const char* e = getenv("RECOMP_MOUSE_KEYBOARD")) apply("mouse_keyboard", e, "RECOMP_MOUSE_KEYBOARD");
+    if (const char* e = getenv("RECOMP_HDR")) apply("hdr", e, "RECOMP_HDR");
     if (const char* e = getenv("RECOMP_WINDOW")) apply("window_mode", e, "RECOMP_WINDOW");
     if (const char* e = getenv("RECOMP_LANGUAGE")) apply("language", e, "RECOMP_LANGUAGE");
     if (const char* e = getenv("RECOMP_VIBRATION")) apply("vibration", e, "RECOMP_VIBRATION");
@@ -584,6 +610,7 @@ void settings_init(int argc, char** argv) {
              s.fsr_version == 3 ? "FSR 3.1" : s.fsr_version == 4 ? "FSR 4" : "automatic", s.fsr_sharpness);
     }
     if (s.gpu != "auto") HLOG("cfg", "graphics card requested: '%s'", s.gpu.c_str());
+    if (s.hdr) HLOG("cfg", "HDR requested: peak %d nits, paper white %d nits", s.hdr_peak, s.hdr_paper_white);
     if (s.mouse_keyboard) {
         auto nom = [](int8_t b) { return b < 0 ? "none" : kNomsActions[b]; };
         HLOG("cfg", "mouse mode: Joy-Con 2 pair, mouse = right Joy-Con 2 mouse at %d %%; buttons left %s, right %s, "

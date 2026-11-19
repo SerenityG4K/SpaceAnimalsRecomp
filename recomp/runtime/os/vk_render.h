@@ -27,6 +27,9 @@ struct DrawCall {
 
 bool available();
 void ensure_init();
+// Sortie HDR10 (réglage hdr de recomp.ini, écran en HDR dans Windows) : swapchain 10 bits ST 2084 ; c'est ce qu'on dit au
+// jeu (hle_gfx.cpp, nn::vi::QueryDisplayHdrStatus), qui sort alors son image en PQ, copiée telle quelle à l'écran.
+bool hdr_output();
 // Carte graphique que le jeu prendra (même choix que l'initialisation de Vulkan : recomp.ini gpu, sinon la carte dédiée
 // qui a le plus de mémoire vidéo), connue avant celle-ci : son nom et l'identifiant de son fabricant (0x10DE : NVIDIA).
 // Faux si Vulkan ne répond pas. Crée une instance Vulkan temporaire : pour le DLSS (dlss.cpp), pas à chaque image.

@@ -436,6 +436,7 @@ python link.py                                   # après modification du runtim
 | `RECOMP_BACKGROUND_INPUT=1` | lit la manette XInput même quand la fenêtre n'a pas le focus (ancien comportement) |
 | `RECOMP_INPUT_LOG=1` | journal de chaque changement de bouton et de présence de la manette XInput |
 | `RECOMP_MOUSE_KEYBOARD=0\|1` | remplace `mouse_keyboard` de `recomp.ini` (mode souris du jeu, `hle_kbm.cpp`) |
+| `RECOMP_HDR=0\|1` | remplace `hdr` de `recomp.ini` (sortie HDR10 du jeu, `hle_gfx.cpp`, `vk_render.cpp`) |
 | `RECOMP_JCMS_CONTACT=0\|1` | mode souris : Joy-Con 2 droit levé ou posé, quel que soit le focus de la fenêtre (essais sans joueur) |
 | `RECOMP_CNTFRQ=hz` | fréquence du compteur invité (31 250 000 par défaut, celle de la Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | ancienne réutilisation, par adresse, d'une image packagée sans comparer son contenu (textures périmées) |
@@ -3819,3 +3820,25 @@ Demande de l'utilisateur : jouer au clavier et à la souris, avec le mode souris
   commandes 3110 et suivantes ; Pokopia passe par Nmouse, Star Fox lit Jcms lui-même. Les suffixes
   `__alias_…__XXXXXXXX` des scripts sont le FNV-1a du chemin du script (`/data/eclipse/input/player_input.vscript` →
   E6CAE361).
+
+## HDR : la sortie HDR10 du jeu (2026-11-19 ; pas publié)
+
+Demande de l'utilisateur : le HDR (issue n° 30). Référence : Triforce (OoT), mode « Native ».
+
+* **Le jeu a sa sortie HDR.** Il demande l'état de l'écran (`nn::vi::QueryDisplayHdrStatus` : actif, format, luminosité
+  maximale) et le blanc papier (`QueryDisplayHdrPaperWhite`). Le runtime répondait « pas de HDR » : le jeu notait
+  « HDR auto-calibration failed (SDR display?) ». Quand l'écran se dit HDR10 (vrai, format 1, maximum en nits), il se
+  calibre (« HDR auto-calibration: paperwhite 203, min (black) nits 0, max (white) nits 1000 »), donne ses
+  métadonnées (`SetLayerNextHdrStandardContentLuminanceRangeMetadata` 0 à 203 nits,
+  `SetLayerNextHdrExtendedContentLuminanceRangeMetadata` 0 à 1000 nits) et rend son image finale en RGB10A2 codé en PQ
+  (ST 2084, BT.2020), dès la première image présentée.
+* **Runtime** : `hle_gfx.cpp` ne dit « HDR10 » au jeu que si le réglage `hdr` est mis et que l'écran propose le HDR10
+  (`vkr::hdr_output`) ; `vk_render.cpp` active `VK_EXT_swapchain_colorspace` et crée alors la swapchain en
+  `A2B10G10R10` / `A2R10G10B10` + `VK_COLOR_SPACE_HDR10_ST2084_EXT` ; la copie de présentation passe l'image du jeu
+  telle quelle (PQ dans PQ). Sans HDR10 à l'écran (HDR désactivé dans Windows), le jeu reste en SDR, comme avant.
+  Journal : « HDR: the display offers HDR10 », « presented image: …, format 64 (NVN 61) ».
+* **Réglages** : `hdr` (faux par défaut), `hdr_peak` (400 à 10000 nits, 1000 par défaut), `hdr_paper_white` (80 à 500,
+  203 par défaut) ; `RECOMP_HDR=0|1` remplace `hdr`. Launcher : page Graphismes, onglets IMAGE · HDR.
+* **Pas fait** : pas de métadonnées HDR envoyées à l'écran (`VK_EXT_hdr_metadata` : Windows les ignore en général),
+  pas de RenoDX (il faudrait un jeu de shaders propre à Star Fox), pas de conversion SDR → HDR (le jeu sort en PQ dès
+  la première image). L'instantané (`RECOMP_SNAPSHOT`) ne lit pas les images 10 bits.

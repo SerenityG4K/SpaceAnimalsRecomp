@@ -739,8 +739,47 @@ void page_reglages() {
 // Page Graphismes (2026-11-12, demande de l'utilisateur) : tout ce qui touche à l'image (recomp.ini du jeu). Le soir,
 // autre demande : choisir la carte graphique (une carte AMD par exemple ; le DLSS n'est alors plus proposé), et dire
 // que toutes les mises à l'échelle sont expérimentales (DLSS Qualité à Ultra perf., rendu 3D sous 100 %).
+// ---- page Graphismes : onglets IMAGE · HDR, à droite du titre (comme ceux de la page Contrôles)
+void onglets_graphismes() {
+    float x = PX0 + 200;
+    const float y = PY0 + 20;
+    static const int ids[2] = {Z_ONGLET_IMAGE, Z_ONGLET_HDR};
+    static const char* const noms[2] = {"ong_image", "ong_hdr"};
+    for (int k = 0; k < 2; k++) {
+        const bool ouvert = k == g.onglet_graphismes;
+        const float w = texte(T(noms[k]), F_PETIT, x, y, ouvert ? VERT : survol(ids[k]) ? BLANC : GRIS, 1.f, 2.f);
+        if (ouvert) ligne(x, y + 17, x + w - 2, y + 17, VERT, 1.f, 1.f);
+        zone(D2D1::RectF(x - 6, y - 5, x + w + 6, y + 21), ids[k]);
+        x += w + 26;
+    }
+}
+
+// ---- onglet HDR : la sortie HDR10 du jeu (runtime/os/hle_gfx.cpp et vk_render.cpp), quand l'écran est en HDR dans
+// Windows ; luminosité maximale de l'écran et blanc papier donnés au jeu, qui se calibre avec.
+void page_hdr() {
+    float y = PY0 + 60;
+    const float pas = 33;
+    wchar_t v[32];
+    libelle(y, "hdr_mode", "hdr_mode_aide");
+    selecteur(y, T(g.reglages.hdr ? "sou_oui" : "sou_non"), Z_HDR_G, Z_HDR_D);
+    y += pas + 6;
+    libelle(y, "hdr_pic", "hdr_pic_aide");
+    swprintf(v, 32, L"%d nits", g.reglages.hdr_pic);
+    selecteur(y, v, Z_HDR_PIC_G, Z_HDR_PIC_D, g.reglages.hdr);
+    y += pas + 6;
+    libelle(y, "hdr_blanc", "hdr_blanc_aide");
+    swprintf(v, 32, L"%d nits", g.reglages.hdr_blanc);
+    selecteur(y, v, Z_HDR_BLANC_G, Z_HDR_BLANC_D, g.reglages.hdr);
+    texte_lignes(T("hdr_note"), F_PETIT, PX0 + 24, PY1 - 88, PX1 - PX0 - 48, GRIS);
+}
+
 void page_graphismes() {
     panneau(T("gra_titre"));
+    onglets_graphismes();
+    if (g.onglet_graphismes == 1) {
+        page_hdr();
+        return;
+    }
     float y = PY0 + 58;
     const float pas = 33;   // neuf réglages depuis le FSR (2026-11-12)
     wchar_t v[64];

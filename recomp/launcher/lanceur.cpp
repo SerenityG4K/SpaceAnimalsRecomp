@@ -638,6 +638,9 @@ void reglages_lire() {
         else if (k == "language") g.reglages.langue = v.empty() ? "auto" : v;
         else if (k == "vibration") g.reglages.vibration = std::clamp(atoi(v.c_str()), 0, 100);
         else if (k == "mouse_keyboard") lire_bool(v, &g.reglages.souris);
+        else if (k == "hdr") lire_bool(v, &g.reglages.hdr);
+        else if (k == "hdr_peak") g.reglages.hdr_pic = std::clamp(atoi(v.c_str()), 400, 10000);
+        else if (k == "hdr_paper_white") g.reglages.hdr_blanc = std::clamp(atoi(v.c_str()), 80, 500);
         else if (k == "mouse_speed") {
             long n;
             if (lire_entier(v, &n)) g.reglages.souris_vitesse = (int)std::clamp<long>(n, 10, 1000);
@@ -688,6 +691,9 @@ void reglages_ecrire() {
         {"language", g.reglages.langue},
         {"vibration", std::to_string(g.reglages.vibration)},
         {"mouse_keyboard", g.reglages.souris ? "true" : "false"},
+        {"hdr", g.reglages.hdr ? "true" : "false"},
+        {"hdr_peak", std::to_string(g.reglages.hdr_pic)},
+        {"hdr_paper_white", std::to_string(g.reglages.hdr_blanc)},
     };
     // réglages du mode souris (vitesse, entrées) : seulement s'il est mis, ou s'ils sont déjà dans le fichier (le jeu a
     // les mêmes valeurs par défaut)
@@ -815,6 +821,28 @@ void reglages_ecrire() {
         if (!fait && k.rfind("mouse_", 0) == 0) {   // mode souris mis après coup : après les autres lignes mouse_…
             auto pos = std::find_if(v.rbegin(), v.rend(), [](const std::string& l) { return trim(l).rfind("mouse_", 0) == 0; });
             v.insert(pos != v.rend() ? pos.base() : v.end(), k + " = " + val);
+            continue;
+        }
+        if (!fait && k == "hdr") {   // apparu après la 1.1.0 : expliqué (comme le jeu, settings.cpp kCleHdr), avant la
+            // section des touches s'il y en a une ; hdr_peak et hdr_paper_white y prennent leur place
+            const std::vector<std::string> bloc = {
+                "",
+                "; HDR : true ou false. Le jeu a sa propre sortie HDR10 ; il s'en sert quand l'écran est en HDR (activé dans",
+                "; les paramètres d'affichage de Windows), sinon il reste en SDR. hdr_peak : luminosité maximale de l'écran, en",
+                "; nits (400 à 10000). hdr_paper_white : blanc papier (interface, scènes SDR), en nits (80 à 500).",
+                "; HDR: true or false. The game has its own HDR10 output; it uses it when the screen is in HDR (turned on in",
+                "; Windows' display settings), otherwise it stays in SDR. hdr_peak: the screen's peak brightness, in nits (400",
+                "; to 10000). hdr_paper_white: paper white (interface, SDR scenes), in nits (80 to 500).",
+                k + " = " + val,
+                "hdr_peak = " + std::to_string(g.reglages.hdr_pic),
+                "hdr_paper_white = " + std::to_string(g.reglages.hdr_blanc)};
+            auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
+            if (pos != v.end()) {   // avant la ligne vide qui précède la section
+                while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
+                v.insert(pos, bloc.begin(), bloc.end());
+            } else {
+                v.insert(v.end(), bloc.begin(), bloc.end());
+            }
             continue;
         }
         if (!fait) v.push_back(k + " = " + val);
@@ -1616,6 +1644,20 @@ void action(int z) {
     case Z_ONGLET_CLAVIER: g.onglet_controles = 0; return;
     case Z_ONGLET_MANETTE: g.onglet_controles = 1; return;
     case Z_ONGLET_SOURIS: g.onglet_controles = 2; return;
+    case Z_ONGLET_IMAGE: g.onglet_graphismes = 0; return;
+    case Z_ONGLET_HDR: g.onglet_graphismes = 1; return;
+    case Z_HDR_G:
+    case Z_HDR_D: g.reglages.hdr = !g.reglages.hdr; reglages_ecrire(); return;
+    case Z_HDR_PIC_G:
+    case Z_HDR_PIC_D:
+        cycler(g.reglages.hdr_pic, {400, 600, 800, 1000, 1200, 1500, 2000, 4000, 10000}, z == Z_HDR_PIC_D ? 1 : -1);
+        reglages_ecrire();
+        return;
+    case Z_HDR_BLANC_G:
+    case Z_HDR_BLANC_D:
+        cycler(g.reglages.hdr_blanc, {80, 100, 150, 203, 250, 300, 400, 500}, z == Z_HDR_BLANC_D ? 1 : -1);
+        reglages_ecrire();
+        return;
     case Z_SOURIS_G:
     case Z_SOURIS_D: g.reglages.souris = !g.reglages.souris; reglages_ecrire(); return;
     case Z_SOURIS_VIT_G:
@@ -2033,6 +2075,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         else if (!wcscmp(p, L"souris")) g.page = Page::Controles, g.onglet_controles = 2;
         else if (!wcscmp(p, L"construction")) g.page = Page::Construction;
         else if (!wcscmp(p, L"graphismes")) g.page = Page::Graphismes;
+        else if (!wcscmp(p, L"hdr")) g.page = Page::Graphismes, g.onglet_graphismes = 1;
     }
 
     WNDCLASSEXW wc{};
