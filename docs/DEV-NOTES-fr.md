@@ -435,6 +435,8 @@ python link.py                                   # après modification du runtim
 | `RECOMP_KEY_SCRIPT="38:A,43:-A"` | appuis scriptés : bouton (A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LSTICK RSTICK) appuyé, ou relâché avec `-`, à l'instant donné en secondes. Tenir A 5 s passe une cinématique ; « 38:A,43:-A,52:A,57:-A » mène en général à l'entraînement en 70 s (selon les temps de chargement) |
 | `RECOMP_BACKGROUND_INPUT=1` | lit la manette XInput même quand la fenêtre n'a pas le focus (ancien comportement) |
 | `RECOMP_INPUT_LOG=1` | journal de chaque changement de bouton et de présence de la manette XInput |
+| `RECOMP_MOUSE_KEYBOARD=0\|1` | remplace `mouse_keyboard` de `recomp.ini` (mode souris du jeu, `hle_kbm.cpp`) |
+| `RECOMP_JCMS_CONTACT=0\|1` | mode souris : Joy-Con 2 droit levé ou posé, quel que soit le focus de la fenêtre (essais sans joueur) |
 | `RECOMP_CNTFRQ=hz` | fréquence du compteur invité (31 250 000 par défaut, celle de la Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | ancienne réutilisation, par adresse, d'une image packagée sans comparer son contenu (textures périmées) |
 | `SHADERC_NO_CLIP=1` | (`shaderc.py`) traduit sans `gl_ClipDistance` |
@@ -3742,3 +3744,47 @@ lent). `RECOMP_NAN_SCAN=n` : compte les pixels NaN ou infinis des cibles flottan
 remplissait la mémoire de zéros en silence. `nvn_exec.cpp` : `CopyTextureToBuffer`, jamais exécutée, est notée si le
 jeu l'émet. `RECOMP_SHADER_WATCH=hash,hash` : les dessins qui emploient ces shaders (image, matériau, première cible),
 la première fois puis toutes les 600 images.
+
+## Mode souris : la souris du PC en Joy-Con 2 posé comme une souris (2026-11-19 ; pas publié)
+
+Demande de l'utilisateur : jouer au clavier et à la souris, avec le mode souris du jeu (Switch 2).
+
+* **Ce que le jeu lit.** La souris et le clavier USB (`nn::hid::GetMouseState(s)`, `GetKeyboardStates`) ne servent
+  qu'à l'interface, et seulement quand la variable `input.keyboard_mouse_input_on_nintendo_enabled` est vraie : la visée
+  à la souris passe par le capteur optique des Joy-Con 2 (« Jcms » : `nn::hid::InitializeJcms`, `GetJcmsHandle`,
+  `StartJcms`, `GetJcmsStates`, `StopJcms`, `FinalizeJcms`). Couche vwm (main+0xba67000…) : deux poignées par manette
+  (Joy-Con gauche, type 0 ; droit, type 1), jusqu'à 16 états lus par image, déplacements additionnés.
+  `JcmsState` (0x20 octets) : n° d'échantillon +8, dx +0x10, dy +0x14, attributs +0x18 (bit 0 capteur présent, bit 1
+  posé). Une manette « a une souris » si le bit 0 de l'état le plus récent est mis (événement 0x18 de vwm, lu par
+  `input.get_gamepad_supports_mouse` : l'option « Mode souris » des options de jeu n'apparaît qu'alors).
+* **Type de manette.** Style de Npad bit 12 = « joycon-dual-ms » (paire de Joy-Con 2), 13 et 14 = un Joy-Con 2 seul ;
+  la manette Pro (« fullkey ») ne joue pas à la souris. Mais le jeu n'accepte le bit 12 qu'au démarrage
+  (`SetSupportedNpadStyleSet` 0x741f) : la campagne solo demande 0x407 (portable, paire de Joy-Con, Pro, bit 10) et
+  refuse sans rien dire une manette d'un autre style (« Einzelspieler » sans effet). `svc_hid.cpp` présente donc la
+  paire comme la console : bit 12 s'il est accepté, sinon paire ordinaire (bit 2) ; LIFO JoyDual (+0x6c8 dans le SDK
+  21) et attributs « Joy-Con gauche et droit connectés » (bits 2 et 4), que le jeu exige.
+* **Ce qui allume le mode souris** (`player_input.vscript`, décompilé avec Ghidra 12.2 ; main+0x881ccfa0 dans l'image
+  de référence) : un Joy-Con posé (contact Jcms), la souris qui bouge (plus de 0,01), et son capteur de mouvement qui
+  le dit couché sur la tranche : accélération x > seuil (gauche) ou < −seuil (droit) ; il en ressort quand x revient
+  au-dessus de −0,5 (droit). `eclipse_action_map_manager.vscript` prend alors les tables d'actions de la souris (3 ou
+  4 : droitier, gaucher) : `player_input` rend le type d'entrée 2.
+* **Le vrai blocage : `GetSupportedNpadStyleSet` (hid, commande 101) rendait 0.** À la création de sa fenêtre, le jeu
+  demande les capteurs de mouvement (`GetSixAxisSensorHandles`, `StartSixAxisSensor`) seulement pour les styles qu'il
+  relit par cette commande (main+0xba68b5c) : avec 0, aucun capteur, une accélération nulle, et jamais de mode souris.
+  `svc_hid.cpp` rend maintenant les styles acceptés (avec le réglage).
+* **`hle_kbm.cpp`** remplace les fonctions Jcms du SDK : le Joy-Con droit du joueur 1 reçoit les déplacements bruts de
+  la souris (Raw Input, sans l'accélération de Windows, multipliés par `mouse_speed`), un état au plus toutes les 4 ms ;
+  il est posé tant que la fenêtre a le focus. Et `nn::hid::GetSixAxisSensorState` : au repos, le Joy-Con droit couché
+  sur la tranche (accélération x = −1 G) tant qu'il est posé, sinon à plat. Le curseur de Windows est caché et retenu
+  dans la fenêtre (Alt+Tab le rend). Les boutons de la souris appuient sur des boutons de la Switch (`input.cpp` ; par
+  défaut R et ZR, les deux boutons sous les doigts d'un Joy-Con 2 tenu en souris) ; le clavier pilote la manette comme
+  avant.
+* **Réglages** : `mouse_keyboard` (faux par défaut : manette Pro, rien ne change), `mouse_speed` (10 à 1000 %),
+  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward` (`a` … `right`, `none`). Launcher : page
+  Contrôles, onglet SOURIS.
+* **Pistes écartées** : la souris USB du jeu (variable ci-dessus) ne vise pas ; le style « joycon-dual-ms » imposé
+  ne suffit pas sans capteur de mouvement. Le léger lissage de la visée vient du jeu (réticule), pas de la souris.
+* **Références** : Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) pour Nmouse, Jcms et les
+  commandes 3110 et suivantes ; Pokopia passe par Nmouse, Star Fox lit Jcms lui-même. Les suffixes
+  `__alias_…__XXXXXXXX` des scripts sont le FNV-1a du chemin du script (`/data/eclipse/input/player_input.vscript` →
+  E6CAE361).

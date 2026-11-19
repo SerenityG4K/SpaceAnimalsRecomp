@@ -128,6 +128,29 @@ const char* const kCleRendu = R"(
 fast_rendering = true
 )";
 
+// Apparu après la 1.1.0 (mode souris du jeu, hle_kbm.cpp)
+const char* const kCleSouris = R"(
+; Souris et clavier : true ou false. La manette émulée devient une paire de Joy-Con 2 et la souris du PC le Joy-Con 2
+; droit posé comme une souris : le jeu passe dans son mode souris (sensibilité réglable dans ses options). Le curseur
+; de Windows est retenu dans la fenêtre tant qu'elle est active (Alt+Tab le rend). Le clavier pilote la manette comme
+; d'habitude (touches key_...). mouse_speed : vitesse de la souris, en % (10 à 1000). mouse_left, mouse_right,
+; mouse_middle, mouse_back, mouse_forward : bouton de la Switch de chaque bouton de la souris (a, b, x, y, l, r, zl,
+; zr, plus, minus, lstick, rstick, up, down, left, right, ou none).
+; Mouse and keyboard: true or false. The emulated controller becomes a pair of Joy-Con 2 and the PC mouse the right
+; Joy-Con 2 laid down as a mouse: the game enters its mouse mode (sensitivity set in its options). The Windows cursor is
+; held in the window while it is active (Alt+Tab releases it). The keyboard drives the controller as usual (key_...
+; keys). mouse_speed: mouse speed, in % (10 to 1000). mouse_left, mouse_right, mouse_middle, mouse_back,
+; mouse_forward: Switch button of each mouse button (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down,
+; left, right, or none).
+mouse_keyboard = false
+mouse_speed = 100
+mouse_left = r
+mouse_right = zr
+mouse_middle = rstick
+mouse_back = none
+mouse_forward = none
+)";
+
 // Apparu après la 1.0.3 (FSR d'AMD, 2026-11-12)
 const char* const kCleFsr = R"(
 ; FSR d'AMD à la place de l'anticrénelage du jeu, sur toute carte graphique (AMD, NVIDIA, Intel) : off, native (rendu
@@ -317,6 +340,24 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         bool b;
         if (parse_bool(v, &b)) g_settings.fast_rendering = b;
         else HLOG("cfg", "%s: fast_rendering = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "mouse_keyboard") {
+        bool b;
+        if (parse_bool(v, &b)) g_settings.mouse_keyboard = b;
+        else HLOG("cfg", "%s: mouse_keyboard = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "mouse_speed") {
+        long n;
+        if (parse_int(v, &n) && n >= 10 && n <= 1000) g_settings.mouse_speed = (int)n;
+        else HLOG("cfg", "%s: mouse_speed = '%s' invalid (10 to 1000): ignored", src, v.c_str());
+    } else if (k.rfind("mouse_", 0) == 0) {   // bouton de la Switch d'un bouton de la souris
+        static const char* const souris[Settings::M_NB] = {"left", "right", "middle", "back", "forward"};
+        int i = 0, b = 0;
+        while (i < Settings::M_NB && k.compare(6, std::string::npos, souris[i]) != 0) i++;
+        const std::string m = lower(v);
+        while (b < Settings::PAD_NB && m != kNomsActions[b]) b++;
+        if (i >= Settings::M_NB) HLOG("cfg", "%s: unknown key '%s' ignored", src, k.c_str());
+        else if (b < Settings::PAD_NB || m == "none") g_settings.mouse_buttons[i] = (int8_t)(b < Settings::PAD_NB ? b : -1);
+        else HLOG("cfg", "%s: %s = '%s' invalid (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down, "
+                         "left, right, none): ignored", src, k.c_str(), v.c_str());
     } else if (k == "cold_page_release") {
         bool b;
         if (parse_bool(v, &b)) g_settings.cold_page_release = b;
@@ -365,6 +406,7 @@ void load_file(const std::string& path, bool create) {
             fputs(kCleFsr, w);
             fputs(kCleRendu, w);
             fputs(kCleGpu, w);
+            fputs(kCleSouris, w);
             fclose(w);
             HLOG("cfg", "%s created with default values", path.c_str());
         }
@@ -403,6 +445,7 @@ void load_file(const std::string& path, bool create) {
         if (!vues.count("fsr")) ajout += kCleFsr;
         if (!vues.count("fast_rendering")) ajout += kCleRendu;
         if (!vues.count("gpu")) ajout += kCleGpu;
+        if (!vues.count("mouse_keyboard")) ajout += kCleSouris;
         if (!ajout.empty()) {
             if (FILE* w = fopen(path.c_str(), "ab")) {
                 fputs(ajout.c_str(), w);
@@ -461,7 +504,8 @@ void settings_init(int argc, char** argv) {
     if (const char* e = getenv("RECOMP_FSR")) apply("fsr", e, "RECOMP_FSR");
     if (const char* e = getenv("RECOMP_FSR_VERSION")) apply("fsr_version", e, "RECOMP_FSR_VERSION");
     if (const char* e = getenv("RECOMP_FSR_SHARPNESS")) apply("fsr_sharpness", e, "RECOMP_FSR_SHARPNESS");
-    if (const char* e = getenv("RECOMP_GPU")) apply("gpu", e, "RECOMP_GPU");   // essais : la carte AMD intégrée…
+    if (const char* e = getenv("RECOMP_GPU")) apply("gpu", e, "RECOMP_GPU");
+    if (const char* e = getenv("RECOMP_MOUSE_KEYBOARD")) apply("mouse_keyboard", e, "RECOMP_MOUSE_KEYBOARD");
     if (const char* e = getenv("RECOMP_WINDOW")) apply("window_mode", e, "RECOMP_WINDOW");
     if (const char* e = getenv("RECOMP_LANGUAGE")) apply("language", e, "RECOMP_LANGUAGE");
     if (const char* e = getenv("RECOMP_VIBRATION")) apply("vibration", e, "RECOMP_VIBRATION");
@@ -505,6 +549,12 @@ void settings_init(int argc, char** argv) {
              s.fsr_version == 3 ? "FSR 3.1" : s.fsr_version == 4 ? "FSR 4" : "automatic", s.fsr_sharpness);
     }
     if (s.gpu != "auto") HLOG("cfg", "graphics card requested: '%s'", s.gpu.c_str());
+    if (s.mouse_keyboard) {
+        auto nom = [](int8_t b) { return b < 0 ? "none" : kNomsActions[b]; };
+        HLOG("cfg", "mouse mode: Joy-Con 2 pair, mouse = right Joy-Con 2 mouse at %d %%; buttons left %s, right %s, "
+             "middle %s, back %s, forward %s", s.mouse_speed, nom(s.mouse_buttons[0]), nom(s.mouse_buttons[1]),
+             nom(s.mouse_buttons[2]), nom(s.mouse_buttons[3]), nom(s.mouse_buttons[4]));
+    }
     {   // touches du clavier changées par le joueur (page Contrôles du launcher)
         const Settings defaut;
         int n = 0;

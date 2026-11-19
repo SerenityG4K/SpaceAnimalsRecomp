@@ -454,6 +454,13 @@ const char* const ENTREES_PAD[P_NB] = {
     "none", "south", "east", "west", "north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
     "rightshoulder", "dpad_up", "dpad_down", "dpad_left", "dpad_right", "misc1", "right_paddle1", "left_paddle1",
     "right_paddle2", "left_paddle2", "touchpad", "lefttrigger", "righttrigger"};
+// ---------------------------------------------------------------- souris (page Contrôles, onglet Souris)
+// Mode souris du jeu (mouse_keyboard, runtime/os/hle_kbm.cpp) : la souris du PC devient le Joy-Con 2 droit posé comme
+// une souris. Chaque bouton de la souris appuie sur un bouton de la Switch (« mouse_left = r »… ; valeur : nom de
+// l'action, TOUCHES_CLES sans « key_ », ou none), comme Settings::mouse_buttons du jeu (runtime/os/settings.cpp).
+const char* const SOURIS_CLES[NB_BOUTONS_SOURIS] = {"mouse_left", "mouse_right", "mouse_middle", "mouse_back",
+                                                     "mouse_forward"};
+std::string souris_bouton_nom(int b) { return b >= 0 && b < NB_PAD ? std::string(TOUCHES_CLES[b] + 4) : "none"; }
 
 // Deux préréglages, définis par la lettre gravée sur la touche et résolus sur le clavier réglé dans Windows :
 //   WASD (QWERTY) : stick gauche W A S D, Y sur Z, L sur Q, + sur M ;
@@ -578,6 +585,16 @@ void reglages_lire() {
         else if (k == "window_mode") g.reglages.sans_bordure = !(v == "windowed" || v == "window" || v == "fenetre");
         else if (k == "language") g.reglages.langue = v.empty() ? "auto" : v;
         else if (k == "vibration") g.reglages.vibration = std::clamp(atoi(v.c_str()), 0, 100);
+        else if (k == "mouse_keyboard") g.reglages.souris = v == "true" || v == "1" || v == "yes" || v == "on";
+        else if (k == "mouse_speed") g.reglages.souris_vitesse = std::clamp(atoi(v.c_str()), 10, 1000);
+        else if (k.rfind("mouse_", 0) == 0) {
+            for (int i = 0; i < NB_BOUTONS_SOURIS; i++)
+                if (k == SOURIS_CLES[i]) {
+                    g.reglages.souris_boutons[i] = -1;
+                    for (int b = 0; b < NB_PAD; b++)
+                        if (v == TOUCHES_CLES[b] + 4) g.reglages.souris_boutons[i] = b;
+                }
+        }
         else if (k.rfind("pad_", 0) == 0) {
             for (int i = 0; i < NB_PAD; i++)
                 if (k == PAD_CLES[i])
@@ -615,7 +632,10 @@ void reglages_ecrire() {
         {"window_mode", g.reglages.sans_bordure ? "borderless" : "windowed"},
         {"language", g.reglages.langue},
         {"vibration", std::to_string(g.reglages.vibration)},
+        {"mouse_keyboard", g.reglages.souris ? "true" : "false"},
+        {"mouse_speed", std::to_string(g.reglages.souris_vitesse)},
     };
+    for (int i = 0; i < NB_BOUTONS_SOURIS; i++) cles.push_back({SOURIS_CLES[i], souris_bouton_nom(g.reglages.souris_boutons[i])});
     if (g.reglages.touches_ecrites)   // touches du clavier : seulement une fois que le joueur en a changé une
         for (int i = 0; i < NB_TOUCHES; i++) {
             char b[16];
@@ -691,6 +711,32 @@ void reglages_ecrire() {
                 "; Graphics card: auto (the dedicated card with the most video memory) or the card's name, chosen in the",
                 "; launcher's Graphics page. DLSS only works on an NVIDIA RTX card.",
                 k + " = " + val};
+            auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
+            if (pos != v.end()) {   // avant la ligne vide qui précède la section
+                while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
+                v.insert(pos, bloc.begin(), bloc.end());
+            } else {
+                v.insert(v.end(), bloc.begin(), bloc.end());
+            }
+            continue;
+        }
+        if (!fait && k == "mouse_keyboard") {   // apparu après la 1.1.0 : expliqué (comme le jeu, settings.cpp kCleSouris),
+            // avant la section des touches s'il y en a une ; les clés mouse_… qui suivent y prennent leur place
+            std::vector<std::string> bloc = {
+                "",
+                "; Souris et clavier : true ou false. La manette émulée devient une paire de Joy-Con 2 et la souris du PC le",
+                "; Joy-Con 2 droit posé comme une souris : le jeu passe dans son mode souris. mouse_speed : vitesse de la souris,",
+                "; en % (10 à 1000). mouse_left … mouse_forward : bouton de la Switch de chaque bouton de la souris (a, b, x, y,",
+                "; l, r, zl, zr, plus, minus, lstick, rstick, up, down, left, right, ou none). Page Contrôles du launcher, onglet",
+                "; Souris.",
+                "; Mouse and keyboard: true or false. The emulated controller becomes a pair of Joy-Con 2 and the PC mouse the",
+                "; right Joy-Con 2 laid down as a mouse: the game enters its mouse mode. mouse_speed: mouse speed, in % (10 to",
+                "; 1000). mouse_left … mouse_forward: Switch button of each mouse button (a, b, x, y, l, r, zl, zr, plus, minus,",
+                "; lstick, rstick, up, down, left, right, or none). Launcher's Controls page, Mouse tab.",
+                k + " = " + val,
+                "mouse_speed = " + std::to_string(g.reglages.souris_vitesse)};
+            for (int i = 0; i < NB_BOUTONS_SOURIS; i++)
+                bloc.push_back(std::string(SOURIS_CLES[i]) + " = " + souris_bouton_nom(g.reglages.souris_boutons[i]));
             auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
             if (pos != v.end()) {   // avant la ligne vide qui précède la section
                 while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
@@ -1464,6 +1510,13 @@ void rapport_de_bug() {
 void basculer(Page p) { g.page = g.page == p ? Page::Aucune : p; }
 
 void action(int z) {
+    if (z >= Z_SOURIS_B0 && z <= Z_SOURIS_B_FIN) {   // onglet Souris : ‹ › du bouton de la Switch d'un bouton de la souris
+        const int i = (z - Z_SOURIS_B0) / 2, sens = (z - Z_SOURIS_B0) % 2 ? 1 : -1;
+        int& b = g.reglages.souris_boutons[i];   // aucun (-1), puis A … croix → (K_RIGHT)
+        b = (b + 1 + sens + NB_PAD + 1) % (NB_PAD + 1) - 1;
+        reglages_ecrire();
+        return;
+    }
     if (z >= Z_TOUCHE0 && z <= Z_TOUCHE_FIN) {   // page Contrôles : cette case attend la prochaine touche pressée
         g.capture = z - Z_TOUCHE0;
         return;
@@ -1489,8 +1542,16 @@ void action(int z) {
         return;
     }
     switch (z) {
-    case Z_ONGLET_CLAVIER: g.onglet_manette = false; return;
-    case Z_ONGLET_MANETTE: g.onglet_manette = true; return;
+    case Z_ONGLET_CLAVIER: g.onglet_controles = 0; return;
+    case Z_ONGLET_MANETTE: g.onglet_controles = 1; return;
+    case Z_ONGLET_SOURIS: g.onglet_controles = 2; return;
+    case Z_SOURIS_G:
+    case Z_SOURIS_D: g.reglages.souris = !g.reglages.souris; reglages_ecrire(); return;
+    case Z_SOURIS_VIT_G:
+    case Z_SOURIS_VIT_D:
+        cycler(g.reglages.souris_vitesse, {25, 50, 75, 100, 125, 150, 200, 300}, z == Z_SOURIS_VIT_D ? 1 : -1);
+        reglages_ecrire();
+        return;
     case Z_PAD_DEFAUT: pad_par_defaut(); return;
     case Z_PRESET_G:
     case Z_PRESET_D: {   // deux préréglages : l'un puis l'autre ; depuis des touches personnalisées, ‹ WASD, › ZQSD
@@ -1873,7 +1934,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (const wchar_t* p = _wgetenv(L"LANCEUR_PAGE")) {   // vérification : ouvrir une page au démarrage
         if (!wcscmp(p, L"reglages")) g.page = Page::Reglages;
         else if (!wcscmp(p, L"controles")) g.page = Page::Controles;
-        else if (!wcscmp(p, L"manette")) g.page = Page::Controles, g.onglet_manette = true;
+        else if (!wcscmp(p, L"manette")) g.page = Page::Controles, g.onglet_controles = 1;
+        else if (!wcscmp(p, L"souris")) g.page = Page::Controles, g.onglet_controles = 2;
         else if (!wcscmp(p, L"construction")) g.page = Page::Construction;
         else if (!wcscmp(p, L"graphismes")) g.page = Page::Graphismes;
     }
@@ -1968,7 +2030,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (g.sx >= 0) g.zone_survol = zone_sous(g.sx, g.sy);
         // onglet Manette ouvert, sans partie ni construction en cours : manettes lues (dessin, attente d'un appui) ;
         // sinon SDL est arrêté et les manettes sont rendues (au jeu)
-        if (g.page == Page::Controles && g.onglet_manette && !g.jeu_lance && !g.cons.active) {
+        if (g.page == Page::Controles && g.onglet_controles == 1 && !g.jeu_lance && !g.cons.active) {
             manettes_lire();
             pad_suivre_capture();
         } else {

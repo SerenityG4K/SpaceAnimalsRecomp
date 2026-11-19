@@ -85,6 +85,15 @@ struct Settings {
     // textures sautés, caches d'enregistrement et d'appels indirects, attente active entre fils du jeu) : false les
     // coupe toutes d'un coup (comme la 1.0.3), à essayer si un défaut d'image ou un plantage apparaît.
     bool fast_rendering = true;
+    // Mode souris du jeu (hle_kbm.cpp) : la manette émulée devient une paire de Joy-Con 2 (svc_hid.cpp) et la souris
+    // du PC devient le capteur souris du Joy-Con 2 droit, que le jeu suit dans son mode souris. Le clavier pilote
+    // toujours la manette (keys) ; les boutons de la souris appuient sur des boutons de la manette (mouse_buttons).
+    bool mouse_keyboard = false;
+    int mouse_speed = 100;   // déplacements de la souris envoyés au jeu, en % (10 à 1000)
+    // bouton de la Switch (indice K_A … K_RIGHT, -1 : aucun) de chaque bouton de la souris : gauche, droit, milieu,
+    // arrière (X1), avant (X2). Par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris.
+    enum { M_GAUCHE, M_DROIT, M_MILIEU, M_ARRIERE, M_AVANT, M_NB };
+    int8_t mouse_buttons[M_NB] = {K_R, K_ZR, K_RSTICK, -1, -1};
     std::string file;                // fichier de réglages utilisé
 };
 

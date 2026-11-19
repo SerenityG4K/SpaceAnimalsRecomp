@@ -852,14 +852,16 @@ std::wstring nom_touche(UINT sc) {
     return b;
 }
 
-// ---- page Contrôles : onglets CLAVIER · MANETTE, à droite du titre (soulignés comme FR · EN)
+// ---- page Contrôles : onglets CLAVIER · MANETTE · SOURIS, à droite du titre (soulignés comme FR · EN)
 void onglets_controles() {
     float x = PX0 + 200;
     const float y = PY0 + 20;
-    for (int k = 0; k < 2; k++) {
-        const int id = k ? Z_ONGLET_MANETTE : Z_ONGLET_CLAVIER;
-        const bool ouvert = (k == 1) == g.onglet_manette;
-        const float w = texte(T(k ? "ong_manette" : "ong_clavier"), F_PETIT, x, y, ouvert ? VERT : survol(id) ? BLANC : GRIS, 1.f, 2.f);
+    static const int ids[3] = {Z_ONGLET_CLAVIER, Z_ONGLET_MANETTE, Z_ONGLET_SOURIS};
+    static const char* const noms[3] = {"ong_clavier", "ong_manette", "ong_souris"};
+    for (int k = 0; k < 3; k++) {
+        const int id = ids[k];
+        const bool ouvert = k == g.onglet_controles;
+        const float w = texte(T(noms[k]), F_PETIT, x, y, ouvert ? VERT : survol(id) ? BLANC : GRIS, 1.f, 2.f);
         if (ouvert) ligne(x, y + 17, x + w - 2, y + 17, VERT, 1.f, 1.f);
         zone(D2D1::RectF(x - 6, y - 5, x + w + 6, y + 21), id);
         x += w + 26;
@@ -1353,11 +1355,43 @@ void case_touche(float x0, float x1, float y, int action, const wchar_t* prefixe
     zone(D2D1::RectF(x0, y, x1, y + 20), id);
 }
 
+// ---- onglet Souris : mode souris du jeu (runtime/os/hle_kbm.cpp). La souris du PC devient le Joy-Con 2 droit posé comme
+// une souris : le jeu vise alors à la souris de lui-même, comme sur la console ; ses boutons appuient sur des boutons de
+// la Switch (par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris).
+// bouton de la Switch d'un bouton de la souris : -1 = aucun
+std::wstring nom_bouton_souris(int b) { return b >= 0 && b < NB_PAD ? nom_bouton_switch(b) : std::wstring(T("sou_aucun")); }
+
+void page_souris() {
+    float y = PY0 + 60;
+    const float pas = 33;
+    libelle(y, "sou_mode", "sou_mode_aide");
+    selecteur(y, T(g.reglages.souris ? "sou_oui" : "sou_non"), Z_SOURIS_G, Z_SOURIS_D);
+    y += pas + 6;
+    wchar_t v[32];
+    libelle(y, "sou_vitesse", "sou_vitesse_aide");
+    swprintf(v, 32, L"%d %%", g.reglages.souris_vitesse);
+    selecteur(y, v, Z_SOURIS_VIT_G, Z_SOURIS_VIT_D, g.reglages.souris);
+    y += pas + 6;
+    static const char* const boutons[NB_BOUTONS_SOURIS] = {"sou_gauche", "sou_droit", "sou_milieu", "sou_arriere",
+                                                           "sou_avant"};
+    for (int i = 0; i < NB_BOUTONS_SOURIS; i++) {
+        libelle(y, boutons[i], nullptr);
+        selecteur(y, nom_bouton_souris(g.reglages.souris_boutons[i]).c_str(), Z_SOURIS_B0 + 2 * i, Z_SOURIS_B0 + 2 * i + 1,
+                  g.reglages.souris);
+        y += pas;
+    }
+    texte_lignes(T("sou_note"), F_PETIT, PX0 + 24, PY1 - 70, PX1 - PX0 - 48, GRIS);
+}
+
 void page_controles() {
     panneau(T("ctl_titre"));
     onglets_controles();
-    if (g.onglet_manette) {
+    if (g.onglet_controles == 1) {
         page_manette();
+        return;
+    }
+    if (g.onglet_controles == 2) {
+        page_souris();
         return;
     }
     float y = PY0 + 54;

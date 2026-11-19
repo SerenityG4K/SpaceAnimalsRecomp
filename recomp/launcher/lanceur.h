@@ -51,6 +51,10 @@ constexpr int NB_PAD = 16;
 enum EntreePad { P_AUCUNE, P_SUD, P_EST, P_OUEST, P_NORD, P_BACK, P_GUIDE, P_START, P_STICK_G, P_STICK_D, P_EPAULE_G,
                  P_EPAULE_D, P_HAUT, P_BAS, P_GAUCHE, P_DROITE, P_MISC1, P_PALETTE_D1, P_PALETTE_G1, P_PALETTE_D2,
                  P_PALETTE_G2, P_PAVE, P_GACHETTE_G, P_GACHETTE_D, P_NB };
+// Souris (page Contrôles, onglet Souris) : boutons de la souris (gauche, droit, milieu, arrière, avant), chacun donné à
+// un bouton de la Switch (ordre K_A … K_RIGHT, -1 : aucun). Clés mouse_left … de recomp.ini (SOURIS_CLES, lanceur.cpp),
+// mêmes que Settings::mouse_buttons du jeu (runtime/os/settings.h).
+constexpr int NB_BOUTONS_SOURIS = 5;
 
 enum Zone : int {
     Z_AUCUNE = 0, Z_PRINCIPAL, Z_MENU_REGLAGES, Z_MENU_CONTROLES, Z_MENU_CONSTRUCTION, Z_MENU_QUITTER, Z_COPIE,
@@ -70,6 +74,8 @@ enum Zone : int {
     Z_PADD0, Z_PADD_FIN = Z_PADD0 + NB_PAD - 1,               // › : entrée suivante
     Z_ENTREE0, Z_ENTREE_FIN = Z_ENTREE0 + P_NB - 1,           // entrée de la manette sur le dessin (clic)
     Z_TOUCHE0, Z_TOUCHE_FIN = Z_TOUCHE0 + NB_TOUCHES - 1,     // page Contrôles : une case par touche
+    Z_ONGLET_SOURIS, Z_SOURIS_G, Z_SOURIS_D, Z_SOURIS_VIT_G, Z_SOURIS_VIT_D,   // onglet Souris : mode souris, vitesse
+    Z_SOURIS_B0, Z_SOURIS_B_FIN = Z_SOURIS_B0 + 2 * NB_BOUTONS_SOURIS - 1,  // ‹ › du bouton de chaque bouton de la souris
 };
 
 // tâche en cours, lancée par le launcher (même protocole de lignes « @… »)
@@ -110,6 +116,11 @@ struct ReglagesJeu {   // recomp.ini du jeu
     uint8_t manette[NB_PAD] = {P_EST, P_SUD, P_NORD, P_OUEST, P_EPAULE_G, P_EPAULE_D, P_GACHETTE_G, P_GACHETTE_D,
                                P_START, P_BACK, P_STICK_G, P_STICK_D, P_HAUT, P_BAS, P_GAUCHE, P_DROITE};
     bool manette_ecrite = false;    // recomp.ini contient des clés pad_… (ou le joueur vient de changer un bouton)
+    // mode souris du jeu (mouse_keyboard) : la souris du PC devient le Joy-Con 2 droit posé comme une souris ; vitesse de
+    // la souris en % (mouse_speed) ; bouton de la Switch de chaque bouton de la souris (mouse_left …)
+    bool souris = false;
+    int souris_vitesse = 100;
+    int souris_boutons[NB_BOUTONS_SOURIS] = {K_R, K_ZR, K_RSTICK, -1, -1};
 };
 
 // Manettes vues par le launcher (manette.cpp, SDL3 : onglet Manette de la page Contrôles)
@@ -152,7 +163,7 @@ struct App {
     Langue langue = Langue::Fr;
     Page page = Page::Aucune;
     int capture = -1;   // page Contrôles : action dont on attend la nouvelle touche ; -1 : aucune
-    bool onglet_manette = false;   // page Contrôles : onglet Manette (sinon Clavier)
+    int onglet_controles = 0;      // page Contrôles : onglet 0 Clavier, 1 Manette, 2 Souris
     int capture_pad = -1;          // onglet Manette : bouton de la Switch qui attend un appui sur la manette ; -1 : aucun
     uint32_t pad_tenues = 0;       // entrées déjà appuyées quand l'attente a commencé (ne comptent qu'une fois relâchées)
     // chemins

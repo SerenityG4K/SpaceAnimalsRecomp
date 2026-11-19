@@ -173,6 +173,25 @@ const Texte TEXTES[] = {
     // onglet Manette (2026-11-12) : manettes Xbox, PlayStation, Switch Pro et Joy-Con (SDL3)
     {"ong_clavier", L"CLAVIER", L"KEYBOARD"},
     {"ong_manette", L"MANETTE", L"CONTROLLER"},
+    // onglet Souris : mode souris du jeu (Joy-Con 2 droit tenu comme une souris)
+    {"ong_souris", L"SOURIS", L"MOUSE"},
+    {"sou_mode", L"Mode souris", L"Mouse mode"},
+    {"sou_mode_aide", L"visée à la souris, comme un Joy-Con 2", L"mouse aiming, like a Joy-Con 2"},
+    {"sou_oui", L"Activé", L"On"},
+    {"sou_non", L"Désactivé", L"Off"},
+    {"sou_vitesse", L"Vitesse", L"Speed"},
+    {"sou_vitesse_aide", L"s'ajoute à la sensibilité du jeu", L"on top of the game's sensitivity"},
+    {"sou_gauche", L"Clic gauche", L"Left click"},
+    {"sou_droit", L"Clic droit", L"Right click"},
+    {"sou_milieu", L"Clic milieu", L"Middle click"},
+    {"sou_arriere", L"Bouton arrière", L"Back button"},
+    {"sou_avant", L"Bouton avant", L"Forward button"},
+    {"sou_aucun", L"Aucun", L"None"},
+    {"sou_note", L"La manette émulée devient une paire de Joy-Con 2 et la souris le Joy-Con 2 droit posé sur la table : "
+                 L"le jeu passe de lui-même en visée à la souris. Le clavier garde ses touches. Valable au prochain "
+                 L"lancement du jeu.",
+     L"The emulated controller becomes a pair of Joy-Con 2 and the mouse the right Joy-Con 2 lying on the desk: the game "
+     L"switches to mouse aiming by itself. The keyboard keeps its keys. Applies the next time the game starts."},
     {"pad_branchee", L"Manette : %ls", L"Controller: %ls"},
     {"pad_autres", L"  (+ %d autre(s))", L"  (+ %d more)"},
     {"pad_aucune", L"Aucune manette branchée : cliquez sur un bouton (dessin ou liste), puis sur celui du dessin qui doit "

@@ -430,6 +430,10 @@ HostPad host_poll_input() {
         p.ly = axis(key_sc(K[Settings::K_LS_DOWN]), key_sc(K[Settings::K_LS_UP]));
         p.rx = axis(key_sc(K[Settings::K_RS_LEFT]), key_sc(K[Settings::K_RS_RIGHT]));
         p.ry = axis(key_sc(K[Settings::K_RS_DOWN]), key_sc(K[Settings::K_RS_UP]));
+        // mode souris (hle_kbm.cpp) : chaque bouton de la souris appuie sur le bouton de la manette choisi
+        const uint32_t souris = kbm_mouse_buttons();
+        for (int i = 0; i < Settings::M_NB; i++)
+            if ((souris >> i & 1) && settings().mouse_buttons[i] >= 0) p.buttons |= kBoutons[settings().mouse_buttons[i]];
     }
     // Manette XInput lue seulement quand la fenêtre du jeu est active, comme le clavier : sinon une partie
     // jouée ailleurs avec la même manette pilotait aussi le jeu (le 2026-11-09, 17 appuis sur Start =

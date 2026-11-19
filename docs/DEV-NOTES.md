@@ -438,6 +438,8 @@ python link.py                                   # after modifying the runtime
 | `RECOMP_KEY_SCRIPT="38:A,43:-A"` | scripted presses: button (A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LSTICK RSTICK) pressed, or released with `-`, at the given time in seconds. Holding A for 5 s skips a cutscene; "38:A,43:-A,52:A,57:-A" usually leads to the training in 70 s (depending on loading times) |
 | `RECOMP_BACKGROUND_INPUT=1` | reads the XInput controller even when the window does not have focus (old behavior) |
 | `RECOMP_INPUT_LOG=1` | log of every button change and of every change in the presence of the XInput controller |
+| `RECOMP_MOUSE_KEYBOARD=0\|1` | overrides `mouse_keyboard` in `recomp.ini` (the game's mouse mode, `hle_kbm.cpp`) |
+| `RECOMP_JCMS_CONTACT=0\|1` | mouse mode: right Joy-Con 2 lifted or laid down, whatever the window focus (tests without a player) |
 | `RECOMP_CNTFRQ=hz` | frequency of the guest counter (31,250,000 by default, that of the Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | old reuse, by address, of a packaged image without comparing its contents (stale textures) |
 | `SHADERC_NO_CLIP=1` | (`shaderc.py`) translates without `gl_ClipDistance` |
@@ -3697,3 +3699,45 @@ array texture. `RECOMP_GPU_SYNC=1`: the game waits for the GPU thread at every s
 silently. `nvn_exec.cpp`: `CopyTextureToBuffer`, never executed, is logged if the game emits it.
 `RECOMP_SHADER_WATCH=hash,hash`: the draws that use those shaders (frame, material, first target), the first time and
 then every 600 frames.
+
+## Mouse mode: the PC mouse as a Joy-Con 2 laid down as a mouse (2026-11-19; not published)
+
+User request: play with keyboard and mouse, using the game's mouse mode (Switch 2).
+
+* **What the game reads.** The USB mouse and keyboard (`nn::hid::GetMouseState(s)`, `GetKeyboardStates`) only serve
+  the interface, and only when the variable `input.keyboard_mouse_input_on_nintendo_enabled` is true: mouse aiming goes
+  through the Joy-Con 2 optical sensor ("Jcms": `nn::hid::InitializeJcms`, `GetJcmsHandle`, `StartJcms`,
+  `GetJcmsStates`, `StopJcms`, `FinalizeJcms`). vwm layer (main+0xba67000…): two handles per controller (left Joy-Con,
+  type 0; right, type 1), up to 16 states read per frame, movements added up. `JcmsState` (0x20 bytes): sampling number
+  +8, dx +0x10, dy +0x14, attributes +0x18 (bit 0 sensor present, bit 1 laid down). A controller "has a mouse" when bit
+  0 of the newest state is set (vwm event 0x18, read by `input.get_gamepad_supports_mouse`: the "Mouse mode" game option
+  only appears then).
+* **Controller type.** Npad style bit 12 = "joycon-dual-ms" (Joy-Con 2 pair), 13 and 14 = a single Joy-Con 2; the Pro
+  controller ("fullkey") never plays with the mouse. But the game only accepts bit 12 at startup
+  (`SetSupportedNpadStyleSet` 0x741f): the single-player campaign asks for 0x407 (handheld, Joy-Con pair, Pro, bit 10)
+  and silently refuses a controller of another style ("Einzelspieler" does nothing). `svc_hid.cpp` therefore presents
+  the pair like the console does: bit 12 when accepted, otherwise a plain pair (bit 2); JoyDual LIFO (+0x6c8 in SDK 21)
+  and the "left and right Joy-Con connected" attributes (bits 2 and 4) the game requires.
+* **What turns mouse mode on** (`player_input.vscript`, decompiled with Ghidra 12.2; main+0x881ccfa0 in the reference
+  image): a Joy-Con laid down (Jcms contact), the mouse moving (more than 0.01), and its motion sensor saying it lies on
+  its side: acceleration x > threshold (left) or < −threshold (right); it leaves when x goes back above −0.5 (right).
+  `eclipse_action_map_manager.vscript` then picks the mouse action maps (3 or 4: right- or left-handed): `player_input`
+  returns input type 2.
+* **The real blocker: `GetSupportedNpadStyleSet` (hid, command 101) returned 0.** When it creates its window, the game
+  requests the motion sensors (`GetSixAxisSensorHandles`, `StartSixAxisSensor`) only for the styles it reads back with
+  this command (main+0xba68b5c): with 0, no sensor, a zero acceleration, and never any mouse mode. `svc_hid.cpp` now
+  returns the accepted styles (with the setting).
+* **`hle_kbm.cpp`** replaces the SDK's Jcms functions: player 1's right Joy-Con receives the raw mouse movements (Raw
+  Input, without Windows acceleration, multiplied by `mouse_speed`), at most one state every 4 ms; it is laid down while
+  the window has focus. And `nn::hid::GetSixAxisSensorState`: at rest, the right Joy-Con lying on its side (acceleration
+  x = −1 G) while laid down, flat otherwise. The Windows cursor is hidden and held in the window (Alt+Tab releases it).
+  The mouse buttons press Switch buttons (`input.cpp`; R and ZR by default, the two buttons under the fingers of a
+  Joy-Con 2 held as a mouse); the keyboard drives the controller as before.
+* **Settings**: `mouse_keyboard` (false by default: Pro controller, nothing changes), `mouse_speed` (10 to 1000%),
+  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward` (`a` … `right`, `none`). Launcher:
+  Controls page, MOUSE tab.
+* **Dead ends**: the game's USB mouse (variable above) does not aim; forcing the "joycon-dual-ms" style is not enough
+  without a motion sensor. The slight smoothing of the aim comes from the game (reticle), not from the mouse.
+* **References**: Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) for Nmouse, Jcms and
+  commands 3110 onward; Pokopia goes through Nmouse, Star Fox reads Jcms itself. The scripts' `__alias_…__XXXXXXXX`
+  suffixes are the FNV-1a of the script path (`/data/eclipse/input/player_input.vscript` → E6CAE361).

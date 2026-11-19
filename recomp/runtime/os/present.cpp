@@ -72,6 +72,8 @@ void set_borderless(HWND h, bool on) {
 }
 
 LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    intptr_t res = 0;
+    if (kbm_wndproc(h, msg, wp, lp, &res)) return res;   // souris du jeu (hle_kbm.cpp, réglage mouse_keyboard)
     switch (msg) {
     case WM_PAINT: {
         if (g_vulkan) {   // la swapchain Vulkan dessine la fenêtre
@@ -188,6 +190,7 @@ void window_thread() {
     } else {
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
         if (settings().borderless) set_borderless(g_hwnd, true);
+        kbm_window_created(g_hwnd);
     }
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

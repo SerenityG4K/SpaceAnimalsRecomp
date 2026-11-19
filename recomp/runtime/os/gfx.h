@@ -28,5 +28,11 @@ HostPad host_poll_input();
 // Vibration envoyée par le jeu (svc_hid.cpp, nn::hid::SendVibrationValue) pour un côté de la manette (0 gauche,
 // 1 droite) : amplitudes 0..1 et fréquences (Hz) des bandes basse et haute ; appliquée par input.cpp à 60 Hz.
 void host_set_vibration(int side, float amp_low, float freq_low, float amp_high, float freq_high);
+// Souris du jeu (hle_kbm.cpp, réglage mouse_keyboard) : Raw Input enregistré à la création de la fenêtre ; messages de la
+// fenêtre qui la concernent (vrai : traité, *res est la réponse) ; boutons de la souris appuyés pendant la capture
+// (bits Settings::M_GAUCHE…, 0 hors capture), que input.cpp change en boutons de la manette.
+void kbm_window_created(void* hwnd);
+bool kbm_wndproc(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp, intptr_t* res);
+uint32_t kbm_mouse_buttons();
 
 }  // namespace hos

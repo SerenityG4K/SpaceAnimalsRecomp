@@ -735,6 +735,7 @@ int main(int argc, char** argv) {
     hle_os_init();
     hle_audio_init();
     hle_hid_init();
+    hle_kbm_init();
     uint64_t f2 = register_native("rtld:marquer_initialisé", native_nop);
     uint64_t f3 = register_native("rtld:init_modules", native_init_modules);
     uint64_t f4 = register_native("rtld:fini_modules", native_fini_modules);
