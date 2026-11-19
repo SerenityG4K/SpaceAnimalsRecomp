@@ -154,6 +154,7 @@ SpaceAnimalsRecomp so far.
 | 🔧 | Graphics (NVN on Vulkan) | 90% | The whole game draws correctly on NVIDIA; AMD support improved in 1.0.3; Intel is untested |
 | 🔧 | Controls | 90% | Keyboard, mouse and controllers (Xbox, PlayStation, Switch Pro, Joy-Con), all remappable in the launcher |
 | 🔧 | HDR | 80% | Experimental: the game's own HDR10 output, when HDR is on in Windows (asked for in #30) |
+| 🔧 | Ultrawide (21:9, 32:9) | 70% | Experimental: the game renders natively in the screen's format, menus and HUD stay 16:9 in the middle (asked for in #2) |
 | 🔧 | Mouse controls | 80% | Experimental: the game's own mouse aiming, with the PC mouse acting as a Joy-Con 2 used as a mouse |
 | 🔧 | Tested in game | 90% | The whole game has been finished several times, and it is rather stable: report what breaks |
 | 🔧 | NVIDIA DLSS | 70% | Experimental since 1.1.0, RTX cards only: DLAA or upscaling, DLSS 4 or 4.5 model |
@@ -163,7 +164,6 @@ SpaceAnimalsRecomp so far.
 | 🗺️ | Online play | 0% | Planned: the game's online modes |
 | 🗺️ | amiibo | 0% | Planned: the game's amiibo features |
 | 🗺️ | Several controllers at once | 0% | Planned |
-| 🗺️ | Ultrawide (21:9, 32:9) | 0% | Possibly feasible, not started (asked for in #2) |
 | 🗺️ | 5.1 surround sound | 0% | Planned, as an experimental option: the game already mixes in 5.1 (asked for in #28) |
 | 🗺️ | Linux | 0% | Planned |
 

@@ -100,6 +100,10 @@ struct Settings {
     bool hdr = false;
     int hdr_peak = 1000;          // 400 à 10000
     int hdr_paper_white = 203;    // 80 à 500
+    // Format de l'image (aspect_ratio ; hle_gfx.cpp gfx_virtual_display) : largeur : hauteur de l'écran virtuel annoncé
+    // au jeu, qui rend alors nativement à ce format (champ de vision plus large). 16:9 (celui de la console, par
+    // défaut), 21:9, 32:9… ; 0:0 (auto) : celui de l'écran du PC. Plus étroit que 16:9 : 16:9.
+    int aspect_x = 16, aspect_y = 9;
     int mouse_speed = 100;   // déplacements de la souris envoyés au jeu, en % (10 à 1000)
     // action de la manette (indice K_A … K_RSR : bouton, direction d'un stick, SL ou SR ; -1 : aucune) de chaque entrée
     // de la souris : boutons gauche, droit, milieu, arrière (X1), avant (X2), molette vers le haut et vers le bas (un

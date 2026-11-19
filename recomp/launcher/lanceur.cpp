@@ -641,6 +641,7 @@ void reglages_lire() {
         else if (k == "hdr") lire_bool(v, &g.reglages.hdr);
         else if (k == "hdr_peak") g.reglages.hdr_pic = std::clamp(atoi(v.c_str()), 400, 10000);
         else if (k == "hdr_paper_white") g.reglages.hdr_blanc = std::clamp(atoi(v.c_str()), 80, 500);
+        else if (k == "aspect_ratio") g.reglages.format = v.empty() ? std::string("16:9") : minuscules(v);
         else if (k == "mouse_speed") {
             long n;
             if (lire_entier(v, &n)) g.reglages.souris_vitesse = (int)std::clamp<long>(n, 10, 1000);
@@ -694,6 +695,7 @@ void reglages_ecrire() {
         {"hdr", g.reglages.hdr ? "true" : "false"},
         {"hdr_peak", std::to_string(g.reglages.hdr_pic)},
         {"hdr_paper_white", std::to_string(g.reglages.hdr_blanc)},
+        {"aspect_ratio", g.reglages.format},
     };
     // réglages du mode souris (vitesse, entrées) : seulement s'il est mis, ou s'ils sont déjà dans le fichier (le jeu a
     // les mêmes valeurs par défaut)
@@ -836,6 +838,24 @@ void reglages_ecrire() {
                 k + " = " + val,
                 "hdr_peak = " + std::to_string(g.reglages.hdr_pic),
                 "hdr_paper_white = " + std::to_string(g.reglages.hdr_blanc)};
+            auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
+            if (pos != v.end()) {   // avant la ligne vide qui précède la section
+                while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
+                v.insert(pos, bloc.begin(), bloc.end());
+            } else {
+                v.insert(v.end(), bloc.begin(), bloc.end());
+            }
+            continue;
+        }
+        if (!fait && k == "aspect_ratio") {   // apparu après la 1.1.0 : expliqué (settings.cpp kCleFormat), avant la
+            // section des touches s'il y en a une
+            const std::vector<std::string> bloc = {
+                "",
+                "; Format de l'image : 16:9 (celui de la console), 21:9, 32:9, ou auto (celui de l'écran). Plus large que 16:9, le jeu",
+                "; rend nativement à ce format : il voit plus large, l'interface reste au centre. resolution donne la hauteur.",
+                "; Aspect ratio: 16:9 (the console's), 21:9, 32:9, or auto (the screen's). Wider than 16:9, the game renders natively",
+                "; in that format: it sees wider, the interface stays in the middle. resolution gives the height.",
+                k + " = " + val};
             auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
             if (pos != v.end()) {   // avant la ligne vide qui précède la section
                 while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
@@ -1646,6 +1666,12 @@ void action(int z) {
     case Z_ONGLET_SOURIS: g.onglet_controles = 2; return;
     case Z_ONGLET_IMAGE: g.onglet_graphismes = 0; return;
     case Z_ONGLET_HDR: g.onglet_graphismes = 1; return;
+    case Z_FORMAT_G:
+    case Z_FORMAT_D:
+        cycler(g.reglages.format, {std::string("16:9"), std::string("21:9"), std::string("32:9"), std::string("auto")},
+               z == Z_FORMAT_D ? 1 : -1);
+        reglages_ecrire();
+        return;
     case Z_HDR_G:
     case Z_HDR_D: g.reglages.hdr = !g.reglages.hdr; reglages_ecrire(); return;
     case Z_HDR_PIC_G:

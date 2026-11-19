@@ -18,6 +18,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -86,6 +87,33 @@ int display_mode() {
     return m;
 }
 
+// Format de l'image (réglage aspect_ratio, 2026-11-19). Le moteur prend la taille de l'écran (ListDisplays) comme
+// taille de sa swapchain, ramenée à la résolution maximale du mode (QueryDisplayBufferMaxResolution, table 16:9 :
+// 1280 × 720 … 3840 × 2160, composante par composante ; « requested_swapchain_dim_changed », vgame.out.c). Plus large
+// que 16:9 : l'écran virtuel a la hauteur du mode et la largeur du format (5120 × 1440 en 32:9), vi_max_resolution
+// ne répond plus (pas de réduction) et recomp_cvars (svc_fs.cpp) donne le format à la caméra (render.aspect_ratio_x
+// / _y). Le moteur recrée alors lui-même ses textures de fenêtre (3840 × 2160 au départ) à la taille de l'écran
+// virtuel, et son interface reste en 16:9 au centre.
+bool wide_display(int* w, int* h) {
+    static const std::pair<int, int> wh = [] {
+        const int mode = display_mode();
+        const int dh = (int)kDisplayH[mode];
+        double r = settings().aspect_y ? (double)settings().aspect_x / settings().aspect_y : 0;
+        if (r <= 0) {   // auto : format de l'écran du PC
+            int sw = 0, sh = 0;
+            gfx_screen_size(&sw, &sh);
+            r = sw > 0 && sh > 0 ? (double)sw / sh : 16.0 / 9;
+        }
+        int dw = (int)kDisplayW[mode];
+        if (r > 16.0 / 9 + 0.01) dw = (int)lround(dh * r / 2) * 2;   // largeur paire
+        if (dw != (int)kDisplayW[mode]) HLOG("gfx", "virtual display widened: %dx%d (aspect ratio %.3f)", dw, dh, (double)dw / dh);
+        return std::make_pair(dw, dh);
+    }();
+    if (w) *w = wh.first;
+    if (h) *h = wh.second;
+    return wh.first != (int)kDisplayW[display_mode()];
+}
+
 void vi_list_displays(CPUState* ctx) {   // DisplayInfo (0x60 o) : nom[0x40], bool limite, i64 nb calques, i64 l, i64 h
     if (A(0) && (int32_t)A(1) > 0) {
         uint8_t* d = P<uint8_t>(A(0));
@@ -93,8 +121,10 @@ void vi_list_displays(CPUState* ctx) {   // DisplayInfo (0x60 o) : nom[0x40], bo
         memcpy(d, "Default", 8);
         d[0x40] = 1;
         *(int64_t*)(d + 0x48) = 1;
-        *(int64_t*)(d + 0x50) = kDisplayW[display_mode()];   // lu par le moteur : taille de l'écran
-        *(int64_t*)(d + 0x58) = kDisplayH[display_mode()];
+        int w = 0, h = 0;
+        wide_display(&w, &h);
+        *(int64_t*)(d + 0x50) = w;   // lu par le moteur : taille de l'écran
+        *(int64_t*)(d + 0x58) = h;
     }
     R(ctx, 1);
 }
@@ -117,6 +147,7 @@ FrameRec g_hist[16];
 uint64_t g_hist_n = 0;
 }  // namespace
 uint64_t vi_vblank_period() { return vblank_period(); }
+bool gfx_virtual_display(int* w, int* h) { return wide_display(w, h); }
 void vi_frame_displayed(uint64_t frame, uint64_t queued_tick, uint64_t shown_tick) {
     std::lock_guard<std::mutex> lk(g_hist_lk);
     g_hist[g_hist_n++ % 16] = {frame, queued_tick, shown_tick};
@@ -186,6 +217,10 @@ void vi_refresh_rate(CPUState* ctx) {   // nn::vi::RefreshRate : u32 en Hz (le m
     R(ctx, 0);
 }
 void vi_max_resolution(CPUState* ctx) {   // nn::vi::BufferMaxResolution : énumération u32 (0..3)
+    if (wide_display(nullptr, nullptr)) {   // écran plus large que 16:9 : pas de résolution maximale 16:9 (échec,
+        R(ctx, 0xC72);                      // le moteur garde la taille de l'écran ; 0xC72 : vi, non pris en charge)
+        return;
+    }
     if (A(0)) *P<uint32_t>(A(0)) = (uint32_t)display_mode();
     R(ctx, 0);
 }
@@ -536,7 +571,9 @@ NVN(nvnWindowInitialize) {   // (window, builder)
     w.active = (int32_t)b.tex.size();
     if (!b.tex.empty()) {
         Tex& t = g_tex[b.tex[0]];
-        gfx_open_window(t.b.w > 1 ? t.b.w : 1280, t.b.h > 1 ? t.b.h : 720);
+        int vw = 0, vh = 0;
+        if (wide_display(&vw, &vh)) gfx_open_window(vw, vh);   // fenêtre hôte au format de l'écran virtuel
+        else gfx_open_window(t.b.w > 1 ? t.b.w : 1280, t.b.h > 1 ? t.b.h : 720);
         HLOG("nvn", "nvnWindowInitialize: %zu textures %dx%d (format %u)", b.tex.size(), t.b.w, t.b.h, t.b.format);
     }
     R(ctx, 1);

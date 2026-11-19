@@ -4,6 +4,7 @@
 //  * sauvegardes et carte SD : dossiers de l'hôte (à côté de l'exécutable).
 #include <atomic>
 #include "svc_util.h"
+#include "gfx.h"
 #include "settings.h"
 
 #define NOMINMAX
@@ -11,6 +12,7 @@
 #include <windows.h>
 
 #include <filesystem>
+#include <numeric>
 #include <fstream>
 
 namespace fs = std::filesystem;
@@ -48,6 +50,14 @@ std::vector<std::pair<std::string, std::string>> recomp_cvars() {
     v.push_back({"render.dynres_enabled", "false"});
     v.push_back({"render.dlss_allowed", "false"});   // pas le réseau DLSS de la console
     v.push_back({"render.ndsr_allowed", "false"});   // ni son agrandissement NDSR
+    // Format de l'image plus large que 16:9 (réglage aspect_ratio, gfx_virtual_display) : celui de la caméra et du rendu
+    // (16:9 par défaut, quelle que soit la taille de l'écran)
+    int vw = 0, vh = 0;
+    if (gfx_virtual_display(&vw, &vh)) {   // réduit (5120 × 1440 : 32:9)
+        const int d = std::gcd(vw, vh);
+        v.push_back({"render.aspect_ratio_x", std::to_string(vw / d)});
+        v.push_back({"render.aspect_ratio_y", std::to_string(vh / d)});
+    }
     return v;
 }
 

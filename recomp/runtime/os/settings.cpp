@@ -164,6 +164,15 @@ hdr_peak = 1000
 hdr_paper_white = 203
 )";
 
+// Apparu après la 1.1.0 (format de l'image, hle_gfx.cpp gfx_virtual_display)
+const char* const kCleFormat = R"(
+; Format de l'image : 16:9 (celui de la console), 21:9, 32:9, ou auto (celui de l'écran). Plus large que 16:9, le jeu
+; rend nativement à ce format : il voit plus large, l'interface reste au centre. resolution donne la hauteur.
+; Aspect ratio: 16:9 (the console's), 21:9, 32:9, or auto (the screen's). Wider than 16:9, the game renders natively
+; in that format: it sees wider, the interface stays in the middle. resolution gives the height.
+aspect_ratio = 16:9
+)";
+
 // Apparu après la 1.0.3 (FSR d'AMD, 2026-11-12)
 const char* const kCleFsr = R"(
 ; FSR d'AMD à la place de l'anticrénelage du jeu, sur toute carte graphique (AMD, NVIDIA, Intel) : off, native (rendu
@@ -392,6 +401,17 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         const long lo = pic ? 400 : 80, hi = pic ? 10000 : 500;
         if (parse_int(v, &n) && n >= lo && n <= hi) (pic ? g_settings.hdr_peak : g_settings.hdr_paper_white) = (int)n;
         else HLOG("cfg", "%s: %s = '%s' invalid (%ld to %ld nits): ignored", src, k.c_str(), v.c_str(), lo, hi);
+    } else if (k == "aspect_ratio") {
+        // 16:9, 21:9, 32:9, auto, ou tout « l:h » entre 4:3 et 4:1 (43:18 pour un écran 3440 × 1440 par exemple)
+        const std::string l = lower(v);
+        int x = 0, y = 0;
+        if (l == "auto" || l == "screen") {
+            g_settings.aspect_x = g_settings.aspect_y = 0;
+        } else if (sscanf(l.c_str(), "%d:%d", &x, &y) == 2 && x > 0 && y > 0 && x * 3 >= y * 4 && x <= y * 4) {
+            g_settings.aspect_x = x, g_settings.aspect_y = y;
+        } else {
+            HLOG("cfg", "%s: aspect_ratio = '%s' invalid (16:9, 21:9, 32:9 or auto): ignored", src, v.c_str());
+        }
     } else if (k == "mouse_speed") {   // hors limites : ramené dedans, comme le launcher
         long n;
         if (parse_int(v, &n)) {
@@ -466,6 +486,7 @@ void load_file(const std::string& path, bool create) {
             fputs(kCleGpu, w);
             fputs(kCleSouris, w);
             fputs(kCleHdr, w);
+            fputs(kCleFormat, w);
             fclose(w);
             HLOG("cfg", "%s created with default values", path.c_str());
         }
@@ -506,6 +527,7 @@ void load_file(const std::string& path, bool create) {
         if (!vues.count("gpu")) ajout += kCleGpu;
         if (!vues.count("mouse_keyboard")) ajout += kCleSouris;
         if (!vues.count("hdr")) ajout += kCleHdr;
+        if (!vues.count("aspect_ratio")) ajout += kCleFormat;
         if (!ajout.empty()) {
             if (FILE* w = fopen(path.c_str(), "ab")) {
                 fputs(ajout.c_str(), w);
@@ -567,6 +589,7 @@ void settings_init(int argc, char** argv) {
     if (const char* e = getenv("RECOMP_GPU")) apply("gpu", e, "RECOMP_GPU");
     if (const char* e = getenv("RECOMP_MOUSE_KEYBOARD")) apply("mouse_keyboard", e, "RECOMP_MOUSE_KEYBOARD");
     if (const char* e = getenv("RECOMP_HDR")) apply("hdr", e, "RECOMP_HDR");
+    if (const char* e = getenv("RECOMP_ASPECT")) apply("aspect_ratio", e, "RECOMP_ASPECT");
     if (const char* e = getenv("RECOMP_WINDOW")) apply("window_mode", e, "RECOMP_WINDOW");
     if (const char* e = getenv("RECOMP_LANGUAGE")) apply("language", e, "RECOMP_LANGUAGE");
     if (const char* e = getenv("RECOMP_VIBRATION")) apply("vibration", e, "RECOMP_VIBRATION");
@@ -611,6 +634,8 @@ void settings_init(int argc, char** argv) {
     }
     if (s.gpu != "auto") HLOG("cfg", "graphics card requested: '%s'", s.gpu.c_str());
     if (s.hdr) HLOG("cfg", "HDR requested: peak %d nits, paper white %d nits", s.hdr_peak, s.hdr_paper_white);
+    if (!s.aspect_x) HLOG("cfg", "aspect ratio: the screen's (auto)");
+    else if (s.aspect_x * 9 != s.aspect_y * 16) HLOG("cfg", "aspect ratio: %d:%d", s.aspect_x, s.aspect_y);
     if (s.mouse_keyboard) {
         auto nom = [](int8_t b) { return b < 0 ? "none" : kNomsActions[b]; };
         HLOG("cfg", "mouse mode: Joy-Con 2 pair, mouse = right Joy-Con 2 mouse at %d %%; buttons left %s, right %s, "

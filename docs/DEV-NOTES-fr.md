@@ -436,6 +436,7 @@ python link.py                                   # après modification du runtim
 | `RECOMP_BACKGROUND_INPUT=1` | lit la manette XInput même quand la fenêtre n'a pas le focus (ancien comportement) |
 | `RECOMP_INPUT_LOG=1` | journal de chaque changement de bouton et de présence de la manette XInput |
 | `RECOMP_MOUSE_KEYBOARD=0\|1` | remplace `mouse_keyboard` de `recomp.ini` (mode souris du jeu, `hle_kbm.cpp`) |
+| `RECOMP_ASPECT=16:9\|21:9\|32:9\|auto` | remplace `aspect_ratio` de `recomp.ini` (format de l'image, `hle_gfx.cpp`) |
 | `RECOMP_HDR=0\|1` | remplace `hdr` de `recomp.ini` (sortie HDR10 du jeu, `hle_gfx.cpp`, `vk_render.cpp`) |
 | `RECOMP_JCMS_CONTACT=0\|1` | mode souris : Joy-Con 2 droit levé ou posé, quel que soit le focus de la fenêtre (essais sans joueur) |
 | `RECOMP_CNTFRQ=hz` | fréquence du compteur invité (31 250 000 par défaut, celle de la Switch 2) |
@@ -3838,7 +3839,32 @@ Demande de l'utilisateur : le HDR (issue n° 30). Référence : Triforce (OoT), 
   telle quelle (PQ dans PQ). Sans HDR10 à l'écran (HDR désactivé dans Windows), le jeu reste en SDR, comme avant.
   Journal : « HDR: the display offers HDR10 », « presented image: …, format 64 (NVN 61) ».
 * **Réglages** : `hdr` (faux par défaut), `hdr_peak` (400 à 10000 nits, 1000 par défaut), `hdr_paper_white` (80 à 500,
-  203 par défaut) ; `RECOMP_HDR=0|1` remplace `hdr`. Launcher : page Graphismes, onglets IMAGE · HDR.
+  203 par défaut) ; `RECOMP_HDR=0|1` remplace `hdr`. Launcher : page Graphismes, onglets IMAGE · ÉCRAN.
 * **Pas fait** : pas de métadonnées HDR envoyées à l'écran (`VK_EXT_hdr_metadata` : Windows les ignore en général),
   pas de RenoDX (il faudrait un jeu de shaders propre à Star Fox), pas de conversion SDR → HDR (le jeu sort en PQ dès
   la première image). L'instantané (`RECOMP_SNAPSHOT`) ne lit pas les images 10 bits.
+
+## Format de l'image : 21:9, 32:9 en rendu natif (2026-11-19 ; pas publié)
+
+Demande de l'utilisateur : le 32:9 (issue n° 2), « fait proprement » : rendu natif à 5120 × 1440, interface correcte.
+
+* **Comment le moteur choisit sa taille** (décompilé, `vgame.out.c`, fonction main+0xb447300) : taille de la swapchain
+  = taille de l'écran (`nn::vi::ListDisplays`, gardée au démarrage du gestionnaire de fenêtres, main+0xba65b80), ramenée
+  composante par composante (`umin`) à la résolution maximale du mode (`QueryDisplayBufferMaxResolution` : table 16:9,
+  1280 × 720 à 3840 × 2160). Un écran 5120 × 1440 en mode 1440p donnait donc 2560 × 1440 (« requested_swapchain_dim_changed
+  … -> 2560x1440 »). Si la requête échoue, pas de réduction. Quand la taille demandée change, le moteur recrée lui-même
+  ses textures de fenêtre (3840 × 2160 au départ, puis 5120 × 1440 : `nvnWindowInitialize` une deuxième fois), ses cibles
+  de rendu suivent.
+* **Runtime** : `hle_gfx.cpp` `wide_display` (`gfx_virtual_display` pour les autres fichiers) : hauteur du mode
+  (réglage `resolution`), largeur = hauteur × format, paire ; `vi_list_displays` l'annonce, `vi_max_resolution` répond
+  0xC72 (non pris en charge) quand l'écran virtuel est plus large que 16:9 ; `svc_fs.cpp` `recomp_cvars` donne le
+  format réduit à la caméra (`render.aspect_ratio_x` / `_y`, 32 et 9 ; sans eux le moteur garde une caméra 16:9 et
+  étire l'image) ; la fenêtre hôte s'ouvre au format de l'écran virtuel. Journal : « virtual display widened:
+  5120x1440 », « nvnWindowInitialize: 3 textures 5120x1440 », « presented image: 5120x1440 ».
+* **Interface** : le moteur garde son canevas 16:9 au centre (titre, menus) ; rien à faire. Les variables
+  `render.ui_canvas_mode` / `_desired_width` essayées n'ont rien changé de visible.
+* **Réglages** : `aspect_ratio` = `16:9` (par défaut, comme avant), `21:9`, `32:9`, `auto` (format de l'écran du PC), ou
+  tout `l:h` entre 4:3 et 4:1 ; plus étroit que 16:9 : 16:9. `RECOMP_ASPECT` le remplace. Launcher : page Graphismes,
+  onglet ÉCRAN (ex-HDR), ligne Format.
+* **Limites vues** : certains décors sont des images faites pour le 16:9 (la Terre de l'écran titre s'arrête avant le
+  bord gauche en 32:9). Le jeu en vol (affichage tête haute, viseur) n'a pas encore été vérifié en 32:9.

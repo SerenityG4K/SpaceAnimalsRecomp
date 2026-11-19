@@ -82,7 +82,7 @@ enum Zone : int {
     Z_ONGLET_SOURIS, Z_SOURIS_G, Z_SOURIS_D, Z_SOURIS_VIT_G, Z_SOURIS_VIT_D,   // onglet Souris : mode souris, vitesse
     Z_SOURIS_B0, Z_SOURIS_B_FIN = Z_SOURIS_B0 + 2 * NB_BOUTONS_SOURIS - 1,  // ‹ › du bouton de chaque bouton de la souris
     Z_ONGLET_IMAGE, Z_ONGLET_HDR, Z_HDR_G, Z_HDR_D, Z_HDR_PIC_G, Z_HDR_PIC_D, Z_HDR_BLANC_G, Z_HDR_BLANC_D,   // page
-                                                                          // Graphismes : onglets, HDR
+    Z_FORMAT_G, Z_FORMAT_D,                                               // Graphismes : onglets, format, HDR
 };
 
 // tâche en cours, lancée par le launcher (même protocole de lignes « @… »)
@@ -134,6 +134,9 @@ struct ReglagesJeu {   // recomp.ini du jeu
     bool hdr = false;
     int hdr_pic = 1000;
     int hdr_blanc = 203;
+    // format de l'image (aspect_ratio) : 16:9 (celui de la console), 21:9, 32:9 ou auto (celui de l'écran) ; plus large
+    // que 16:9, le jeu rend nativement à ce format
+    std::string format = "16:9";
 };
 
 // Manettes vues par le launcher (manette.cpp, SDL3 : onglet Manette de la page Contrôles)
@@ -178,7 +181,7 @@ struct App {
     int capture = -1;   // page Contrôles : action dont on attend la nouvelle touche ; -1 : aucune
     unsigned capture_mod = 0;   // touche modificatrice appuyée pendant l'attente (donnée seule si relâchée seule)
     int onglet_controles = 0;      // page Contrôles : onglet 0 Clavier, 1 Manette, 2 Souris
-    int onglet_graphismes = 0;     // page Graphismes : onglet 0 Image, 1 HDR
+    int onglet_graphismes = 0;     // page Graphismes : onglet 0 Image, 1 Écran (format, HDR)
     int capture_pad = -1;          // onglet Manette : bouton de la Switch qui attend un appui sur la manette ; -1 : aucun
     uint32_t pad_tenues = 0;       // entrées déjà appuyées quand l'attente a commencé (ne comptent qu'une fois relâchées)
     // chemins

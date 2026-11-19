@@ -439,6 +439,7 @@ python link.py                                   # after modifying the runtime
 | `RECOMP_BACKGROUND_INPUT=1` | reads the XInput controller even when the window does not have focus (old behavior) |
 | `RECOMP_INPUT_LOG=1` | log of every button change and of every change in the presence of the XInput controller |
 | `RECOMP_MOUSE_KEYBOARD=0\|1` | overrides `mouse_keyboard` in `recomp.ini` (the game's mouse mode, `hle_kbm.cpp`) |
+| `RECOMP_ASPECT=16:9\|21:9\|32:9\|auto` | overrides `aspect_ratio` in `recomp.ini` (aspect ratio, `hle_gfx.cpp`) |
 | `RECOMP_HDR=0\|1` | overrides `hdr` in `recomp.ini` (the game's HDR10 output, `hle_gfx.cpp`, `vk_render.cpp`) |
 | `RECOMP_JCMS_CONTACT=0\|1` | mouse mode: right Joy-Con 2 lifted or laid down, whatever the window focus (tests without a player) |
 | `RECOMP_CNTFRQ=hz` | frequency of the guest counter (31,250,000 by default, that of the Switch 2) |
@@ -3789,7 +3790,31 @@ User request: HDR (issue #30). Reference: Triforce (OoT), "Native" mode.
   (PQ into PQ). Without HDR10 on the display (HDR off in Windows), the game stays in SDR, as before. Log: "HDR: the
   display offers HDR10", "presented image: …, format 64 (NVN 61)".
 * **Settings**: `hdr` (false by default), `hdr_peak` (400 to 10000 nits, 1000 by default), `hdr_paper_white` (80 to
-  500, 203 by default); `RECOMP_HDR=0|1` overrides `hdr`. Launcher: Graphics page, IMAGE · HDR tabs.
+  500, 203 by default); `RECOMP_HDR=0|1` overrides `hdr`. Launcher: Graphics page, IMAGE · DISPLAY tabs.
 * **Not done**: no HDR metadata sent to the display (`VK_EXT_hdr_metadata`: Windows usually ignores it), no RenoDX (it
   would need a Star Fox shader set), no SDR → HDR conversion (the game outputs PQ from the first frame). The snapshot
   (`RECOMP_SNAPSHOT`) cannot read 10-bit images.
+
+## Aspect ratio: native 21:9, 32:9 rendering (2026-11-19; not published)
+
+User request: 32:9 (issue #2), "done properly": native 5120 × 1440 rendering, correct interface.
+
+* **How the engine picks its size** (decompiled, `vgame.out.c`, function main+0xb447300): swapchain size = display
+  size (`nn::vi::ListDisplays`, kept when the window manager starts, main+0xba65b80), clamped component by component
+  (`umin`) to the mode's maximum resolution (`QueryDisplayBufferMaxResolution`: a 16:9 table, 1280 × 720 to 3840 ×
+  2160). A 5120 × 1440 display in 1440p mode therefore gave 2560 × 1440 ("requested_swapchain_dim_changed … ->
+  2560x1440"). If the query fails, there is no clamp. When the requested size changes, the engine recreates its window
+  textures itself (3840 × 2160 at first, then 5120 × 1440: a second `nvnWindowInitialize`), its render targets follow.
+* **Runtime**: `hle_gfx.cpp` `wide_display` (`gfx_virtual_display` for other files): the mode's height (`resolution`
+  setting), width = height × aspect ratio, even; `vi_list_displays` reports it, `vi_max_resolution` answers 0xC72 (not
+  supported) when the virtual display is wider than 16:9; `svc_fs.cpp` `recomp_cvars` gives the reduced ratio to the
+  camera (`render.aspect_ratio_x` / `_y`, 32 and 9; without them the engine keeps a 16:9 camera and stretches the
+  image); the host window opens in the virtual display's shape. Log: "virtual display widened: 5120x1440",
+  "nvnWindowInitialize: 3 textures 5120x1440", "presented image: 5120x1440".
+* **Interface**: the engine keeps its 16:9 canvas in the middle (title, menus); nothing to do. The
+  `render.ui_canvas_mode` / `_desired_width` variables tried changed nothing visible.
+* **Settings**: `aspect_ratio` = `16:9` (default, as before), `21:9`, `32:9`, `auto` (the PC screen's shape), or any
+  `w:h` between 4:3 and 4:1; narrower than 16:9: 16:9. `RECOMP_ASPECT` overrides it. Launcher: Graphics page, DISPLAY
+  tab (was HDR), Aspect ratio row.
+* **Limits seen**: some backdrops are images made for 16:9 (the title screen's Earth ends before the left edge in
+  32:9). In-flight play (HUD, reticle) has not been checked in 32:9 yet.

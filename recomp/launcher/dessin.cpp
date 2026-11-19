@@ -739,7 +739,7 @@ void page_reglages() {
 // Page Graphismes (2026-11-12, demande de l'utilisateur) : tout ce qui touche à l'image (recomp.ini du jeu). Le soir,
 // autre demande : choisir la carte graphique (une carte AMD par exemple ; le DLSS n'est alors plus proposé), et dire
 // que toutes les mises à l'échelle sont expérimentales (DLSS Qualité à Ultra perf., rendu 3D sous 100 %).
-// ---- page Graphismes : onglets IMAGE · HDR, à droite du titre (comme ceux de la page Contrôles)
+// ---- page Graphismes : onglets IMAGE · ÉCRAN, à droite du titre (comme ceux de la page Contrôles)
 void onglets_graphismes() {
     float x = PX0 + 200;
     const float y = PY0 + 20;
@@ -754,12 +754,20 @@ void onglets_graphismes() {
     }
 }
 
-// ---- onglet HDR : la sortie HDR10 du jeu (runtime/os/hle_gfx.cpp et vk_render.cpp), quand l'écran est en HDR dans
+// ---- onglet ÉCRAN : format de l'image (runtime/os/hle_gfx.cpp gfx_virtual_display : écran virtuel plus large que
+// 16:9, rendu natif), puis la sortie HDR10 du jeu (hle_gfx.cpp et vk_render.cpp), quand l'écran est en HDR dans
 // Windows ; luminosité maximale de l'écran et blanc papier donnés au jeu, qui se calibre avec.
 void page_hdr() {
     float y = PY0 + 60;
     const float pas = 33;
     wchar_t v[32];
+    libelle(y, "reg_format", "reg_format_aide");
+    const std::string& f = g.reglages.format;
+    if (f == "auto") wcscpy(v, T("auto_ecran"));
+    else if (f == "16:9") wcscpy(v, T("format_169"));
+    else swprintf(v, 32, L"%ls", std::wstring(f.begin(), f.end()).c_str());   // ASCII (« 21:9 »)
+    selecteur(y, v, Z_FORMAT_G, Z_FORMAT_D);
+    y += pas + 6;
     libelle(y, "hdr_mode", "hdr_mode_aide");
     selecteur(y, T(g.reglages.hdr ? "sou_oui" : "sou_non"), Z_HDR_G, Z_HDR_D);
     y += pas + 6;
