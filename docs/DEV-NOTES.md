@@ -3795,12 +3795,18 @@ User request: HDR (issue #30). Reference: Triforce (OoT), "Native" mode.
   `hdr`. Launcher: Graphics page, IMAGE · DISPLAY tabs.
 * **One decision, a swapchain that follows the screen** (review of the PR, 2026-11-20): what the game is told
   (`g.hdr10`) is decided once, when the swapchain is first created; if the game asks before the window exists, the
-  answer is SDR and the swapchain follows it. The swapchain itself follows what the screen offers: checked once a
-  second and at each recreation. HDR lost while playing (turned off in Windows, window moved to an SDR screen): SDR
-  swapchain, and the game's PQ picture goes through `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = paper white,
-  soft shoulder above 0.8) before the present copy; HDR back: HDR10 swapchain again. An 8-bit image on the HDR10
-  swapchain goes the other way (sRGB → PQ). `RECOMP_HDR_LOSS_TEST=n` pretends the screen loses HDR10 at frame n
-  (tested: "the display no longer offers HDR10", swapchain format 50, the game keeps running).
+  answer is SDR and the swapchain follows it. The swapchain itself follows what the Vulkan driver offers for the
+  window: checked once a second and at each recreation. When it stops offering HDR10: SDR swapchain, and the game's PQ
+  picture goes through `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = paper white, soft shoulder above 0.8) before
+  the present copy; HDR10 back: HDR10 swapchain again. An 8-bit image on the HDR10 swapchain goes the other way (sRGB
+  → PQ). `RECOMP_HDR_LOSS_TEST=n` pretends the driver stops offering HDR10 at frame n (tested: "the display no longer
+  offers HDR10", swapchain format 50, the game keeps running).
+* **HDR turned off in Windows while playing (Win+Alt+B): restart the game.** Tested on 2026-11-20 (NVIDIA, Windows
+  11): the driver keeps offering HDR10 after the switch, so the swapchain stays HDR10 and Windows shows the game's PQ
+  picture too bright on the SDR desktop; back on, it is normal again. Reading Windows' own state
+  (`DisplayConfigGetDeviceInfo`, advanced colour) would be needed, and on Windows 11 24H2 automatic colour management
+  also reports "advanced colour" in SDR. The game itself chooses HDR once, at start-up, as on the console: a restart is
+  the expected way, and not worth more here.
 * **SDR format**: `B8G8R8A8_SRGB` in the sRGB colour space only (`VK_EXT_swapchain_colorspace` adds the same format in
   other colour spaces: P3, extended sRGB…).
 * **Snapshots and launcher clips** (`readback_half`): in HDR the presented image is converted by the same pass, then

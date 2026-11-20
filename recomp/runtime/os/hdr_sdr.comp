@@ -2,8 +2,9 @@
 //
 // Le jeu sort en HDR10 quand on le lui dit (nn::vi, hle_gfx.cpp) : image finale RGB10A2 codée en PQ (ST 2084), primaires
 // BT.2020. Elle va telle quelle sur une swapchain HDR10. Cette passe sert quand les deux ne s'accordent pas :
-//   sens 0 (HDR → SDR) : l'écran a perdu son HDR en cours de partie (coupé dans Windows, fenêtre passée sur un écran
-//     SDR) alors que le jeu sort toujours en PQ ; et les instantanés et extraits du launcher (8 bits sRGB). PQ → nits,
+//   sens 0 (HDR → SDR) : le pilote ne propose plus le HDR10 pour la fenêtre alors que le jeu sort toujours en PQ (le
+//     Win+Alt+B de Windows ne se voit pas ainsi : relancer le jeu) ; et les instantanés et extraits du launcher (8 bits
+//     sRGB). PQ → nits,
 //     BT.2020 → BT.709, 1 = blanc papier (hdr_paper_white), épaule douce pour les hautes lumières ;
 //   sens 1 (SDR → HDR) : une image 8 bits (avant que le jeu ne passe en HDR) sur la swapchain HDR10. sRGB → linéaire,
 //     blanc papier, BT.709 → BT.2020, codage PQ.

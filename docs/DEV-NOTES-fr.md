@@ -3844,12 +3844,18 @@ Demande de l'utilisateur : le HDR (issue n° 30). Référence : Triforce (OoT), 
   page Graphismes, onglets IMAGE · ÉCRAN.
 * **Une décision, une swapchain qui suit l'écran** (relecture de la PR, 2026-11-20) : ce qu'on dit au jeu (`g.hdr10`)
   est décidé une fois, à la première création de la swapchain ; si le jeu demande avant que la fenêtre n'existe, la
-  réponse est SDR et la swapchain la suit. La swapchain, elle, suit ce que l'écran propose : regardé une fois par
-  seconde et à chaque recréation. HDR perdu en cours de partie (coupé dans Windows, fenêtre passée sur un écran SDR) :
-  swapchain SDR, et l'image PQ du jeu passe par `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = blanc papier, épaule
-  douce au-dessus de 0,8) avant la copie de présentation ; HDR revenu : swapchain HDR10 de nouveau. Une image 8 bits sur
-  la swapchain HDR10 fait le chemin inverse (sRGB → PQ). `RECOMP_HDR_LOSS_TEST=n` fait comme si l'écran perdait le
-  HDR10 à l'image n (essayé : « the display no longer offers HDR10 », swapchain au format 50, le jeu continue).
+  réponse est SDR et la swapchain la suit. La swapchain, elle, suit ce que le pilote Vulkan propose pour la fenêtre :
+  regardé une fois par seconde et à chaque recréation. Quand il ne propose plus le HDR10 : swapchain SDR, et l'image PQ
+  du jeu passe par `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = blanc papier, épaule douce au-dessus de 0,8) avant
+  la copie de présentation ; HDR10 revenu : swapchain HDR10 de nouveau. Une image 8 bits sur la swapchain HDR10 fait le
+  chemin inverse (sRGB → PQ). `RECOMP_HDR_LOSS_TEST=n` fait comme si le pilote ne proposait plus le HDR10 à l'image n
+  (essayé : « the display no longer offers HDR10 », swapchain au format 50, le jeu continue).
+* **HDR coupé dans Windows en cours de partie (Win+Alt+B) : relancer le jeu.** Essayé le 2026-11-20 (NVIDIA,
+  Windows 11) : le pilote propose toujours le HDR10 après la bascule, la swapchain reste donc en HDR10 et Windows montre
+  l'image PQ du jeu trop claire sur le bureau SDR ; HDR remis, l'image redevient normale. Il faudrait lire l'état de
+  Windows lui-même (`DisplayConfigGetDeviceInfo`, couleur avancée), et sous Windows 11 24H2 la gestion automatique des
+  couleurs se dit aussi « couleur avancée » en SDR. Le jeu choisit d'ailleurs son HDR une fois, au démarrage, comme sur
+  la console : relancer est la voie normale, et ne vaut pas plus d'efforts ici.
 * **Format SDR** : `B8G8R8A8_SRGB` dans l'espace sRGB seulement (`VK_EXT_swapchain_colorspace` ajoute le même format
   dans d'autres espaces : P3, sRGB étendu…).
 * **Instantanés et extraits du launcher** (`readback_half`) : en HDR, l'image présentée passe par la même conversion,

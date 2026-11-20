@@ -7733,8 +7733,9 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
             (caps.currentExtent.width != g.scext.width || caps.currentExtent.height != g.scext.height))
             g.sc_stale = true;
     }
-    // jeu en HDR : une fois par seconde, l'écran propose-t-il toujours (ou de nouveau) le HDR10 ? (HDR coupé dans
-    // Windows, fenêtre passée sur un autre écran) ; sinon la swapchain est recréée et suit (create_swapchain)
+    // jeu en HDR : une fois par seconde, le pilote propose-t-il toujours (ou de nouveau) le HDR10 pour la fenêtre ? Sinon
+    // la swapchain est recréée et suit (create_swapchain). (Le HDR coupé dans Windows par Win+Alt+B ne se voit pas
+    // ici : le pilote NVIDIA le propose toujours, essai du 2026-11-20 ; relancer le jeu.)
     static uint64_t vu_hdr = 0;
     if (g.hdr10 == 1 && !g.sc_stale && g.sc && frame >= vu_hdr + 60) {
         vu_hdr = frame;
