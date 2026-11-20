@@ -5746,6 +5746,24 @@ bool dlss_taa(const DrawCall& d, const nvn::GfxState& s, Image* const* rts, int 
 // relevées pour dlss_taa (taille de sortie de la super résolution) ; quand le DLSS vient de produire cette image en
 // super résolution, le dessin est remplacé par la copie de sa sortie (en écran partagé : moitié droite par-dessus le
 // dessin d'origine). Faux : le dessin d'origine suit.
+// Cibles où la copie de la sortie (RGBA16F linéaire) refait le dessin sans le bit 0x80 (un échantillon tel quel) :
+// R8G8B8A8_SRGB en SDR (la copie encode en sRGB) ; en HDR (2026-11-20, relevé à 5120x1440), le jeu agrandit dans un
+// B10G11R11 flottant, sans conversion (elle vient plus loin). La carte doit savoir y copier (BLIT_DST).
+bool cible_agrandir_ok(VkFormat f) {
+    static const VkFormat formats[] = {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                                       VK_FORMAT_R16G16B16A16_SFLOAT};
+    static int ok[3] = {-1, -1, -1};   // -1 : pas encore demandé à la carte
+    for (int i = 0; i < 3; i++) {
+        if (formats[i] != f) continue;
+        if (ok[i] < 0) {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(g.pd, f, &fp);
+            ok[i] = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ? 1 : 0;
+        }
+        return ok[i] == 1;
+    }
+    return false;
+}
 bool dlss_agrandir(const DrawCall& d, const nvn::GfxState& s, Image* const* rts, int nrt) {
     static const bool partage = getenv("RECOMP_DLSS_SPLIT") != nullptr;
     if (nrt < 1 || !rts[0]) return false;
@@ -5760,7 +5778,7 @@ bool dlss_agrandir(const DrawCall& d, const nvn::GfxState& s, Image* const* rts,
     const nvn::Range& u = s.ubo[1][3];
     uint32_t mot10 = 0;
     if (u.addr && u.size >= 44 && mem_valid(u.addr, 44)) memcpy(&mot10, (const uint8_t*)u.addr + 40, 4);
-    if ((mot10 & 0x80) || rts[0]->fmt != VK_FORMAT_R8G8B8A8_SRGB || s.rt_level[0] || s.rt_layer[0] ||
+    if ((mot10 & 0x80) || !cible_agrandir_ok(rts[0]->fmt) || s.rt_level[0] || s.rt_layer[0] ||
         rts[0]->layers != 1) {
         static bool dit = false;
         if (!dit) dit = true, HLOG("dlss", "upsample kept (target format %d, word 10 = 0x%x)", (int)rts[0]->fmt, mot10);
