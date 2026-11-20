@@ -81,6 +81,20 @@ const Texte TEXTES[] = {
     {"reg_natif_dlss", L"expérimental : agrandi par le DLSS", L"experimental: enlarged by DLSS"},
     // page Graphismes (2026-11-12)
     {"gra_titre", L"GRAPHISMES", L"GRAPHICS"},
+    // onglets IMAGE · ÉCRAN de la page Graphismes ; onglet ÉCRAN : format de l'image, sortie HDR10 du jeu
+    {"ong_image", L"IMAGE", L"IMAGE"},
+    {"ong_hdr", L"ÉCRAN", L"DISPLAY"},
+    {"reg_format", L"Format", L"Aspect ratio"},
+    {"reg_format_aide", L"plus large : le jeu voit plus large", L"wider: the game sees wider"},
+    {"format_169", L"16:9 (console)", L"16:9 (console)"},
+    {"hdr_mode", L"HDR", L"HDR"},
+    {"hdr_mode_aide", L"sortie HDR10 du jeu", L"the game's HDR10 output"},
+    {"hdr_pic", L"Luminosité maximale", L"Peak brightness"},
+    {"hdr_pic_aide", L"celle de votre écran", L"your screen's"},
+    {"hdr_blanc", L"Blanc papier", L"Paper white"},
+    {"hdr_blanc_aide", L"interface et scènes SDR", L"interface and SDR scenes"},
+    {"hdr_note", L"Format : plus large que 16:9 (21:9, 32:9, ou Auto sur un écran ultra large), le jeu rend nativement à ce format et voit plus large ; menus et affichage du jeu restent en 16:9 au centre. Le jeu a sa propre sortie HDR10 : il s'en sert quand l'écran est en HDR (Paramètres de Windows › Système › Écran › Utiliser HDR), sinon il reste en SDR. Luminosité maximale : celle de votre écran (voir ses caractéristiques, ou l'outil d'étalonnage HDR de Windows). Blanc papier : 203 nits est la valeur de référence. Valable au prochain lancement du jeu.",
+     L"Aspect ratio: wider than 16:9 (21:9, 32:9, or Auto on an ultrawide screen), the game renders natively in that format and sees wider; menus and HUD stay 16:9 in the middle. The game has its own HDR10 output: it uses it when the screen is in HDR (Windows Settings › System › Display › Use HDR), otherwise it stays in SDR. Peak brightness: your screen's (see its specifications, or the Windows HDR Calibration app). Paper white: 203 nits is the reference value. Applies the next time the game starts."},
     {"reg_gpu", L"Carte graphique", L"Graphics card"},
     {"gpu_auto", L"Automatique", L"Automatic"},
     {"gpu_auto_carte", L"Auto : ", L"Auto: "},
@@ -166,13 +180,48 @@ const Texte TEXTES[] = {
     {"stick_g", L"Stick gauche", L"Left stick"},
     {"stick_d", L"Stick droit", L"Right stick"},
     {"croix", L"Croix", L"D-pad"},
-    {"ctl_note", L"Cliquez sur une touche pour la changer ; une touche déjà prise est échangée. Les changements valent au "
-                 L"prochain lancement du jeu. Boutons de la manette : onglet MANETTE.",
-     L"Click a key to change it; a key already in use is swapped. Changes apply the next time the game starts. "
-     L"Controller buttons: CONTROLLER tab."},
+    {"slsr", L"SL · SR", L"SL · SR"},
+    {"sl_g", L"SL (Joy-Con G)", L"SL (left Joy-Con)"},
+    {"sr_g", L"SR (Joy-Con G)", L"SR (left Joy-Con)"},
+    {"sl_d", L"SL (Joy-Con D)", L"SL (right Joy-Con)"},
+    {"sr_d", L"SR (Joy-Con D)", L"SR (right Joy-Con)"},
+    {"mod_ctrl", L"Ctrl", L"Ctrl"},
+    {"mod_maj", L"Maj", L"Shift"},
+    {"mod_alt", L"Alt", L"Alt"},
+    {"ctl_note", L"Cliquez sur une touche pour la changer ; une touche déjà prise est échangée. Ctrl, Maj ou Alt tenus en "
+                 L"même temps : une combinaison (Maj + W et W font deux actions). Valable au prochain lancement du jeu.",
+     L"Click a key to change it; a key already in use is swapped. Hold Ctrl, Shift or Alt with it for a combination "
+     L"(Shift + W and W do two actions). Applies the next time the game starts."},
+    {"ctl_note_reconstruire", L"Cliquez sur une touche pour la changer. Les combinaisons (Ctrl, Maj, Alt) ne marchent "
+                              L"qu'avec le jeu reconstruit : d'ici là, le jeu ignore ces touches.",
+     L"Click a key to change it. Key combinations (Ctrl, Shift, Alt) only work once the game is rebuilt: until then, "
+     L"the game ignores those keys."},
     // onglet Manette (2026-11-12) : manettes Xbox, PlayStation, Switch Pro et Joy-Con (SDL3)
     {"ong_clavier", L"CLAVIER", L"KEYBOARD"},
     {"ong_manette", L"MANETTE", L"CONTROLLER"},
+    // onglet Souris : mode souris du jeu (Joy-Con 2 droit tenu comme une souris)
+    {"ong_souris", L"SOURIS", L"MOUSE"},
+    {"sou_mode", L"Mode souris", L"Mouse mode"},
+    {"sou_mode_aide", L"visée à la souris, comme un Joy-Con 2", L"mouse aiming, like a Joy-Con 2"},
+    {"sou_oui", L"Activé", L"On"},
+    {"sou_non", L"Désactivé", L"Off"},
+    {"sou_vitesse", L"Vitesse", L"Speed"},
+    {"sou_vitesse_aide", L"s'ajoute à la sensibilité du jeu", L"on top of the game's sensitivity"},
+    {"sou_gauche", L"Clic gauche", L"Left click"},
+    {"sou_droit", L"Clic droit", L"Right click"},
+    {"sou_milieu", L"Clic milieu", L"Middle click"},
+    {"sou_arriere", L"Bouton arrière", L"Back button"},
+    {"sou_avant", L"Bouton avant", L"Forward button"},
+    {"sou_molette_haut", L"Molette vers le haut", L"Wheel up"},
+    {"sou_molette_bas", L"Molette vers le bas", L"Wheel down"},
+    {"sou_aucun", L"Aucun", L"None"},
+    {"sou_note", L"La souris devient le Joy-Con 2 droit posé sur la table : le jeu passe de lui-même en visée à la souris. "
+                 L"Dans ce mode, le jeu met le boost et le frein sur le stick droit (haut, bas), l'inclinaison sur le "
+                 L"stick gauche (gauche, droite). F9 rend le curseur, un clic dans le jeu le reprend. Valable au prochain "
+                 L"lancement du jeu.",
+     L"The mouse becomes the right Joy-Con 2 lying on the desk: the game switches to mouse aiming by itself. In this "
+     L"mode the game puts boost and brake on the right stick (up, down), tilt on the left stick (left, right). F9 "
+     L"releases the cursor, a click in the game takes it back. Applies the next time the game starts."},
     {"pad_branchee", L"Manette : %ls", L"Controller: %ls"},
     {"pad_autres", L"  (+ %d autre(s))", L"  (+ %d more)"},
     {"pad_aucune", L"Aucune manette branchée : cliquez sur un bouton (dessin ou liste), puis sur celui du dessin qui doit "

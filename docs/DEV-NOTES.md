@@ -438,6 +438,11 @@ python link.py                                   # after modifying the runtime
 | `RECOMP_KEY_SCRIPT="38:A,43:-A"` | scripted presses: button (A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LSTICK RSTICK) pressed, or released with `-`, at the given time in seconds. Holding A for 5 s skips a cutscene; "38:A,43:-A,52:A,57:-A" usually leads to the training in 70 s (depending on loading times) |
 | `RECOMP_BACKGROUND_INPUT=1` | reads the XInput controller even when the window does not have focus (old behavior) |
 | `RECOMP_INPUT_LOG=1` | log of every button change and of every change in the presence of the XInput controller |
+| `RECOMP_MOUSE_KEYBOARD=0\|1` | overrides `mouse_keyboard` in `recomp.ini` (the game's mouse mode, `hle_kbm.cpp`) |
+| `RECOMP_ASPECT=16:9\|21:9\|32:9\|auto` | overrides `aspect_ratio` in `recomp.ini` (aspect ratio, `hle_gfx.cpp`) |
+| `RECOMP_HDR=0\|1` | overrides `hdr` in `recomp.ini` (the game's HDR10 output, `hle_gfx.cpp`, `vk_render.cpp`) |
+| `RECOMP_HDR_LOSS_TEST=<frame>` | from that frame, the screen is taken as no longer offering HDR10 (HDR → SDR conversion, tests) |
+| `RECOMP_JCMS_CONTACT=0\|1` | mouse mode: right Joy-Con 2 lifted or laid down, whatever the window focus (tests without a player) |
 | `RECOMP_CNTFRQ=hz` | frequency of the guest counter (31,250,000 by default, that of the Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | old reuse, by address, of a packaged image without comparing its contents (stale textures) |
 | `SHADERC_NO_CLIP=1` | (`shaderc.py`) translates without `gl_ClipDistance` |
@@ -3697,3 +3702,146 @@ array texture. `RECOMP_GPU_SYNC=1`: the game waits for the GPU thread at every s
 silently. `nvn_exec.cpp`: `CopyTextureToBuffer`, never executed, is logged if the game emits it.
 `RECOMP_SHADER_WATCH=hash,hash`: the draws that use those shaders (frame, material, first target), the first time and
 then every 600 frames.
+
+## Mouse mode: the PC mouse as a Joy-Con 2 laid down as a mouse (2026-11-19; not published)
+
+User request: play with keyboard and mouse, using the game's mouse mode (Switch 2).
+
+* **What the game reads.** The USB mouse and keyboard (`nn::hid::GetMouseState(s)`, `GetKeyboardStates`) only serve
+  the interface, and only when the variable `input.keyboard_mouse_input_on_nintendo_enabled` is true: mouse aiming goes
+  through the Joy-Con 2 optical sensor ("Jcms": `nn::hid::InitializeJcms`, `GetJcmsHandle`, `StartJcms`,
+  `GetJcmsStates`, `StopJcms`, `FinalizeJcms`). vwm layer (main+0xba67000…): two handles per controller (left Joy-Con,
+  type 0; right, type 1), up to 16 states read per frame, movements added up. `JcmsState` (0x20 bytes): sampling number
+  +8, dx +0x10, dy +0x14, attributes +0x18 (bit 0 sensor present, bit 1 laid down). A controller "has a mouse" when bit
+  0 of the newest state is set (vwm event 0x18, read by `input.get_gamepad_supports_mouse`: the "Mouse mode" game option
+  only appears then).
+* **Controller type.** Npad style bit 12 = "joycon-dual-ms" (Joy-Con 2 pair), 13 and 14 = a single Joy-Con 2; the Pro
+  controller ("fullkey") never plays with the mouse. But the game only accepts bit 12 at startup
+  (`SetSupportedNpadStyleSet` 0x741f): the single-player campaign asks for 0x407 (handheld, Joy-Con pair, Pro, bit 10)
+  and silently refuses a controller of another style ("Einzelspieler" does nothing). `svc_hid.cpp` therefore presents
+  the pair like the console does: bit 12 when accepted, otherwise a plain pair (bit 2); JoyDual LIFO (+0x6c8 in SDK 21)
+  and the "left and right Joy-Con connected" attributes (bits 2 and 4) the game requires.
+* **What turns mouse mode on** (`player_input.vscript`, decompiled with Ghidra 12.2; main+0x881ccfa0 in the reference
+  image): a Joy-Con laid down (Jcms contact), the mouse moving (more than 0.01), and its motion sensor saying it lies on
+  its side: acceleration x > threshold (left) or < −threshold (right); it leaves when x goes back above −0.5 (right).
+  `eclipse_action_map_manager.vscript` then picks the mouse action maps (3 or 4: right- or left-handed): `player_input`
+  returns input type 2.
+* **The real blocker: `GetSupportedNpadStyleSet` (hid, command 101) returned 0.** When it creates its window, the game
+  requests the motion sensors (`GetSixAxisSensorHandles`, `StartSixAxisSensor`) only for the styles it reads back with
+  this command (main+0xba68b5c): with 0, no sensor, a zero acceleration, and never any mouse mode. `svc_hid.cpp` now
+  returns the accepted styles (with the setting).
+* **`hle_kbm.cpp`** replaces the SDK's Jcms functions: player 1's right Joy-Con receives the raw mouse movements (Raw
+  Input, without Windows acceleration, multiplied by `mouse_speed`), at most one state every 4 ms; it is laid down while
+  the window has focus. And `nn::hid::GetSixAxisSensorState`: at rest, the right Joy-Con lying on its side (acceleration
+  x = −1 G) while laid down, flat otherwise. The mouse buttons press Switch buttons (`input.cpp`; R and ZR by default,
+  the two buttons under the fingers of a Joy-Con 2 held as a mouse); the keyboard drives the controller as before.
+* **The Windows cursor** is hidden and held in the game's picture: borderless, as soon as the window is active;
+  windowed, after a click in the picture (the title bar stays reachable to move or resize the window; F11 or
+  Alt+Enter to windowed releases it). `mouse_release` (F9 by default, a key like `key_…`), Alt+Tab or losing focus
+  release it; a click in the picture takes it back, and that click presses nothing in the game (buttons held at
+  capture are ignored until released). Every exit path (window closed, guest `ExitProcess`, crash, out of memory)
+  calls `kbm_release` before ending the process. High-resolution wheels send fractions of a 120 notch: they add up to
+  a notch. The capture is written for Windows: elsewhere `mouse_keyboard` stays off (`settings.cpp`), for the Linux
+  port.
+* **Motion sensors**: while the mode is on, `GetSixAxisSensorState` always answers at rest (right Joy-Con on its side
+  while laid down). That is what the mode needs; the runtime has no motion input from PC controllers either way.
+* **Settings**: `mouse_keyboard` (false by default: Pro controller, nothing changes), `mouse_speed` (10 to 1000%),
+  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward`, `mouse_wheel_up`, `mouse_wheel_down`:
+  any controller action (`a` … `right`, `ls_up` … `rs_right`, `left_sl`, `left_sr`, `right_sl`, `right_sr`, `none`);
+  a wheel notch is a short press (80 ms). Launcher: Controls page, MOUSE tab.
+* **The game's mouse-mode layout** (interface texts, `ui_hud.locs_strings`, `HUD_TUTORIAL_PROMPT_R_MOUSE_…`): the
+  mouse steers; boost and brake on the right stick (up, down, held); tilt on the left stick (left, right; twice: barrel
+  roll; both held: hover); fire, alternate fire, torpedo and barrel roll from the game's action table
+  (`fire_lasers`, `mouse_alt_fire`, `fire_bomb`, `mouse_barrel_roll_left` / `_right`). Left-handed (`L_MOUSE`): the
+  sticks swapped. Hence the user's request: every input of both Joy-Con reachable from the keyboard and the mouse.
+* **Keyboard**: SL and SR of each Joy-Con added to the actions (`key_left_sl` … `key_right_sr`, bits 24 to 27 of the
+  Npad state, no key by default). A key can require Ctrl, Shift, Alt (`key_rs_up = shift+0x11`): `touches_actives`
+  (`input.cpp`) keeps the most specific combination of each key (W: left stick, Shift+W: right stick), and a modifier
+  key bound on its own does not count during a combination that uses it. The launcher captures the combination
+  (modifiers held), or the modifier key released on its own. **AltGr** (AZERTY, QWERTZ, US international…): Windows
+  reports it as left Ctrl + right Alt; on a layout that has it (one of its characters typed with Ctrl+Alt,
+  `VkKeyScanExW`), right Alt held counts neither as Ctrl nor as Alt, in the game (`host_modifiers_held`) and in the
+  launcher's capture. The menu convenience keys (Enter, Backspace, Esc, Tab) stop as soon as their key is bound,
+  alone or in a combination. A game built before combinations ignores those keys: the Controls page says so while
+  the launcher offers a rebuild.
+* **`recomp.ini`**: the appended block only holds `mouse_keyboard` (the other settings are explained in it); the
+  launcher writes `mouse_speed` and the `mouse_…` inputs only once the mode is on (or when they are already there),
+  and the SL · SR keyboard row only shows in mouse mode. Launcher and game read these settings the same way (case,
+  `yes` / `on` / `oui`, out-of-range speed brought back within 10 to 1000).
+* **Dead ends**: the game's USB mouse (variable above) does not aim; forcing the "joycon-dual-ms" style is not enough
+  without a motion sensor. The slight smoothing of the aim comes from the game (reticle), not from the mouse.
+* **References**: Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) for Nmouse, Jcms and
+  commands 3110 onward; Pokopia goes through Nmouse, Star Fox reads Jcms itself. The scripts' `__alias_…__XXXXXXXX`
+  suffixes are the FNV-1a of the script path (`/data/eclipse/input/player_input.vscript` → E6CAE361).
+
+## HDR: the game's HDR10 output (2026-11-19; not published)
+
+User request: HDR (issue #30). Reference: Triforce (OoT), "Native" mode.
+
+* **The game has an HDR output.** It asks for the display's state (`nn::vi::QueryDisplayHdrStatus`: on, format, peak
+  brightness) and paper white (`QueryDisplayHdrPaperWhite`). The runtime answered "no HDR": the game logged "HDR
+  auto-calibration failed (SDR display?)". When the display says HDR10 (true, format 1, peak in nits), it calibrates
+  ("HDR auto-calibration: paperwhite 203, min (black) nits 0, max (white) nits 1000"), sets its metadata
+  (`SetLayerNextHdrStandardContentLuminanceRangeMetadata` 0 to 203 nits,
+  `SetLayerNextHdrExtendedContentLuminanceRangeMetadata` 0 to 1000 nits) and renders its final image as RGB10A2
+  encoded in PQ (ST 2084, BT.2020), from the first presented frame.
+* **Runtime**: `hle_gfx.cpp` only tells the game "HDR10" when the `hdr` setting is on and the display offers HDR10
+  (`vkr::hdr_output`); `vk_render.cpp` then enables `VK_EXT_swapchain_colorspace` and creates the swapchain as
+  `A2B10G10R10` / `A2R10G10B10` + `VK_COLOR_SPACE_HDR10_ST2084_EXT`; the present copy passes the game's image unchanged
+  (PQ into PQ). Without HDR10 on the display (HDR off in Windows), the game stays in SDR, as before. Log: "HDR: the
+  display offers HDR10", "presented image: …, format 64 (NVN 61)".
+* **Settings**: `hdr` (false by default), `hdr_peak` (400 to 10000 nits, 1000 by default), `hdr_paper_white` (80 to
+  500, 203 by default; out of range: brought back within the limits, like the launcher); `RECOMP_HDR=0|1` overrides
+  `hdr`. Launcher: Graphics page, IMAGE · DISPLAY tabs.
+* **One decision, a swapchain that follows the screen** (review of the PR, 2026-11-20): what the game is told
+  (`g.hdr10`) is decided once, when the swapchain is first created; if the game asks before the window exists, the
+  answer is SDR and the swapchain follows it. The swapchain itself follows what the Vulkan driver offers for the
+  window: checked once a second and at each recreation. When it stops offering HDR10: SDR swapchain, and the game's PQ
+  picture goes through `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = paper white, soft shoulder above 0.8) before
+  the present copy; HDR10 back: HDR10 swapchain again. An 8-bit image on the HDR10 swapchain goes the other way (sRGB
+  → PQ). `RECOMP_HDR_LOSS_TEST=n` pretends the driver stops offering HDR10 at frame n (tested: "the display no longer
+  offers HDR10", swapchain format 50, the game keeps running).
+* **HDR turned off in Windows while playing (Win+Alt+B): restart the game.** Tested on 2026-11-20 (NVIDIA, Windows
+  11): the driver keeps offering HDR10 after the switch, so the swapchain stays HDR10 and Windows shows the game's PQ
+  picture too bright on the SDR desktop; back on, it is normal again. Reading Windows' own state
+  (`DisplayConfigGetDeviceInfo`, advanced colour) would be needed, and on Windows 11 24H2 automatic colour management
+  also reports "advanced colour" in SDR. The game itself chooses HDR once, at start-up, as on the console: a restart is
+  the expected way, and not worth more here.
+* **SDR format**: `B8G8R8A8_SRGB` in the sRGB colour space only (`VK_EXT_swapchain_colorspace` adds the same format in
+  other colour spaces: P3, extended sRGB…).
+* **Snapshots and launcher clips** (`readback_half`): in HDR the presented image is converted by the same pass, then
+  reduced into an 8-bit sRGB image (they were skipped, hence blank).
+* **DLSS / FSR in HDR**: their inputs and outputs are RGBA16F, in the scene before the HDR output, so HDR does not
+  change them; only the swap of the game's upscale (`upsample.frag`) for their full-size output required the 8-bit
+  target. In HDR the game upscales into a `B10G11R11` float target (one sample, no conversion): accepted too (DLSS
+  section).
+* **Not done**: no HDR metadata sent to the display (`VK_EXT_hdr_metadata`: Windows usually ignores it), no RenoDX (it
+  would need a Star Fox shader set).
+
+## Aspect ratio: native 21:9, 32:9 rendering (2026-11-19; not published)
+
+User request: 32:9 (issue #2), "done properly": native 5120 × 1440 rendering, correct interface.
+
+* **How the engine picks its size** (decompiled, `vgame.out.c`, function main+0xb447300): swapchain size = display
+  size (`nn::vi::ListDisplays`, kept when the window manager starts, main+0xba65b80), clamped component by component
+  (`umin`) to the mode's maximum resolution (`QueryDisplayBufferMaxResolution`: a 16:9 table, 1280 × 720 to 3840 ×
+  2160). A 5120 × 1440 display in 1440p mode therefore gave 2560 × 1440 ("requested_swapchain_dim_changed … ->
+  2560x1440"). If the query fails, there is no clamp. When the requested size changes, the engine recreates its window
+  textures itself (3840 × 2160 at first, then 5120 × 1440: a second `nvnWindowInitialize`), its render targets follow.
+* **Runtime**: `hle_gfx.cpp` `wide_display` (`gfx_virtual_display` for other files): the mode's height (`resolution`
+  setting), width = height × aspect ratio, even; `vi_list_displays` reports it, `vi_max_resolution` answers 0xC72 (not
+  supported) when the virtual display is wider than 16:9; `svc_fs.cpp` `recomp_cvars` gives the reduced ratio to the
+  camera (`render.aspect_ratio_x` / `_y`, 32 and 9; without them the engine keeps a 16:9 camera and stretches the
+  image); the host window opens in the virtual display's shape. Log: "virtual display widened: 5120x1440",
+  "nvnWindowInitialize: 3 textures 5120x1440", "presented image: 5120x1440".
+* **Interface**: the engine keeps its 16:9 canvas in the middle (title, menus); nothing to do. The
+  `render.ui_canvas_mode` / `_desired_width` variables tried changed nothing visible.
+* **Settings**: `aspect_ratio` = `16:9` (default, as before), `21:9`, `32:9`, `auto` (the PC screen's shape), or any
+  `w:h` between 4:3 and 4:1; narrower than 16:9: 16:9. `RECOMP_ASPECT` overrides it. Launcher: Graphics page, DISPLAY
+  tab (was HDR), Aspect ratio row.
+* **"21:9" screens** are not 21:9: 3440 × 1440 is 43:18 (2.389), 2560 × 1080 is 64:27 (2.370), 3840 × 1600 is 12:5. A
+  ratio chosen within 4 % of the screen's takes the screen's exact ratio (measured in real pixels, `gfx_screen_pixels`,
+  not in points: the display-scaling rounding skewed it). And the present copy fills the window when the black bars
+  would be 2 pixels or less.
+* **Limits seen**: some backdrops are images made for 16:9 (the title screen's Earth ends before the left edge in
+  32:9). In-flight play (HUD, reticle) has not been checked in 32:9 yet.

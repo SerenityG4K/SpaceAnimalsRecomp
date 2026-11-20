@@ -180,6 +180,14 @@ struct Vk {
     VkExtent2D scext{};
     std::vector<VkImage> scimgs;
     HWND hwnd = nullptr;
+    bool ext_espace_couleur = false;   // VK_EXT_swapchain_colorspace activée (réglage hdr)
+    // HDR (réglage hdr) : ce qu'on dit au jeu (hdr_output, nn::vi), décidé une seule fois : 1 si l'écran proposait le
+    // HDR10 (format 10 bits, ST 2084) à la création de la swapchain ; 0 sinon, ou si le jeu a demandé avant qu'elle
+    // n'existe ; -1 : pas encore décidé. Le jeu sort alors en PQ, copié tel quel sur la swapchain HDR10.
+    int hdr10 = -1;
+    // la swapchain est en HDR10. Elle suit l'écran : si l'écran perd son HDR en cours de partie, elle repasse en SDR et
+    // l'image PQ du jeu est convertie (hdr_sdr) ; elle revient en HDR10 avec lui. Regardé une fois par seconde.
+    bool sc_hdr = false;
     bool sc_stale = false;   // swapchain périmée (fenêtre réduite ou redimensionnée) : recréée à la présentation
     int last_present_w = 0, last_present_h = 0;   // journal de la mise à l'échelle de présentation
     // RECOMP_GPU_PROFILE=N : horodatages GPU de chaque dessin / calcul de l'image N, sommés par programme
@@ -551,6 +559,13 @@ bool make_buffer(uint64_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags 
     return true;
 }
 
+bool image_pq(VkFormat f);   // RGB10A2 : la sortie HDR10 (PQ) du jeu, ou une swapchain HDR10
+// RECOMP_HDR_LOSS_TEST=n (essais) : à partir de l'image n, l'écran est censé ne plus proposer le HDR10 (comme un HDR
+// coupé dans Windows en cours de partie)
+bool hdr10_retire_essai() {
+    static const long n = getenv("RECOMP_HDR_LOSS_TEST") ? atol(getenv("RECOMP_HDR_LOSS_TEST")) : -1;
+    return n >= 0 && (long)g.cur_frame >= n;
+}
 bool create_swapchain(HWND hwnd, VkSwapchainKHR old = VK_NULL_HANDLE) {
     VkSurfaceCapabilitiesKHR caps;
     VKCHK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g.pd, g.surf, &caps));
@@ -563,9 +578,40 @@ bool create_swapchain(HWND hwnd, VkSwapchainKHR old = VK_NULL_HANDLE) {
     vkGetPhysicalDeviceSurfaceFormatsKHR(g.pd, g.surf, &n, nullptr);
     std::vector<VkSurfaceFormatKHR> fmts(n);
     vkGetPhysicalDeviceSurfaceFormatsKHR(g.pd, g.surf, &n, fmts.data());
+    // SDR : B8G8R8A8_SRGB en espace sRGB (VK_EXT_swapchain_colorspace en ajoute d'autres du même format : P3, sRGB
+    // étendu linéaire…), sinon le premier format sRGB proposé
     VkSurfaceFormatKHR sf = fmts.empty() ? VkSurfaceFormatKHR{VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR} : fmts[0];
     for (auto& f : fmts)
-        if (f.format == VK_FORMAT_B8G8R8A8_SRGB) sf = f;
+        if (f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            sf = f;
+            break;
+        }
+    for (auto& f : fmts)
+        if (f.format == VK_FORMAT_B8G8R8A8_SRGB && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            sf = f;
+            break;
+        }
+    // HDR (réglage hdr) : HDR10, 10 bits et ST 2084 (PQ), comme la sortie HDR du jeu. Ce qu'on dit au jeu (g.hdr10) est
+    // décidé une fois ; la swapchain, elle, suit ce que l'écran propose à chaque création (g.sc_hdr).
+    const VkSurfaceFormatKHR* hdr10 = nullptr;
+    if (settings().hdr && g.ext_espace_couleur && !hdr10_retire_essai())
+        for (auto& f : fmts)
+            if (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT && image_pq(f.format)) {
+                hdr10 = &f;
+                break;
+            }
+    if (g.hdr10 < 0) {
+        g.hdr10 = hdr10 ? 1 : 0;
+        if (settings().hdr)
+            HLOG("vk", "HDR: %s", hdr10 ? "the display offers HDR10: HDR output"
+                                        : "the display offers no HDR10 (is HDR on in Windows' display settings?): SDR");
+    }
+    const bool sc_hdr = g.hdr10 == 1 && hdr10;
+    if (sc_hdr) sf = *hdr10;
+    if (g.hdr10 == 1 && sc_hdr != g.sc_hdr && old)
+        HLOG("vk", "HDR: %s", sc_hdr ? "the display offers HDR10 again: HDR output"
+                                     : "the display no longer offers HDR10: the game's HDR picture is converted to SDR");
+    g.sc_hdr = sc_hdr;
     RECT rc;
     GetClientRect(hwnd, &rc);
     VkExtent2D ext = caps.currentExtent.width != UINT32_MAX ? caps.currentExtent
@@ -808,6 +854,16 @@ bool init(HWND hwnd) {
     app.pApplicationName = "recomp_main";
     app.apiVersion = VK_API_VERSION_1_3;
     std::vector<const char*> iext = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
+    if (hwnd && settings().hdr) {   // HDR : espaces de couleur de la swapchain (HDR10 ST 2084)
+        uint32_t ni = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &ni, nullptr);
+        std::vector<VkExtensionProperties> dispo(ni);
+        vkEnumerateInstanceExtensionProperties(nullptr, &ni, dispo.data());
+        for (auto& e : dispo)
+            if (!strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME)) g.ext_espace_couleur = true;
+        if (g.ext_espace_couleur) iext.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+        else HLOG("vk", "HDR: the Vulkan driver lacks VK_EXT_swapchain_colorspace: the game stays in SDR");
+    }
     // DLSS (dlss.cpp) : pas pour la précompilation des pipelines (sans fenêtre)
     const bool avec_dlss = hwnd && dlss::modele_demande();
     if (avec_dlss) {   // extensions d'instance demandées par NGX, s'il y en a
@@ -4127,16 +4183,21 @@ bool snap_resources(uint32_t w, uint32_t h, VkFormat fmt) {
     return true;
 }
 // Relit l'image présentée réduite de moitié (blit GPU) dans g_snap.ptr (RGBA, lignes de haut en bas).
+bool hdr_sdr(Image& src, int sortie, int sens, VkImage* out);
+// (en HDR, l'image du jeu est en PQ 10 bits : convertie en SDR par hdr_sdr, puis réduite dans une image sRGB 8 bits)
 bool readback_half(Image& im, const int32_t* crop, uint32_t& w2, uint32_t& h2) {
-    if (im.fmt != VK_FORMAT_R8G8B8A8_SRGB && im.fmt != VK_FORMAT_R8G8B8A8_UNORM) return false;
+    const bool pq = g.hdr10 == 1 && image_pq(im.fmt);
+    if (im.fmt != VK_FORMAT_R8G8B8A8_SRGB && im.fmt != VK_FORMAT_R8G8B8A8_UNORM && !pq) return false;
     int32_t cx = 0, cy = 0;
     uint32_t cw = im.w, ch = im.h;
     if (crop && crop[2] > 0 && crop[3] > 0)
         cx = crop[0], cy = crop[1], cw = std::min<uint32_t>(crop[2], im.w - cx), ch = std::min<uint32_t>(crop[3], im.h - cy);
     static const bool plein = getenv("RECOMP_SNAPSHOT_FULL") != nullptr;   // diagnostic : instantanés non réduits
     w2 = std::max(1u, plein ? cw : cw / 2), h2 = std::max(1u, plein ? ch : ch / 2);
-    if (!snap_resources(w2, h2, im.fmt)) return false;
+    if (!snap_resources(w2, h2, pq ? VK_FORMAT_R8G8B8A8_SRGB : im.fmt)) return false;
     begin_frame();   // emplacement suivant (après le travail de l'image : barrière de tête)
+    VkImage source = im.img;   // (conversion impossible : l'image PQ telle quelle, couleurs ternes)
+    if (pq && !hdr_sdr(im, 1, 0, &source)) source = im.img;
     VkImageMemoryBarrier2 ib{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     ib.srcStageMask = ib.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
     ib.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
@@ -4153,7 +4214,7 @@ bool readback_half(Image& im, const int32_t* crop, uint32_t& w2, uint32_t& h2) {
     bl.srcOffsets[0] = {cx, cy, 0};
     bl.srcOffsets[1] = {cx + (int32_t)cw, cy + (int32_t)ch, 1};
     bl.dstOffsets[1] = {(int32_t)w2, (int32_t)h2, 1};
-    vkCmdBlitImage(g.cb, im.img, VK_IMAGE_LAYOUT_GENERAL, g_snap.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    vkCmdBlitImage(g.cb, source, VK_IMAGE_LAYOUT_GENERAL, g_snap.img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
     barrier_all();
     VkBufferImageCopy r{};
     r.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -4185,6 +4246,16 @@ void snapshot(Image& im, uint64_t frame, const int32_t* crop) {
 
 // ================================================================ interface (vk_render.h)
 bool available() { return g.ok; }
+
+bool hdr_output() {
+    std::lock_guard<std::mutex> lk(g_vk_lk);
+    ensure_init();
+    if (g.hdr10 < 0) {   // le jeu demande avant que la swapchain n'existe : SDR, et la swapchain suivra
+        g.hdr10 = 0;
+        if (settings().hdr) HLOG("vk", "HDR: the game asked before the window existed: SDR for this session");
+    }
+    return g.ok && g.hdr10 == 1;
+}
 
 void pool_flushed(uint64_t addr, uint64_t size) {
     if (size) flush_note(addr, addr + size);
@@ -5458,6 +5529,121 @@ void barrieres_images(const VkImageMemoryBarrier2* b, uint32_t n, bool memoire =
     vkCmdPipelineBarrier2(g.cb, &di);
 }
 
+namespace {   // (même espace que les déclarations de create_swapchain et readback_half)
+
+// ---------------------------------------------------------------- conversion HDR ↔ SDR (hdr_sdr.comp)
+// Ce qu'on a dit au jeu (g.hdr10, hle_gfx.cpp) et la swapchain peuvent ne plus s'accorder : écran passé en SDR en cours
+// de partie alors que le jeu sort en PQ, ou image 8 bits sur la swapchain HDR10. Instantanés et extraits du launcher
+// (8 bits sRGB) en ont besoin aussi. La passe écrit une copie RGBA16F de l'image du jeu (même taille, même sens), que
+// la présentation ou la relecture copie ensuite comme avant. Deux sorties : 0 présentation, 1 relecture ; un jeu de
+// descripteurs par emplacement et par sortie (l'emplacement n'est repris qu'une fois sa soumission finie).
+struct HdrSdr {
+    bool tente = false, ok = false;
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE;
+    VkPipelineLayout pl = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkSampler proche = VK_NULL_HANDLE;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    VkDescriptorSet sets[Vk::NSLOT][2] = {};
+    DlssImage sortie[2];
+} g_hs;
+
+bool hdr_sdr_pret() {
+    if (g_hs.tente) return g_hs.ok;
+    g_hs.tente = true;
+    VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    si.magFilter = si.minFilter = VK_FILTER_NEAREST;
+    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(g.dev, &si, nullptr, &g_hs.proche) != VK_SUCCESS) return false;
+    const VkDescriptorSetLayoutBinding b[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
+    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    li.bindingCount = 2;
+    li.pBindings = b;
+    if (vkCreateDescriptorSetLayout(g.dev, &li, nullptr, &g_hs.dsl) != VK_SUCCESS) return false;
+    VkPushConstantRange pc{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+    VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &g_hs.dsl;
+    pli.pushConstantRangeCount = 1;
+    pli.pPushConstantRanges = &pc;
+    if (vkCreatePipelineLayout(g.dev, &pli, nullptr, &g_hs.pl) != VK_SUCCESS) return false;
+    VkShaderModuleCreateInfo mi{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    mi.codeSize = sizeof HDR_SDR_SPV;
+    mi.pCode = HDR_SDR_SPV;
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(g.dev, &mi, nullptr, &m) != VK_SUCCESS) return false;
+    VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    ci.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, m, "main", nullptr};
+    ci.layout = g_hs.pl;
+    const VkResult r = vkCreateComputePipelines(g.dev, VK_NULL_HANDLE, 1, &ci, nullptr, &g_hs.pipe);
+    vkDestroyShaderModule(g.dev, m, nullptr);
+    if (r != VK_SUCCESS) return false;
+    const VkDescriptorPoolSize ps[2] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 * Vk::NSLOT},
+                                        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * Vk::NSLOT}};
+    VkDescriptorPoolCreateInfo pci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pci.maxSets = 2 * Vk::NSLOT;
+    pci.poolSizeCount = 2;
+    pci.pPoolSizes = ps;
+    if (vkCreateDescriptorPool(g.dev, &pci, nullptr, &g_hs.pool) != VK_SUCCESS) return false;
+    for (auto& s : g_hs.sets)
+        for (auto& d : s) {
+            VkDescriptorSetAllocateInfo dai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            dai.descriptorPool = g_hs.pool;
+            dai.descriptorSetCount = 1;
+            dai.pSetLayouts = &g_hs.dsl;
+            if (vkAllocateDescriptorSets(g.dev, &dai, &d) != VK_SUCCESS) return false;
+        }
+    g_hs.ok = true;
+    return true;
+}
+
+bool image_pq(VkFormat f) { return f == VK_FORMAT_A2B10G10R10_UNORM_PACK32 || f == VK_FORMAT_A2R10G10B10_UNORM_PACK32; }
+
+// Enregistre la conversion de `src` (disposition GENERAL) dans g.cb ; sens 0 : HDR (PQ) → SDR linéaire, 1 : SDR → PQ.
+// *out : image RGBA16F de même taille, en disposition GENERAL, prête à être copiée. Faux : rien d'enregistré.
+bool hdr_sdr(Image& src, int sortie, int sens, VkImage* out) {
+    if (!src.view || !hdr_sdr_pret()) return false;
+    DlssImage& o = g_hs.sortie[sortie];
+    if (!dlss_image(o, src.w, src.h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                    VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT))
+        return false;
+    const VkDescriptorSet set = g_hs.sets[g.slot][sortie];
+    const VkDescriptorImageInfo ii[2] = {{g_hs.proche, src.view, VK_IMAGE_LAYOUT_GENERAL},
+                                         {VK_NULL_HANDLE, o.vue, VK_IMAGE_LAYOUT_GENERAL}};
+    VkWriteDescriptorSet wr[2];
+    for (int i = 0; i < 2; i++) {
+        wr[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr[i].dstSet = set;
+        wr[i].dstBinding = (uint32_t)i;
+        wr[i].descriptorCount = 1;
+        wr[i].descriptorType = i ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr[i].pImageInfo = &ii[i];
+    }
+    vkUpdateDescriptorSets(g.dev, 2, wr, 0, nullptr);
+    VkImageMemoryBarrier2 b = barriere_image(o.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0,
+                                             VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+    barrieres_images(&b, 1, true);   // + écritures du jeu dans la source → lecture du calcul
+    vkCmdBindPipeline(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_hs.pipe);
+    vkCmdBindDescriptorSets(g.cb, VK_PIPELINE_BIND_POINT_COMPUTE, g_hs.pl, 0, 1, &set, 0, nullptr);
+    const bool srgb = src.fmt == VK_FORMAT_R8G8B8A8_SRGB || src.fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    const struct {
+        int32_t taille[2];
+        float blanc;
+        int32_t sens;
+    } pc = {{(int32_t)src.w, (int32_t)src.h}, (float)settings().hdr_paper_white, sens == 0 ? 0 : srgb ? 1 : 2};
+    vkCmdPushConstants(g.cb, g_hs.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+    vkCmdDispatch(g.cb, (src.w + 7) / 8, (src.h + 7) / 8, 1);
+    barrier_all();
+    *out = o.img;
+    return true;
+}
+
+}  // namespace
+
 void draw_verrouille(const DrawCall& d, DrawTimer& dtm);
 
 // Remplace le dessin de taa_resolve par le DLSS. Faux : le dessin d'origine suit (le jeu garde son anticrénelage).
@@ -5706,6 +5892,24 @@ bool dlss_taa(const DrawCall& d, const nvn::GfxState& s, Image* const* rts, int 
 // relevées pour dlss_taa (taille de sortie de la super résolution) ; quand le DLSS vient de produire cette image en
 // super résolution, le dessin est remplacé par la copie de sa sortie (en écran partagé : moitié droite par-dessus le
 // dessin d'origine). Faux : le dessin d'origine suit.
+// Cibles où la copie de la sortie (RGBA16F linéaire) refait le dessin sans le bit 0x80 (un échantillon tel quel) :
+// R8G8B8A8_SRGB en SDR (la copie encode en sRGB) ; en HDR (2026-11-20, relevé à 5120x1440), le jeu agrandit dans un
+// B10G11R11 flottant, sans conversion (elle vient plus loin). La carte doit savoir y copier (BLIT_DST).
+bool cible_agrandir_ok(VkFormat f) {
+    static const VkFormat formats[] = {VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+                                       VK_FORMAT_R16G16B16A16_SFLOAT};
+    static int ok[3] = {-1, -1, -1};   // -1 : pas encore demandé à la carte
+    for (int i = 0; i < 3; i++) {
+        if (formats[i] != f) continue;
+        if (ok[i] < 0) {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(g.pd, f, &fp);
+            ok[i] = (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ? 1 : 0;
+        }
+        return ok[i] == 1;
+    }
+    return false;
+}
 bool dlss_agrandir(const DrawCall& d, const nvn::GfxState& s, Image* const* rts, int nrt) {
     static const bool partage = getenv("RECOMP_DLSS_SPLIT") != nullptr;
     if (nrt < 1 || !rts[0]) return false;
@@ -5720,7 +5924,7 @@ bool dlss_agrandir(const DrawCall& d, const nvn::GfxState& s, Image* const* rts,
     const nvn::Range& u = s.ubo[1][3];
     uint32_t mot10 = 0;
     if (u.addr && u.size >= 44 && mem_valid(u.addr, 44)) memcpy(&mot10, (const uint8_t*)u.addr + 40, 4);
-    if ((mot10 & 0x80) || rts[0]->fmt != VK_FORMAT_R8G8B8A8_SRGB || s.rt_level[0] || s.rt_layer[0] ||
+    if ((mot10 & 0x80) || !cible_agrandir_ok(rts[0]->fmt) || s.rt_level[0] || s.rt_layer[0] ||
         rts[0]->layers != 1) {
         static bool dit = false;
         if (!dit) dit = true, HLOG("dlss", "upsample kept (target format %d, word 10 = 0x%x)", (int)rts[0]->fmt, mot10);
@@ -7509,6 +7713,15 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
     Image* src = get_image(texkey);
     if (src) image_to_general(*src);
     dbg_tex("presented", 0, texkey);
+    if (src) {   // format de l'image présentée : 10 bits (PQ) quand le jeu sort en HDR
+        static VkFormat vu = VK_FORMAT_UNDEFINED;
+        if (src->fmt != vu) {
+            vu = src->fmt;
+            HLOG("vk", "presented image: %ux%u, format %d (NVN %u)", src->w, src->h, (int)src->fmt, src->nvnfmt);
+            if (g.sc_hdr && !image_pq(src->fmt))
+                HLOG("vk", "HDR: this image is not 10-bit PQ: converted to PQ for the HDR10 screen (8-bit) or copied as is");
+        }
+    }
     uint32_t idx = 0;
     auto t_acq = std::chrono::steady_clock::now();
     // Swapchain périmée (fenêtre réduite, redimensionnée) : recréée dès que la fenêtre a une taille.
@@ -7519,6 +7732,21 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
             caps.currentExtent.width != UINT32_MAX &&
             (caps.currentExtent.width != g.scext.width || caps.currentExtent.height != g.scext.height))
             g.sc_stale = true;
+    }
+    // jeu en HDR : une fois par seconde, le pilote propose-t-il toujours (ou de nouveau) le HDR10 pour la fenêtre ? Sinon
+    // la swapchain est recréée et suit (create_swapchain). (Le HDR coupé dans Windows par Win+Alt+B ne se voit pas
+    // ici : le pilote NVIDIA le propose toujours, essai du 2026-11-20 ; relancer le jeu.)
+    static uint64_t vu_hdr = 0;
+    if (g.hdr10 == 1 && !g.sc_stale && g.sc && frame >= vu_hdr + 60) {
+        vu_hdr = frame;
+        uint32_t nf = 0;
+        vkGetPhysicalDeviceSurfaceFormatsKHR(g.pd, g.surf, &nf, nullptr);
+        std::vector<VkSurfaceFormatKHR> fs(nf);
+        vkGetPhysicalDeviceSurfaceFormatsKHR(g.pd, g.surf, &nf, fs.data());
+        bool offert = false;
+        for (auto& f : fs) offert = offert || (f.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT && image_pq(f.format));
+        if (hdr10_retire_essai()) offert = false;
+        if (offert != g.sc_hdr) g.sc_stale = true;
     }
     if (g.sc_stale && g.hwnd) {
         VkSurfaceCapabilitiesKHR caps;
@@ -7559,6 +7787,14 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
     if (have) vkCmdPipelineBarrier2(g.cb, &di);
     if (!have) {
     } else if (src) {
+        // l'image du jeu et l'image d'écran ne sont pas dans le même codage : convertie d'abord (hdr_sdr), puis copiée
+        // comme avant. Écran SDR et jeu en PQ (HDR perdu en cours de partie) ; écran HDR10 et image 8 bits du jeu.
+        VkImage source = src->img;
+        const bool pq = image_pq(src->fmt);
+        const bool huit = src->fmt == VK_FORMAT_R8G8B8A8_SRGB || src->fmt == VK_FORMAT_R8G8B8A8_UNORM ||
+                          src->fmt == VK_FORMAT_B8G8R8A8_SRGB || src->fmt == VK_FORMAT_B8G8R8A8_UNORM;
+        const int sens = g.hdr10 == 1 && !g.sc_hdr && pq ? 0 : g.sc_hdr && huit ? 1 : -1;
+        if (sens >= 0 && !hdr_sdr(*src, 0, sens, &source)) source = src->img;
         VkImageBlit bl{};
         bl.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         // origine bas-gauche : l'image est rangée retournée en mémoire
@@ -7576,6 +7812,9 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
             if ((int64_t)W * ch > (int64_t)H * cw) dw = (int)((int64_t)H * cw / ch);
             else dh = (int)((int64_t)W * ch / cw);
         }
+        // proportions presque égales (arrondi d'un format large, mise à l'échelle de Windows) : pleine fenêtre plutôt
+        // qu'une bande noire d'un ou deux pixels
+        if (W - dw <= 2 && H - dh <= 2) dw = W, dh = H;
         const int dx = (W - dw) / 2, dy = (H - dh) / 2;
         if (dw != W || dh != H) {
             VkClearColorValue black{{0.0f, 0.0f, 0.0f, 1.0f}};
@@ -7591,7 +7830,7 @@ bool present(uint64_t texkey, uint64_t frame, const int32_t* crop) {
         bl.dstOffsets[0] = {dx, dy, 0};
         bl.dstOffsets[1] = {dx + dw, dy + dh, 1};
         const bool exact = dw == cw && dh == ch;
-        vkCmdBlitImage(g.cb, src->img, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
+        vkCmdBlitImage(g.cb, source, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl,
                        exact ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
         static int nlog = 0;
         if (nlog < 4 && (W != g.last_present_w || H != g.last_present_h)) {

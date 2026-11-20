@@ -72,6 +72,8 @@ void set_borderless(HWND h, bool on) {
 }
 
 LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    intptr_t res = 0;
+    if (kbm_wndproc(h, msg, wp, lp, &res)) return res;   // souris du jeu (hle_kbm.cpp, réglage mouse_keyboard)
     switch (msg) {
     case WM_PAINT: {
         if (g_vulkan) {   // la swapchain Vulkan dessine la fenêtre
@@ -135,6 +137,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HLOG("gfx", "window closed: process exiting");
         vkr::save_caches();   // pipelines créés pendant la partie
         fflush(nullptr);
+        kbm_release();
         ExitProcess(0);
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -188,6 +191,7 @@ void window_thread() {
     } else {
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
         if (settings().borderless) set_borderless(g_hwnd, true);
+        kbm_window_created(g_hwnd);
     }
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -222,6 +226,10 @@ void gfx_screen_size(int* w, int* h) {
     const double k = echelle_ecran();
     *w = (int)lround(GetSystemMetrics(SM_CXSCREEN) / k);
     *h = (int)lround(GetSystemMetrics(SM_CYSCREEN) / k);
+}
+void gfx_screen_pixels(int* w, int* h) {   // pixels réels (le processus est compatible DPI) : format exact de l'écran
+    *w = GetSystemMetrics(SM_CXSCREEN);
+    *h = GetSystemMetrics(SM_CYSCREEN);
 }
 
 void gfx_count_frame(uint64_t frame) {

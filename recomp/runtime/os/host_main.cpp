@@ -204,6 +204,7 @@ LONG WINAPI veh(EXCEPTION_POINTERS* ep) {
         // par « Mémoire insuffisante »
         HLOG("PANIC", "the game is stopping: the PC is out of memory (%.1f GB available commit)", memoire_validable_libre_go());
         fflush(nullptr);
+        kbm_release();
         TerminateProcess(GetCurrentProcess(), 4);
     }
     if (g_crashing++) {
@@ -223,6 +224,7 @@ LONG WINAPI veh(EXCEPTION_POINTERS* ep) {
     print_guest_state();
     print_backtrace(ep->ContextRecord);
     fflush(nullptr);
+    kbm_release();
     TerminateProcess(GetCurrentProcess(), 3);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -372,6 +374,7 @@ void panic(const char* fmt, ...) {
         HLOG("PANIC", "cause: the PC is low on memory (%.1f GB available commit, about 8 are needed): close other "
                       "programs (other games, browser...) then restart", memoire_validable_libre_go());
     fflush(nullptr);
+    kbm_release();
     TerminateProcess(GetCurrentProcess(), g_manque_memoire ? 4 : 2);
     for (;;) {}
 }
@@ -591,6 +594,7 @@ void journal_systeme() {
     HLOG("PANIC", "%s; %.1f GB of available commit%s", quoi, libre,
          memoire ? ": the PC is out of memory (close other programs, other games, browser...)" : "");
     fflush(nullptr);
+    kbm_release();
     TerminateProcess(GetCurrentProcess(), memoire ? 4 : 3);
     for (;;) Sleep(INFINITE);
 }
@@ -735,6 +739,7 @@ int main(int argc, char** argv) {
     hle_os_init();
     hle_audio_init();
     hle_hid_init();
+    hle_kbm_init();
     uint64_t f2 = register_native("rtld:marquer_initialisé", native_nop);
     uint64_t f3 = register_native("rtld:init_modules", native_init_modules);
     uint64_t f4 = register_native("rtld:fini_modules", native_fini_modules);

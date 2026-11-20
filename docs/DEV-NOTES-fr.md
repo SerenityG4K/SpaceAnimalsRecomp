@@ -435,6 +435,11 @@ python link.py                                   # après modification du runtim
 | `RECOMP_KEY_SCRIPT="38:A,43:-A"` | appuis scriptés : bouton (A B X Y L R ZL ZR PLUS MINUS LEFT UP RIGHT DOWN LSTICK RSTICK) appuyé, ou relâché avec `-`, à l'instant donné en secondes. Tenir A 5 s passe une cinématique ; « 38:A,43:-A,52:A,57:-A » mène en général à l'entraînement en 70 s (selon les temps de chargement) |
 | `RECOMP_BACKGROUND_INPUT=1` | lit la manette XInput même quand la fenêtre n'a pas le focus (ancien comportement) |
 | `RECOMP_INPUT_LOG=1` | journal de chaque changement de bouton et de présence de la manette XInput |
+| `RECOMP_MOUSE_KEYBOARD=0\|1` | remplace `mouse_keyboard` de `recomp.ini` (mode souris du jeu, `hle_kbm.cpp`) |
+| `RECOMP_ASPECT=16:9\|21:9\|32:9\|auto` | remplace `aspect_ratio` de `recomp.ini` (format de l'image, `hle_gfx.cpp`) |
+| `RECOMP_HDR=0\|1` | remplace `hdr` de `recomp.ini` (sortie HDR10 du jeu, `hle_gfx.cpp`, `vk_render.cpp`) |
+| `RECOMP_HDR_LOSS_TEST=<image>` | à partir de cette image, l'écran est censé ne plus proposer le HDR10 (conversion HDR → SDR, essais) |
+| `RECOMP_JCMS_CONTACT=0\|1` | mode souris : Joy-Con 2 droit levé ou posé, quel que soit le focus de la fenêtre (essais sans joueur) |
 | `RECOMP_CNTFRQ=hz` | fréquence du compteur invité (31 250 000 par défaut, celle de la Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | ancienne réutilisation, par adresse, d'une image packagée sans comparer son contenu (textures périmées) |
 | `SHADERC_NO_CLIP=1` | (`shaderc.py`) traduit sans `gl_ClipDistance` |
@@ -3742,3 +3747,151 @@ lent). `RECOMP_NAN_SCAN=n` : compte les pixels NaN ou infinis des cibles flottan
 remplissait la mémoire de zéros en silence. `nvn_exec.cpp` : `CopyTextureToBuffer`, jamais exécutée, est notée si le
 jeu l'émet. `RECOMP_SHADER_WATCH=hash,hash` : les dessins qui emploient ces shaders (image, matériau, première cible),
 la première fois puis toutes les 600 images.
+
+## Mode souris : la souris du PC en Joy-Con 2 posé comme une souris (2026-11-19 ; pas publié)
+
+Demande de l'utilisateur : jouer au clavier et à la souris, avec le mode souris du jeu (Switch 2).
+
+* **Ce que le jeu lit.** La souris et le clavier USB (`nn::hid::GetMouseState(s)`, `GetKeyboardStates`) ne servent
+  qu'à l'interface, et seulement quand la variable `input.keyboard_mouse_input_on_nintendo_enabled` est vraie : la visée
+  à la souris passe par le capteur optique des Joy-Con 2 (« Jcms » : `nn::hid::InitializeJcms`, `GetJcmsHandle`,
+  `StartJcms`, `GetJcmsStates`, `StopJcms`, `FinalizeJcms`). Couche vwm (main+0xba67000…) : deux poignées par manette
+  (Joy-Con gauche, type 0 ; droit, type 1), jusqu'à 16 états lus par image, déplacements additionnés.
+  `JcmsState` (0x20 octets) : n° d'échantillon +8, dx +0x10, dy +0x14, attributs +0x18 (bit 0 capteur présent, bit 1
+  posé). Une manette « a une souris » si le bit 0 de l'état le plus récent est mis (événement 0x18 de vwm, lu par
+  `input.get_gamepad_supports_mouse` : l'option « Mode souris » des options de jeu n'apparaît qu'alors).
+* **Type de manette.** Style de Npad bit 12 = « joycon-dual-ms » (paire de Joy-Con 2), 13 et 14 = un Joy-Con 2 seul ;
+  la manette Pro (« fullkey ») ne joue pas à la souris. Mais le jeu n'accepte le bit 12 qu'au démarrage
+  (`SetSupportedNpadStyleSet` 0x741f) : la campagne solo demande 0x407 (portable, paire de Joy-Con, Pro, bit 10) et
+  refuse sans rien dire une manette d'un autre style (« Einzelspieler » sans effet). `svc_hid.cpp` présente donc la
+  paire comme la console : bit 12 s'il est accepté, sinon paire ordinaire (bit 2) ; LIFO JoyDual (+0x6c8 dans le SDK
+  21) et attributs « Joy-Con gauche et droit connectés » (bits 2 et 4), que le jeu exige.
+* **Ce qui allume le mode souris** (`player_input.vscript`, décompilé avec Ghidra 12.2 ; main+0x881ccfa0 dans l'image
+  de référence) : un Joy-Con posé (contact Jcms), la souris qui bouge (plus de 0,01), et son capteur de mouvement qui
+  le dit couché sur la tranche : accélération x > seuil (gauche) ou < −seuil (droit) ; il en ressort quand x revient
+  au-dessus de −0,5 (droit). `eclipse_action_map_manager.vscript` prend alors les tables d'actions de la souris (3 ou
+  4 : droitier, gaucher) : `player_input` rend le type d'entrée 2.
+* **Le vrai blocage : `GetSupportedNpadStyleSet` (hid, commande 101) rendait 0.** À la création de sa fenêtre, le jeu
+  demande les capteurs de mouvement (`GetSixAxisSensorHandles`, `StartSixAxisSensor`) seulement pour les styles qu'il
+  relit par cette commande (main+0xba68b5c) : avec 0, aucun capteur, une accélération nulle, et jamais de mode souris.
+  `svc_hid.cpp` rend maintenant les styles acceptés (avec le réglage).
+* **`hle_kbm.cpp`** remplace les fonctions Jcms du SDK : le Joy-Con droit du joueur 1 reçoit les déplacements bruts de
+  la souris (Raw Input, sans l'accélération de Windows, multipliés par `mouse_speed`), un état au plus toutes les 4 ms ;
+  il est posé tant que la fenêtre a le focus. Et `nn::hid::GetSixAxisSensorState` : au repos, le Joy-Con droit couché
+  sur la tranche (accélération x = −1 G) tant qu'il est posé, sinon à plat. Les boutons de la souris appuient sur des
+  boutons de la Switch (`input.cpp` ; par défaut R et ZR, les deux boutons sous les doigts d'un Joy-Con 2 tenu en
+  souris) ; le clavier pilote la manette comme avant.
+* **Le curseur de Windows** est caché et retenu dans l'image du jeu : en plein écran, dès que la fenêtre est active ;
+  en fenêtré, après un clic dans l'image (la barre de titre reste à portée pour déplacer ou redimensionner la fenêtre ;
+  F11 ou Alt+Entrée vers le fenêtré le rend). `mouse_release` (F9 par défaut, une touche comme `key_…`), Alt+Tab ou la
+  perte du focus le rendent ; un clic dans l'image le reprend, et ce clic n'appuie sur rien dans le jeu (les boutons
+  tenus à la reprise sont ignorés jusqu'à leur relâchement). Toutes les fins du processus (fenêtre fermée,
+  `ExitProcess` de l'invité, plantage, mémoire épuisée) appellent `kbm_release` avant de terminer. Les molettes à haute
+  résolution envoient des fractions du cran de 120 : elles s'additionnent jusqu'au cran. La capture est écrite pour
+  Windows : ailleurs, `mouse_keyboard` reste coupé (`settings.cpp`), pour le portage Linux.
+* **Capteurs de mouvement** : tant que le mode est mis, `GetSixAxisSensorState` répond toujours au repos (Joy-Con droit
+  sur la tranche tant qu'il est posé). C'est ce que le mode demande ; le runtime n'a de toute façon pas d'entrée de
+  mouvement venue des manettes du PC.
+* **Réglages** : `mouse_keyboard` (faux par défaut : manette Pro, rien ne change), `mouse_speed` (10 à 1000 %),
+  `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward`, `mouse_wheel_up`, `mouse_wheel_down` :
+  n'importe quelle action de la manette (`a` … `right`, `ls_up` … `rs_right`, `left_sl`, `left_sr`, `right_sl`,
+  `right_sr`, `none`) ; un cran de molette est un appui bref (80 ms). Launcher : page Contrôles, onglet SOURIS.
+* **Disposition du jeu en mode souris** (textes de l'interface, `ui_hud.locs_strings`, `HUD_TUTORIAL_PROMPT_R_MOUSE_…`) :
+  la souris dirige ; boost et frein sur le stick droit (haut, bas, tenus) ; inclinaison sur le stick gauche (gauche,
+  droite ; deux fois : tonneau ; les deux tenus : vol stationnaire) ; tir, tir secondaire, torpille et tonneau
+  selon la table d'actions du jeu (`fire_lasers`, `mouse_alt_fire`, `fire_bomb`, `mouse_barrel_roll_left` / `_right`).
+  Main gauche (`L_MOUSE`) : les sticks échangés. D'où la demande de l'utilisateur : toutes les entrées des deux
+  Joy-Con atteignables au clavier et à la souris.
+* **Clavier** : SL et SR de chaque Joy-Con ajoutés aux actions (`key_left_sl` … `key_right_sr`, bits 24 à 27 de
+  l'état Npad, aucune touche par défaut). Une touche peut demander Ctrl, Maj, Alt (`key_rs_up = shift+0x11`) :
+  `touches_actives` (`input.cpp`) garde la combinaison la plus précise de chaque touche (W : stick gauche, Maj+W :
+  stick droit), et une touche modificatrice liée seule ne compte pas pendant une combinaison qui se sert d'elle. Le
+  launcher saisit la combinaison (modificateurs tenus), ou la touche modificatrice relâchée seule. **AltGr** (AZERTY,
+  QWERTZ, US international…) : Windows le rapporte comme Ctrl gauche + Alt droit ; sur une disposition qui l'a (un de
+  ses caractères se tape avec Ctrl+Alt, `VkKeyScanExW`), Alt droit tenu ne compte ni comme Ctrl ni comme Alt, dans le
+  jeu (`host_modifiers_held`) comme dans la saisie du launcher. Les touches de confort des menus (Entrée, Retour
+  arrière, Échap, Tab) s'arrêtent dès que leur touche est liée, seule ou en combinaison. Un jeu construit avant les
+  combinaisons ignore ces touches : la page Contrôles le dit tant que le launcher propose une reconstruction.
+* **`recomp.ini`** : le bloc ajouté ne contient que `mouse_keyboard` (les autres réglages y sont expliqués) ; le
+  launcher n'écrit `mouse_speed` et les entrées `mouse_…` qu'une fois le mode mis (ou s'ils y sont déjà), et la ligne
+  SL · SR du clavier ne s'affiche qu'en mode souris. Launcher et jeu lisent ces réglages de la même façon (majuscules,
+  `yes` / `on` / `oui`, vitesse hors limites ramenée entre 10 et 1000).
+* **Pistes écartées** : la souris USB du jeu (variable ci-dessus) ne vise pas ; le style « joycon-dual-ms » imposé
+  ne suffit pas sans capteur de mouvement. Le léger lissage de la visée vient du jeu (réticule), pas de la souris.
+* **Références** : Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) pour Nmouse, Jcms et les
+  commandes 3110 et suivantes ; Pokopia passe par Nmouse, Star Fox lit Jcms lui-même. Les suffixes
+  `__alias_…__XXXXXXXX` des scripts sont le FNV-1a du chemin du script (`/data/eclipse/input/player_input.vscript` →
+  E6CAE361).
+
+## HDR : la sortie HDR10 du jeu (2026-11-19 ; pas publié)
+
+Demande de l'utilisateur : le HDR (issue n° 30). Référence : Triforce (OoT), mode « Native ».
+
+* **Le jeu a sa sortie HDR.** Il demande l'état de l'écran (`nn::vi::QueryDisplayHdrStatus` : actif, format, luminosité
+  maximale) et le blanc papier (`QueryDisplayHdrPaperWhite`). Le runtime répondait « pas de HDR » : le jeu notait
+  « HDR auto-calibration failed (SDR display?) ». Quand l'écran se dit HDR10 (vrai, format 1, maximum en nits), il se
+  calibre (« HDR auto-calibration: paperwhite 203, min (black) nits 0, max (white) nits 1000 »), donne ses
+  métadonnées (`SetLayerNextHdrStandardContentLuminanceRangeMetadata` 0 à 203 nits,
+  `SetLayerNextHdrExtendedContentLuminanceRangeMetadata` 0 à 1000 nits) et rend son image finale en RGB10A2 codé en PQ
+  (ST 2084, BT.2020), dès la première image présentée.
+* **Runtime** : `hle_gfx.cpp` ne dit « HDR10 » au jeu que si le réglage `hdr` est mis et que l'écran propose le HDR10
+  (`vkr::hdr_output`) ; `vk_render.cpp` active `VK_EXT_swapchain_colorspace` et crée alors la swapchain en
+  `A2B10G10R10` / `A2R10G10B10` + `VK_COLOR_SPACE_HDR10_ST2084_EXT` ; la copie de présentation passe l'image du jeu
+  telle quelle (PQ dans PQ). Sans HDR10 à l'écran (HDR désactivé dans Windows), le jeu reste en SDR, comme avant.
+  Journal : « HDR: the display offers HDR10 », « presented image: …, format 64 (NVN 61) ».
+* **Réglages** : `hdr` (faux par défaut), `hdr_peak` (400 à 10000 nits, 1000 par défaut), `hdr_paper_white` (80 à 500,
+  203 par défaut ; hors limites : ramenés dedans, comme dans le launcher) ; `RECOMP_HDR=0|1` remplace `hdr`. Launcher :
+  page Graphismes, onglets IMAGE · ÉCRAN.
+* **Une décision, une swapchain qui suit l'écran** (relecture de la PR, 2026-11-20) : ce qu'on dit au jeu (`g.hdr10`)
+  est décidé une fois, à la première création de la swapchain ; si le jeu demande avant que la fenêtre n'existe, la
+  réponse est SDR et la swapchain la suit. La swapchain, elle, suit ce que le pilote Vulkan propose pour la fenêtre :
+  regardé une fois par seconde et à chaque recréation. Quand il ne propose plus le HDR10 : swapchain SDR, et l'image PQ
+  du jeu passe par `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = blanc papier, épaule douce au-dessus de 0,8) avant
+  la copie de présentation ; HDR10 revenu : swapchain HDR10 de nouveau. Une image 8 bits sur la swapchain HDR10 fait le
+  chemin inverse (sRGB → PQ). `RECOMP_HDR_LOSS_TEST=n` fait comme si le pilote ne proposait plus le HDR10 à l'image n
+  (essayé : « the display no longer offers HDR10 », swapchain au format 50, le jeu continue).
+* **HDR coupé dans Windows en cours de partie (Win+Alt+B) : relancer le jeu.** Essayé le 2026-11-20 (NVIDIA,
+  Windows 11) : le pilote propose toujours le HDR10 après la bascule, la swapchain reste donc en HDR10 et Windows montre
+  l'image PQ du jeu trop claire sur le bureau SDR ; HDR remis, l'image redevient normale. Il faudrait lire l'état de
+  Windows lui-même (`DisplayConfigGetDeviceInfo`, couleur avancée), et sous Windows 11 24H2 la gestion automatique des
+  couleurs se dit aussi « couleur avancée » en SDR. Le jeu choisit d'ailleurs son HDR une fois, au démarrage, comme sur
+  la console : relancer est la voie normale, et ne vaut pas plus d'efforts ici.
+* **Format SDR** : `B8G8R8A8_SRGB` dans l'espace sRGB seulement (`VK_EXT_swapchain_colorspace` ajoute le même format
+  dans d'autres espaces : P3, sRGB étendu…).
+* **Instantanés et extraits du launcher** (`readback_half`) : en HDR, l'image présentée passe par la même conversion,
+  puis est réduite dans une image sRGB 8 bits (elles étaient sautées, d'où des images vides).
+* **DLSS / FSR en HDR** : leurs entrées et sorties sont en RGBA16F, dans la scène avant la sortie HDR : le HDR ne les
+  change pas ; seul le remplacement de l'agrandissement du jeu (`upsample.frag`) par leur sortie pleine taille voulait
+  une cible 8 bits. En HDR, le jeu agrandit dans une cible `B10G11R11` flottante (un échantillon, sans conversion) :
+  acceptée aussi (section DLSS).
+* **Pas fait** : pas de métadonnées HDR envoyées à l'écran (`VK_EXT_hdr_metadata` : Windows les ignore en général),
+  pas de RenoDX (il faudrait un jeu de shaders propre à Star Fox).
+
+## Format de l'image : 21:9, 32:9 en rendu natif (2026-11-19 ; pas publié)
+
+Demande de l'utilisateur : le 32:9 (issue n° 2), « fait proprement » : rendu natif à 5120 × 1440, interface correcte.
+
+* **Comment le moteur choisit sa taille** (décompilé, `vgame.out.c`, fonction main+0xb447300) : taille de la swapchain
+  = taille de l'écran (`nn::vi::ListDisplays`, gardée au démarrage du gestionnaire de fenêtres, main+0xba65b80), ramenée
+  composante par composante (`umin`) à la résolution maximale du mode (`QueryDisplayBufferMaxResolution` : table 16:9,
+  1280 × 720 à 3840 × 2160). Un écran 5120 × 1440 en mode 1440p donnait donc 2560 × 1440 (« requested_swapchain_dim_changed
+  … -> 2560x1440 »). Si la requête échoue, pas de réduction. Quand la taille demandée change, le moteur recrée lui-même
+  ses textures de fenêtre (3840 × 2160 au départ, puis 5120 × 1440 : `nvnWindowInitialize` une deuxième fois), ses cibles
+  de rendu suivent.
+* **Runtime** : `hle_gfx.cpp` `wide_display` (`gfx_virtual_display` pour les autres fichiers) : hauteur du mode
+  (réglage `resolution`), largeur = hauteur × format, paire ; `vi_list_displays` l'annonce, `vi_max_resolution` répond
+  0xC72 (non pris en charge) quand l'écran virtuel est plus large que 16:9 ; `svc_fs.cpp` `recomp_cvars` donne le
+  format réduit à la caméra (`render.aspect_ratio_x` / `_y`, 32 et 9 ; sans eux le moteur garde une caméra 16:9 et
+  étire l'image) ; la fenêtre hôte s'ouvre au format de l'écran virtuel. Journal : « virtual display widened:
+  5120x1440 », « nvnWindowInitialize: 3 textures 5120x1440 », « presented image: 5120x1440 ».
+* **Interface** : le moteur garde son canevas 16:9 au centre (titre, menus) ; rien à faire. Les variables
+  `render.ui_canvas_mode` / `_desired_width` essayées n'ont rien changé de visible.
+* **Réglages** : `aspect_ratio` = `16:9` (par défaut, comme avant), `21:9`, `32:9`, `auto` (format de l'écran du PC), ou
+  tout `l:h` entre 4:3 et 4:1 ; plus étroit que 16:9 : 16:9. `RECOMP_ASPECT` le remplace. Launcher : page Graphismes,
+  onglet ÉCRAN (ex-HDR), ligne Format.
+* **Les écrans « 21:9 »** ne sont pas en 21:9 : 3440 × 1440 est en 43:18 (2,389), 2560 × 1080 en 64:27 (2,370), 3840 ×
+  1600 en 12:5. Un format choisi à moins de 4 % de celui de l'écran prend le format exact de l'écran (mesuré en pixels
+  réels, `gfx_screen_pixels`, pas en points : l'arrondi de la mise à l'échelle le faussait). Et la copie de
+  présentation remplit la fenêtre quand les bandes noires feraient 2 pixels ou moins.
+* **Limites vues** : certains décors sont des images faites pour le 16:9 (la Terre de l'écran titre s'arrête avant le
+  bord gauche en 32:9). Le jeu en vol (affichage tête haute, viseur) n'a pas encore été vérifié en 32:9.

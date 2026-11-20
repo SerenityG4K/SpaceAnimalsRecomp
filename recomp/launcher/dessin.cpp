@@ -739,8 +739,55 @@ void page_reglages() {
 // Page Graphismes (2026-11-12, demande de l'utilisateur) : tout ce qui touche à l'image (recomp.ini du jeu). Le soir,
 // autre demande : choisir la carte graphique (une carte AMD par exemple ; le DLSS n'est alors plus proposé), et dire
 // que toutes les mises à l'échelle sont expérimentales (DLSS Qualité à Ultra perf., rendu 3D sous 100 %).
+// ---- page Graphismes : onglets IMAGE · ÉCRAN, à droite du titre (comme ceux de la page Contrôles)
+void onglets_graphismes() {
+    float x = PX0 + 200;
+    const float y = PY0 + 20;
+    static const int ids[2] = {Z_ONGLET_IMAGE, Z_ONGLET_HDR};
+    static const char* const noms[2] = {"ong_image", "ong_hdr"};
+    for (int k = 0; k < 2; k++) {
+        const bool ouvert = k == g.onglet_graphismes;
+        const float w = texte(T(noms[k]), F_PETIT, x, y, ouvert ? VERT : survol(ids[k]) ? BLANC : GRIS, 1.f, 2.f);
+        if (ouvert) ligne(x, y + 17, x + w - 2, y + 17, VERT, 1.f, 1.f);
+        zone(D2D1::RectF(x - 6, y - 5, x + w + 6, y + 21), ids[k]);
+        x += w + 26;
+    }
+}
+
+// ---- onglet ÉCRAN : format de l'image (runtime/os/hle_gfx.cpp gfx_virtual_display : écran virtuel plus large que
+// 16:9, rendu natif), puis la sortie HDR10 du jeu (hle_gfx.cpp et vk_render.cpp), quand l'écran est en HDR dans
+// Windows ; luminosité maximale de l'écran et blanc papier donnés au jeu, qui se calibre avec.
+void page_hdr() {
+    float y = PY0 + 60;
+    const float pas = 33;
+    wchar_t v[32];
+    libelle(y, "reg_format", "reg_format_aide");
+    const std::string& f = g.reglages.format;
+    if (f == "auto") wcscpy(v, T("auto_ecran"));
+    else if (f == "16:9") wcscpy(v, T("format_169"));
+    else swprintf(v, 32, L"%ls", std::wstring(f.begin(), f.end()).c_str());   // ASCII (« 21:9 »)
+    selecteur(y, v, Z_FORMAT_G, Z_FORMAT_D);
+    y += pas + 6;
+    libelle(y, "hdr_mode", "hdr_mode_aide");
+    selecteur(y, T(g.reglages.hdr ? "sou_oui" : "sou_non"), Z_HDR_G, Z_HDR_D);
+    y += pas + 6;
+    libelle(y, "hdr_pic", "hdr_pic_aide");
+    swprintf(v, 32, L"%d nits", g.reglages.hdr_pic);
+    selecteur(y, v, Z_HDR_PIC_G, Z_HDR_PIC_D, g.reglages.hdr);
+    y += pas + 6;
+    libelle(y, "hdr_blanc", "hdr_blanc_aide");
+    swprintf(v, 32, L"%d nits", g.reglages.hdr_blanc);
+    selecteur(y, v, Z_HDR_BLANC_G, Z_HDR_BLANC_D, g.reglages.hdr);
+    texte_lignes(T("hdr_note"), F_PETIT, PX0 + 24, PY1 - 88, PX1 - PX0 - 48, GRIS);
+}
+
 void page_graphismes() {
     panneau(T("gra_titre"));
+    onglets_graphismes();
+    if (g.onglet_graphismes == 1) {
+        page_hdr();
+        return;
+    }
     float y = PY0 + 58;
     const float pas = 33;   // neuf réglages depuis le FSR (2026-11-12)
     wchar_t v[64];
@@ -838,8 +885,17 @@ void page_graphismes() {
     texte_lignes(T("gra_note"), F_PETIT, PX0 + 24, y + 12, PX1 - PX0 - 48, GRIS);
 }
 
-// Nom d'une touche d'après son scancode (0xE0xx : touche étendue), sur le clavier réglé dans Windows
-std::wstring nom_touche(UINT sc) {
+// Nom d'une touche d'après son scancode (0xE0xx : touche étendue), sur le clavier réglé dans Windows ; avec ses
+// modificateurs (MOD_*) : « Ctrl + Maj + W »
+std::wstring nom_touche_seule(UINT sc);
+std::wstring nom_touche(UINT t) {
+    std::wstring s;
+    if (t & MODIF_CTRL) s += T("mod_ctrl"), s += L" + ";
+    if (t & MODIF_SHIFT) s += T("mod_maj"), s += L" + ";
+    if (t & MODIF_ALT) s += T("mod_alt"), s += L" + ";
+    return s + nom_touche_seule(t & 0xFFFF);
+}
+std::wstring nom_touche_seule(UINT sc) {
     switch (sc) {
     case 0: return L"—";
     case 0xE048: return L"↑";
@@ -852,14 +908,16 @@ std::wstring nom_touche(UINT sc) {
     return b;
 }
 
-// ---- page Contrôles : onglets CLAVIER · MANETTE, à droite du titre (soulignés comme FR · EN)
+// ---- page Contrôles : onglets CLAVIER · MANETTE · SOURIS, à droite du titre (soulignés comme FR · EN)
 void onglets_controles() {
     float x = PX0 + 200;
     const float y = PY0 + 20;
-    for (int k = 0; k < 2; k++) {
-        const int id = k ? Z_ONGLET_MANETTE : Z_ONGLET_CLAVIER;
-        const bool ouvert = (k == 1) == g.onglet_manette;
-        const float w = texte(T(k ? "ong_manette" : "ong_clavier"), F_PETIT, x, y, ouvert ? VERT : survol(id) ? BLANC : GRIS, 1.f, 2.f);
+    static const int ids[3] = {Z_ONGLET_CLAVIER, Z_ONGLET_MANETTE, Z_ONGLET_SOURIS};
+    static const char* const noms[3] = {"ong_clavier", "ong_manette", "ong_souris"};
+    for (int k = 0; k < 3; k++) {
+        const int id = ids[k];
+        const bool ouvert = k == g.onglet_controles;
+        const float w = texte(T(noms[k]), F_PETIT, x, y, ouvert ? VERT : survol(id) ? BLANC : GRIS, 1.f, 2.f);
         if (ouvert) ligne(x, y + 17, x + w - 2, y + 17, VERT, 1.f, 1.f);
         zone(D2D1::RectF(x - 6, y - 5, x + w + 6, y + 21), id);
         x += w + 26;
@@ -1353,11 +1411,51 @@ void case_touche(float x0, float x1, float y, int action, const wchar_t* prefixe
     zone(D2D1::RectF(x0, y, x1, y + 20), id);
 }
 
+// ---- onglet Souris : mode souris du jeu (runtime/os/hle_kbm.cpp). La souris du PC devient le Joy-Con 2 droit posé comme
+// une souris : le jeu vise alors à la souris de lui-même, comme sur la console ; ses boutons appuient sur des boutons de
+// la Switch (par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris).
+// bouton de la Switch d'un bouton de la souris : -1 = aucun
+// action de la manette d'une entrée de la souris : -1 = aucune ; bouton, direction d'un stick, SL ou SR
+std::wstring nom_bouton_souris(int b) {
+    static const wchar_t* const sens[4] = {L" ↑", L" ↓", L" ←", L" →"};
+    if (b >= 0 && b < NB_PAD) return nom_bouton_switch(b);
+    if (b >= K_LS_UP && b <= K_RS_RIGHT) return std::wstring(T(b < K_RS_UP ? "stick_g" : "stick_d")) + sens[(b - K_LS_UP) % 4];
+    static const char* const slsr[4] = {"sl_g", "sr_g", "sl_d", "sr_d"};
+    if (b >= K_LSL && b <= K_RSR) return T(slsr[b - K_LSL]);
+    return T("sou_aucun");
+}
+
+void page_souris() {
+    float y = PY0 + 60;
+    const float pas = 33;
+    libelle(y, "sou_mode", "sou_mode_aide");
+    selecteur(y, T(g.reglages.souris ? "sou_oui" : "sou_non"), Z_SOURIS_G, Z_SOURIS_D);
+    y += pas + 6;
+    wchar_t v[32];
+    libelle(y, "sou_vitesse", "sou_vitesse_aide");
+    swprintf(v, 32, L"%d %%", g.reglages.souris_vitesse);
+    selecteur(y, v, Z_SOURIS_VIT_G, Z_SOURIS_VIT_D, g.reglages.souris);
+    y += pas + 6;
+    static const char* const boutons[NB_BOUTONS_SOURIS] = {"sou_gauche", "sou_droit", "sou_milieu", "sou_arriere",
+                                                           "sou_avant", "sou_molette_haut", "sou_molette_bas"};
+    for (int i = 0; i < NB_BOUTONS_SOURIS; i++) {
+        libelle(y, boutons[i], nullptr);
+        selecteur(y, nom_bouton_souris(g.reglages.souris_boutons[i]).c_str(), Z_SOURIS_B0 + 2 * i, Z_SOURIS_B0 + 2 * i + 1,
+                  g.reglages.souris);
+        y += pas;
+    }
+    texte_lignes(T("sou_note"), F_PETIT, PX0 + 24, PY1 - 70, PX1 - PX0 - 48, GRIS);
+}
+
 void page_controles() {
     panneau(T("ctl_titre"));
     onglets_controles();
-    if (g.onglet_manette) {
+    if (g.onglet_controles == 1) {
         page_manette();
+        return;
+    }
+    if (g.onglet_controles == 2) {
+        page_souris();
         return;
     }
     float y = PY0 + 54;
@@ -1373,7 +1471,7 @@ void page_controles() {
     y += 20;
     const std::wstring ou = g.langue == Langue::Fr ? L"ou  " : L"or  ";
     struct Ligne { std::wstring bouton; std::vector<int> actions; std::wstring manette; unsigned confort; };
-    const std::vector<Ligne> L = {
+    std::vector<Ligne> L = {
         {L"A", {K_A}, L"B  /  ○", 0x1C},
         {L"B", {K_B}, L"A  /  ✕", 0x0E},
         {L"X", {K_X}, L"Y  /  △", 0},
@@ -1388,8 +1486,11 @@ void page_controles() {
         {T("stick_d"), {K_RS_UP, K_RS_LEFT, K_RS_DOWN, K_RS_RIGHT, K_RSTICK}, T("stick_d"), 0},
         {T("croix"), {K_UP, K_LEFT, K_DOWN, K_RIGHT}, T("croix"), 0},
     };
+    // SL et SR de chaque Joy-Con : seulement en mode souris (la manette Pro, sinon, n'en a pas)
+    if (g.reglages.souris) L.push_back({T("slsr"), {K_LSL, K_LSR, K_RSL, K_RSR}, L"—", 0});
     static const wchar_t* const sens[5] = {L"▲", L"◀", L"▼", L"▶", L"●"};
-    const float pas = 23, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
+    static const wchar_t* const slsr[4] = {L"L·SL", L"L·SR", L"R·SL", L"R·SR"};
+    const float pas = g.reglages.souris ? 22 : 23, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
     for (size_t i = 0; i < L.size(); i++) {
         if (i % 2 == 0) rect(c0 - 8, y - 2, PX1 - 24, y + 21, VERT, 0.035f);
         texte(L[i].bouton, F_GRAS, c0, y + 1, BLANC, 1.f, 0.f, 0, c1 - c0 - 6);
@@ -1397,19 +1498,26 @@ void page_controles() {
             case_touche(c1, c1 + 2 * lc + esp, y, L[i].actions[0], nullptr);
             // touche de confort des menus (Entrée, Retour arrière, Échap, Tab), tant qu'elle n'est donnée à aucune action
             bool prise = false;
-            for (unsigned t : g.reglages.touches) prise = prise || t == L[i].confort;
+            for (unsigned t : g.reglages.touches) prise = prise || (t & 0xFFFF) == L[i].confort;   // seule ou combinée
             if (L[i].confort && !prise)
                 texte(ou + nom_touche(L[i].confort), F_PETIT, c1 + 2 * lc + esp + 10, y + 3, GRIS, 1.f, 0.f, 0, c1f - (c1 + 2 * lc + esp + 10));
         } else {
             for (size_t k = 0; k < L[i].actions.size(); k++)
-                case_touche(c1 + k * (lc + esp), c1 + k * (lc + esp) + lc, y, L[i].actions[k], sens[k]);
+                case_touche(c1 + k * (lc + esp), c1 + k * (lc + esp) + lc, y, L[i].actions[k],
+                            L[i].actions[0] == K_LSL ? slsr[k] : sens[k]);
         }
         // bouton de la manette : réglé dans l'onglet Manette (A … − : une entrée ; sticks et croix : le texte fixe)
         const std::wstring m = L[i].actions.size() == 1 ? nom_entree(g.reglages.manette[L[i].actions[0]], 0) : L[i].manette;
         texte(m, F_CORPS, c2, y + 1, TEXTE, 1.f, 0.f, 0, PX1 - 24 - c2);
         y += pas;
     }
-    texte_lignes(T(g.capture >= 0 ? "ctl_attente" : "ctl_note"), F_PETIT, c0, PY1 - 52, PX1 - PX0 - 48, g.capture >= 0 ? VERT : GRIS);
+    // une combinaison (Ctrl, Maj, Alt) alors que le jeu attend sa reconstruction : un jeu construit avant les
+    // combinaisons ignore ces touches ; la note le dit
+    bool combinaison = false;
+    for (unsigned t : g.reglages.touches) combinaison = combinaison || (t & (MODIF_CTRL | MODIF_SHIFT | MODIF_ALT));
+    const bool avertir = g.capture < 0 && combinaison && g.jeu_obsolete;
+    texte_lignes(T(g.capture >= 0 ? "ctl_attente" : avertir ? "ctl_note_reconstruire" : "ctl_note"), F_PETIT, c0, PY1 - 52,
+                 PX1 - PX0 - 48, g.capture >= 0 ? VERT : avertir ? TEXTE : GRIS);
 }
 
 std::wstring duree_txt(ULONGLONG ms) {

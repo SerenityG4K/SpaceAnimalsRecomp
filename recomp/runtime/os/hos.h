@@ -207,6 +207,8 @@ std::string save_dir_path();   // svc_fs.cpp : dossier des sauvegardes du joueur
 void hle_os_init();   // hle_os.cpp : fibres nn::os
 void hle_audio_init();
 void hle_hid_init();     // svc_hid.cpp : vibrations (nn::hid::SendVibrationValue)
+void hle_kbm_init();     // hle_kbm.cpp : souris du PC → capteur souris du Joy-Con 2 droit (réglage mouse_keyboard)
+void kbm_release();      // hle_kbm.cpp : curseur de Windows rendu s'il est retenu (avant de terminer le processus)
 // crée un nn::os::SystemEventType invité (vrai événement noyau) et renvoie son objet noyau
 std::shared_ptr<KObject> hle_make_system_event(CPUState* ctx, uint64_t system_event);   // hle_audio.cpp : flux audio nn::audio
 // neutralise toutes les fonctions qu'importe main dans un espace de noms (préfixe mangled) :

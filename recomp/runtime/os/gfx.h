@@ -15,6 +15,10 @@ void gfx_count_frame(uint64_t frame);
 // écran virtuel (hle_gfx.cpp) : période de vblank en ticks du compteur invité (31,25 MHz), image affichée à un vblank
 uint64_t vi_vblank_period();
 void gfx_screen_size(int* w, int* h);   // résolution de l'écran principal de l'hôte
+void gfx_screen_pixels(int* w, int* h); // la même en pixels réels, sans la mise à l'échelle de Windows (son format exact)
+// Écran virtuel annoncé au jeu (hle_gfx.cpp) : hauteur du mode (réglage resolution), largeur selon le format (réglage
+// aspect_ratio). Rend vrai s'il est plus large que 16:9.
+bool gfx_virtual_display(int* w, int* h);
 void vi_frame_displayed(uint64_t frame, uint64_t queued_tick, uint64_t shown_tick);                  // compteur img/s quand Vulkan présente
 
 // Entrées hôte (input.cpp) : clavier (si la fenêtre a le focus) + première manette XInput,
@@ -28,5 +32,14 @@ HostPad host_poll_input();
 // Vibration envoyée par le jeu (svc_hid.cpp, nn::hid::SendVibrationValue) pour un côté de la manette (0 gauche,
 // 1 droite) : amplitudes 0..1 et fréquences (Hz) des bandes basse et haute ; appliquée par input.cpp à 60 Hz.
 void host_set_vibration(int side, float amp_low, float freq_low, float amp_high, float freq_high);
+// Souris du jeu (hle_kbm.cpp, réglage mouse_keyboard) : Raw Input enregistré à la création de la fenêtre ; messages de la
+// fenêtre qui la concernent (vrai : traité, *res est la réponse) ; boutons de la souris appuyés pendant la capture
+// (bits Settings::M_GAUCHE…, 0 hors capture), que input.cpp change en boutons de la manette.
+void kbm_window_created(void* hwnd);
+bool kbm_wndproc(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp, intptr_t* res);
+uint32_t kbm_mouse_buttons();
+void kbm_release();   // (aussi dans hos.h) curseur de Windows rendu s'il est retenu, avant de terminer le processus
+// Ctrl, Maj, Alt tenus (Settings::MODIF_*, input.cpp) ; AltGr ne compte ni comme Ctrl ni comme Alt
+unsigned host_modifiers_held();
 
 }  // namespace hos

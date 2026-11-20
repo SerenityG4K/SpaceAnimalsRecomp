@@ -14,7 +14,14 @@
 // pendant l'écriture), état 0x28 } } ; état = { u64 n° d'échantillon, u64 boutons, sticks
 // gauche/droit (s32 x, y), u32 attributs (bit 0 connecté), u32 réservé }. Le SDK exige des numéros
 // d'échantillon consécutifs.
+//
+// Réglage mouse_keyboard (mode souris, hle_kbm.cpp) : la manette est présentée comme une paire de Joy-Con 2, seul
+// type de manette avec lequel le jeu joue à la souris (« joycon-dual-ms », style bit 12) quand il accepte ce style,
+// comme une paire de Joy-Con ordinaire (bit 2) sinon (style_npad). Le SDK lit ces deux styles avec
+// GetNpadState(NpadJoyDualState) dans le LIFO JoyDual (+0x6c8, lu dans le SDK 21 : queue +0x6d8, nombre +0x6e0) ; le
+// jeu exige les attributs « Joy-Con gauche et droit connectés » (bits 2 et 4). Mêmes boutons et sticks.
 #include "gfx.h"
+#include "settings.h"
 #include "svc_util.h"
 
 #include <atomic>
@@ -30,6 +37,31 @@ constexpr uint64_t HID_SHMEM_SIZE = 0x40000;
 constexpr uint64_t NPAD_BASE = 0x9A00, NPAD_STRIDE = 0x5000, NPAD_COND = 0x3E200;
 constexpr uint64_t LIFO_FULLKEY = 0x28, LIFO_N = 17, LIFO_ENTRY = 0x30;
 constexpr uint32_t STYLE_FULLKEY = 1u << 0, DEVICE_FULLKEY = 1u << 0;
+// paire de Joy-Con 2 (mode souris) : style « joycon-dual-ms » du jeu, LIFO JoyDual, Joy-Con gauche et droit (types de
+// périphérique de la Switch 1) ; attributs : connectée, Joy-Con gauche connecté, Joy-Con droit connecté
+constexpr uint64_t LIFO_JOYDUAL = 0x6c8;
+constexpr uint32_t STYLE_JOYDUAL2 = 1u << 12, DEVICE_JOYDUAL = (1u << 4) | (1u << 5);
+constexpr uint32_t ATTR_CONNECTE = 1u << 0, ATTR_JOYDUAL = ATTR_CONNECTE | (1u << 2) | (1u << 4);
+
+constexpr uint32_t STYLE_JOYDUAL = 1u << 2;
+
+// Paire de Joy-Con 2 présentée comme le fait la console : selon les styles que le jeu accepte à cet instant
+// (SetSupportedNpadStyleSet, commande 100), « joycon-dual-ms » (bit 12) s'il est accepté, sinon une paire de Joy-Con
+// ordinaire (bit 2), sinon une manette Pro. Le jeu n'accepte le bit 12 que pour son mode souris (input.set_joycon_mode,
+// main+0xba66538 : type 2 du jeu → 0x1000) ; ailleurs, la campagne solo par exemple, il demande une paire ordinaire et
+// refuse sans rien dire une manette d'un autre style (le 2026-11-19 : « Einzelspieler » sans effet). Les deux LIFO
+// (FullKey et JoyDual) reçoivent chaque état.
+std::atomic<uint32_t> g_styles_acceptes{STYLE_JOYDUAL};
+bool joycon2() { return settings().mouse_keyboard; }
+uint32_t style_npad() {
+    if (!joycon2()) return STYLE_FULLKEY;
+    static std::atomic<uint32_t> dernier{STYLE_JOYDUAL};   // aucun style connu accepté (0 pendant un changement) : on garde
+    const uint32_t a = g_styles_acceptes.load();
+    if (a & STYLE_JOYDUAL2) dernier = STYLE_JOYDUAL2;
+    else if (a & STYLE_JOYDUAL) dernier = STYLE_JOYDUAL;
+    else if (a & STYLE_FULLKEY) dernier = STYLE_FULLKEY;
+    return dernier.load();
+}
 
 std::shared_ptr<KObject>& hid_shmem() {
     static std::shared_ptr<KObject> s;
@@ -46,13 +78,19 @@ T ld(const uint8_t* p) { return __atomic_load_n((const T*)p, __ATOMIC_ACQUIRE); 
 
 void write_static(uint8_t* m) {
     uint8_t* n = m + NPAD_BASE;   // joueur 1
-    st<uint32_t>(n + 0x00, STYLE_FULLKEY);
+    st<uint32_t>(n + 0x00, style_npad());
     st<uint32_t>(n + 0x04, 0);            // assignation : double
     st<uint32_t>(n + 0x08, 0);            // couleurs FullKey : valides
     st<uint32_t>(n + 0x0c, 0x2d2d2d);     // corps
     st<uint32_t>(n + 0x10, 0xe6e6e6);     // boutons
+    st<uint32_t>(n + 0x14, 0);            // couleurs Joy-Con : valides (corps, boutons du gauche puis du droit)
+    st<uint32_t>(n + 0x18, 0x2d2d2d);
+    st<uint32_t>(n + 0x1c, 0xe6e6e6);
+    st<uint32_t>(n + 0x20, 0x2d2d2d);
+    st<uint32_t>(n + 0x24, 0xe6e6e6);
     st<uint64_t>(n + LIFO_FULLKEY + 8, LIFO_N);
-    st<uint32_t>(n + 0x4188, DEVICE_FULLKEY);
+    if (joycon2()) st<uint64_t>(n + LIFO_JOYDUAL + 8, LIFO_N);
+    st<uint32_t>(n + 0x4188, joycon2() ? DEVICE_JOYDUAL : DEVICE_FULLKEY);
     st<uint64_t>(n + 0x4190, (1u << 13) | (1u << 14) | (1u << 15));   // utilise +, -, croix
     for (int i = 0; i < 3; i++) st<uint32_t>(n + 0x419c + 4 * i, 4);   // batteries pleines
     uint8_t* c = m + NPAD_COND;
@@ -62,7 +100,7 @@ void write_static(uint8_t* m) {
     st<uint8_t>(c + 0xc, 1);
 }
 
-void lifo_push(uint8_t* L, uint64_t sample, const HostPad& p) {
+void lifo_push(uint8_t* L, uint64_t sample, const HostPad& p, uint32_t attr) {
     uint64_t tail = ld<uint64_t>(L + 0x10), count = ld<uint64_t>(L + 0x18);
     uint64_t nt = (tail + 1) % LIFO_N;
     uint8_t* e = L + 0x20 + nt * LIFO_ENTRY;
@@ -76,13 +114,31 @@ void lifo_push(uint8_t* L, uint64_t sample, const HostPad& p) {
     memcpy(s + 0x14, &p.ly, 4);
     memcpy(s + 0x18, &p.rx, 4);
     memcpy(s + 0x1c, &p.ry, 4);
-    uint32_t attr = 1, rsv = 0;           // connecté
+    const uint32_t rsv = 0;
     memcpy(s + 0x20, &attr, 4);
     memcpy(s + 0x24, &rsv, 4);
     st<uint64_t>(e, seq);
     st<uint64_t>(L + 0x00, sample);
     st<uint64_t>(L + 0x10, nt);
     st<uint64_t>(L + 0x18, std::min<uint64_t>(count + 1, LIFO_N - 1));
+}
+
+// état du joueur 1 dans le LIFO FullKey, et dans le LIFO JoyDual pour la paire de Joy-Con 2 ; style présenté tenu à
+// jour (il suit les styles acceptés par le jeu)
+void push_npad(uint8_t* m, uint64_t sample, const HostPad& p) {
+    uint8_t* n = m + NPAD_BASE;
+    if (joycon2()) {
+        const uint32_t s = style_npad();
+        if (ld<uint32_t>(n) != s) {
+            st<uint32_t>(n, s);
+            HLOG("hid", "player 1 now shown as %s (styles accepted by the game: 0x%x)",
+                 s == STYLE_JOYDUAL2 ? "a Joy-Con 2 pair with mouse (joycon-dual-ms)"
+                 : s == STYLE_JOYDUAL ? "a Joy-Con pair (joycon-dual)" : "a Pro controller",
+                 g_styles_acceptes.load());
+        }
+        lifo_push(n + LIFO_JOYDUAL, sample, p, ATTR_JOYDUAL);
+    }
+    lifo_push(n + LIFO_FULLKEY, sample, p, ATTR_CONNECTE);
 }
 
 void input_thread() {
@@ -98,7 +154,7 @@ void input_thread() {
         if (!m) continue;
         HostPad p = host_poll_input();
         st<uint32_t>(m + NPAD_COND + 0x8, g_hold_type.load());
-        lifo_push(m + NPAD_BASE + LIFO_FULLKEY, ++sample, p);
+        push_npad(m, ++sample, p);
         if (p.buttons != last_buttons && (g_verbose >= 2 || input_log))
             HLOG("hid", "buttons 0x%llx, sticks (%d,%d) (%d,%d)", (unsigned long long)p.buttons, p.lx, p.ly,
                  p.rx, p.ry);
@@ -114,9 +170,10 @@ void start_input() {
     std::call_once(once, [] {
         uint8_t* m = kernel_shmem_ptr(hid_shmem().get());
         write_static(m);
-        lifo_push(m + NPAD_BASE + LIFO_FULLKEY, 0, HostPad{});   // un premier état « connecté »
+        push_npad(m, 0, HostPad{});   // un premier état « connecté »
         std::thread(input_thread).detach();
-        HLOG("hid", "emulated Pro controller connected (player 1)");
+        HLOG("hid", "emulated %s connected (player 1)",
+             joycon2() ? "Joy-Con 2 pair (mouse mode)" : "Pro controller");
     });
 }
 
@@ -161,6 +218,21 @@ std::shared_ptr<Service> make_hid(const char* n) {
         }
         if (r.cmd == 203) {   // CreateActiveVibrationDeviceList → IActiveVibrationDeviceList
             r.out_objects.push_back(svc("hid:IActiveVibrationDeviceList", [](Request&) { return true; }));
+            return true;
+        }
+        if (r.cmd == 100 && r.in_size >= 4) {   // SetSupportedNpadStyleSet(styles, aruid) : suivi pour la paire de Joy-Con 2
+            const uint32_t s = r.arg<uint32_t>(0);
+            static std::atomic<int> nlog{0};
+            if (g_styles_acceptes.exchange(s) != s && joycon2() && nlog++ < 40)
+                HLOG("hid", "SetSupportedNpadStyleSet: styles 0x%x accepted by the game", s);
+        }
+        if (r.cmd == 101 && joycon2()) {   // GetSupportedNpadStyleSet(aruid) → styles acceptés
+            // Le jeu en déduit, à la création de sa fenêtre, pour quels styles demander les capteurs de mouvement
+            // (main+0xba68b5c : GetSixAxisSensorHandles avec les styles acceptés) ; 0 : aucun capteur, et sans
+            // capteur le mode souris ne s'allume jamais (player_input.vscript, Joy-Con droit couché sur la tranche).
+            const uint32_t s = g_styles_acceptes.load();
+            r.out.assign(8, 0);
+            memcpy(r.out.data(), &s, 4);
             return true;
         }
         if (r.cmd == 120 && r.in_size >= 16) {   // SetNpadJoyHoldType(aruid, type)

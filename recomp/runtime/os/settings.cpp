@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -128,6 +129,50 @@ const char* const kCleRendu = R"(
 fast_rendering = true
 )";
 
+// Apparu après la 1.1.0 (mode souris du jeu, hle_kbm.cpp)
+const char* const kCleSouris = R"(
+; Souris et clavier : true ou false. La manette émulée devient une paire de Joy-Con 2 et la souris du PC le Joy-Con 2
+; droit posé comme une souris : le jeu passe dans son mode souris (sensibilité réglable dans ses options). Le curseur
+; de Windows est retenu dans l'image du jeu (en fenêtré, après un clic dedans) ; mouse_release (F9 par défaut, 0x43)
+; ou Alt+Tab le rendent. Le clavier pilote la manette comme d'habitude (touches key_...). Réglages facultatifs, page
+; Contrôles du launcher, onglet Souris : mouse_speed, vitesse de la souris en % (10 à 1000, 100 par défaut) ;
+; mouse_left (r par défaut), mouse_right (zr), mouse_middle (rstick), mouse_back, mouse_forward, mouse_wheel_up,
+; mouse_wheel_down : action de la manette de chaque entrée de la souris (a, b, x, y, l, r, zl, zr, plus, minus, lstick,
+; rstick, up, down, left, right, ls_up, ls_down, ls_left, ls_right, rs_up, rs_down, rs_left, rs_right, left_sl,
+; left_sr, right_sl, right_sr, ou none).
+; Mouse and keyboard: true or false. The emulated controller becomes a pair of Joy-Con 2 and the PC mouse the right
+; Joy-Con 2 laid down as a mouse: the game enters its mouse mode (sensitivity set in its options). The Windows cursor is
+; held in the game's picture (windowed: after a click in it); mouse_release (F9 by default, 0x43) or Alt+Tab releases
+; it. The keyboard drives the controller as usual (key_... keys). Optional settings, launcher's Controls page, Mouse
+; tab: mouse_speed, mouse speed in % (10 to 1000, 100 by default); mouse_left (r by default), mouse_right (zr),
+; mouse_middle (rstick), mouse_back, mouse_forward, mouse_wheel_up, mouse_wheel_down: controller action of each mouse
+; input (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down, left, right, ls_up, ls_down, ls_left,
+; ls_right, rs_up, rs_down, rs_left, rs_right, left_sl, left_sr, right_sl, right_sr, or none).
+mouse_keyboard = false
+)";
+
+// Apparu après la 1.1.0 (HDR, hle_gfx.cpp et vk_render.cpp)
+const char* const kCleHdr = R"(
+; HDR : true ou false. Le jeu a sa propre sortie HDR10 ; il s'en sert quand l'écran est en HDR (activé dans les
+; paramètres d'affichage de Windows), sinon il reste en SDR. hdr_peak : luminosité maximale de l'écran, en nits (400 à
+; 10000). hdr_paper_white : blanc papier, la luminosité du blanc de l'interface et des scènes SDR, en nits (80 à 500).
+; HDR: true or false. The game has its own HDR10 output; it uses it when the screen is in HDR (turned on in Windows'
+; display settings), otherwise it stays in SDR. hdr_peak: the screen's peak brightness, in nits (400 to 10000).
+; hdr_paper_white: paper white, the brightness of the interface and SDR scenes' white, in nits (80 to 500).
+hdr = false
+hdr_peak = 1000
+hdr_paper_white = 203
+)";
+
+// Apparu après la 1.1.0 (format de l'image, hle_gfx.cpp gfx_virtual_display)
+const char* const kCleFormat = R"(
+; Format de l'image : 16:9 (celui de la console), 21:9, 32:9, ou auto (celui de l'écran). Plus large que 16:9, le jeu
+; rend nativement à ce format : il voit plus large, l'interface reste au centre. resolution donne la hauteur.
+; Aspect ratio: 16:9 (the console's), 21:9, 32:9, or auto (the screen's). Wider than 16:9, the game renders natively
+; in that format: it sees wider, the interface stays in the middle. resolution gives the height.
+aspect_ratio = 16:9
+)";
+
 // Apparu après la 1.0.3 (FSR d'AMD, 2026-11-12)
 const char* const kCleFsr = R"(
 ; FSR d'AMD à la place de l'anticrénelage du jeu, sur toute carte graphique (AMD, NVIDIA, Intel) : off, native (rendu
@@ -160,10 +205,12 @@ const char* const kCleGpu = R"(
 gpu = auto
 )";
 
-// noms des actions dans les clés key_… et pad_… (ordre de Settings::keys ; les 16 premières sont les boutons)
+// noms des actions dans les clés key_… et pad_… (ordre de Settings::keys ; les 16 premières sont les boutons, puis les
+// directions des sticks, puis SL et SR de chaque Joy-Con)
 const char* const kNomsActions[Settings::K_NB] = {
     "a", "b", "x", "y", "l", "r", "zl", "zr", "plus", "minus", "lstick", "rstick", "up", "down", "left", "right",
-    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right"};
+    "ls_up", "ls_down", "ls_left", "ls_right", "rs_up", "rs_down", "rs_left", "rs_right", "left_sl", "left_sr",
+    "right_sl", "right_sr"};
 // entrées des manettes (Settings::P_*), valeurs des clés pad_… ; même ordre que ENTREES_PAD (launcher/lanceur.cpp)
 const char* const PAD_ENTREES[Settings::P_NB] = {
     "none", "south", "east", "west", "north", "back", "guide", "start", "leftstick", "rightstick", "leftshoulder",
@@ -210,6 +257,22 @@ bool parse_resolution(const std::string& v0, int* out) {
     long n;
     if (!parse_int(v, &n) || (n != 720 && n != 1080 && n != 1440 && n != 2160)) return false;
     *out = (int)n;
+    return true;
+}
+// Touche du clavier : « ctrl+shift+0x11 » (modificateurs ctrl, shift, alt, puis le scancode ; 0 : aucune touche)
+bool parse_touche(const std::string& v, unsigned* out) {
+    std::string r = lower(trim(v));
+    unsigned mods = 0;
+    for (bool vu = true; vu;) {
+        vu = false;
+        for (auto [nom, bit] : {std::pair<const char*, unsigned>{"ctrl+", Settings::MODIF_CTRL},
+                                {"shift+", Settings::MODIF_SHIFT}, {"alt+", Settings::MODIF_ALT}})
+            if (r.rfind(nom, 0) == 0) r = trim(r.substr(strlen(nom))), mods |= bit, vu = true;
+    }
+    char* fin = nullptr;
+    const unsigned long sc = strtoul(r.c_str(), &fin, 0);
+    if (fin == r.c_str() || *fin || !(sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF))) return false;
+    *out = (unsigned)sc | (sc ? mods : 0);
     return true;
 }
 bool parse_bool(const std::string& v0, bool* out) {
@@ -317,6 +380,68 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         bool b;
         if (parse_bool(v, &b)) g_settings.fast_rendering = b;
         else HLOG("cfg", "%s: fast_rendering = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "mouse_keyboard") {
+        bool b;
+        if (parse_bool(v, &b)) g_settings.mouse_keyboard = b;
+        else HLOG("cfg", "%s: mouse_keyboard = '%s' invalid (true or false): ignored", src, v.c_str());
+#ifndef _WIN32
+        // capture de la souris (hle_kbm.cpp) écrite pour Windows seulement : le mode reste coupé ailleurs
+        if (g_settings.mouse_keyboard) {
+            g_settings.mouse_keyboard = false;
+            HLOG("cfg", "%s: mouse_keyboard needs Windows for now: off", src);
+        }
+#endif
+    } else if (k == "hdr") {
+        bool b;
+        if (parse_bool(v, &b)) g_settings.hdr = b;
+        else HLOG("cfg", "%s: hdr = '%s' invalid (true or false): ignored", src, v.c_str());
+    } else if (k == "hdr_peak" || k == "hdr_paper_white") {   // hors limites : ramené dedans, comme le launcher
+        long n;
+        const bool pic = k == "hdr_peak";
+        const long lo = pic ? 400 : 80, hi = pic ? 10000 : 500;
+        if (parse_int(v, &n)) {
+            int& r = pic ? g_settings.hdr_peak : g_settings.hdr_paper_white;
+            r = (int)std::clamp(n, lo, hi);
+            if (n < lo || n > hi) HLOG("cfg", "%s: %s = %ld out of %ld to %ld nits: %d", src, k.c_str(), n, lo, hi, r);
+        } else {
+            HLOG("cfg", "%s: %s = '%s' invalid (%ld to %ld nits): ignored", src, k.c_str(), v.c_str(), lo, hi);
+        }
+    } else if (k == "aspect_ratio") {
+        // 16:9, 21:9, 32:9, auto, ou tout « l:h » entre 4:3 et 4:1 (43:18 pour un écran 3440 × 1440 par exemple)
+        const std::string l = lower(v);
+        int x = 0, y = 0;
+        if (l == "auto" || l == "screen") {
+            g_settings.aspect_x = g_settings.aspect_y = 0;
+        } else if (sscanf(l.c_str(), "%d:%d", &x, &y) == 2 && x > 0 && y > 0 && x * 3 >= y * 4 && x <= y * 4) {
+            g_settings.aspect_x = x, g_settings.aspect_y = y;
+        } else {
+            HLOG("cfg", "%s: aspect_ratio = '%s' invalid (16:9, 21:9, 32:9 or auto): ignored", src, v.c_str());
+        }
+    } else if (k == "mouse_speed") {   // hors limites : ramené dedans, comme le launcher
+        long n;
+        if (parse_int(v, &n)) {
+            g_settings.mouse_speed = (int)std::clamp<long>(n, 10, 1000);
+            if (n < 10 || n > 1000) HLOG("cfg", "%s: mouse_speed = %ld out of 10 to 1000: %d", src, n, g_settings.mouse_speed);
+        } else {
+            HLOG("cfg", "%s: mouse_speed = '%s' invalid (10 to 1000): ignored", src, v.c_str());
+        }
+    } else if (k == "mouse_release") {
+        unsigned t = 0;
+        if (parse_touche(v, &t)) g_settings.mouse_release = t;
+        else HLOG("cfg", "%s: mouse_release = '%s' invalid (key scancode such as 0x43, ctrl+0x43; 0: none): ignored",
+                  src, v.c_str());
+    } else if (k.rfind("mouse_", 0) == 0) {   // action de la manette d'une entrée de la souris
+        static const char* const souris[Settings::M_NB] = {"left", "right", "middle", "back", "forward", "wheel_up",
+                                                           "wheel_down"};
+        int i = 0, b = 0;
+        while (i < Settings::M_NB && k.compare(6, std::string::npos, souris[i]) != 0) i++;
+        const std::string m = lower(v);
+        while (b < Settings::K_NB && m != kNomsActions[b]) b++;
+        if (i >= Settings::M_NB) HLOG("cfg", "%s: unknown key '%s' ignored", src, k.c_str());
+        else if (b < Settings::K_NB || m == "none") g_settings.mouse_buttons[i] = (int8_t)(b < Settings::K_NB ? b : -1);
+        else HLOG("cfg", "%s: %s = '%s' invalid (a, b, x, y, l, r, zl, zr, plus, minus, lstick, rstick, up, down, "
+                         "left, right, ls_up … rs_right, left_sl, left_sr, right_sl, right_sr, none): ignored", src,
+                  k.c_str(), v.c_str());
     } else if (k == "cold_page_release") {
         bool b;
         if (parse_bool(v, &b)) g_settings.cold_page_release = b;
@@ -337,11 +462,10 @@ void apply(const std::string& key, const std::string& val, const char* src) {
     } else if (k.rfind("key_", 0) == 0) {   // touche du clavier d'une action de la manette (page Contrôles du launcher)
         int i = 0;
         while (i < Settings::K_NB && k.compare(4, std::string::npos, kNomsActions[i]) != 0) i++;
-        char* fin = nullptr;
-        const unsigned long sc = strtoul(v.c_str(), &fin, 0);
-        if (i < Settings::K_NB && fin != v.c_str() && (sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF))) g_settings.keys[i] = (unsigned)sc;
-        else HLOG("cfg", "%s: %s = '%s' invalid (key scancode such as 0x11; set it from the launcher's Controls page): ignored",
-                  src, k.c_str(), v.c_str());
+        unsigned t = 0;
+        if (i < Settings::K_NB && parse_touche(v, &t)) g_settings.keys[i] = t;
+        else HLOG("cfg", "%s: %s = '%s' invalid (key scancode such as 0x11, shift+0x11; set it from the launcher's "
+                         "Controls page): ignored", src, k.c_str(), v.c_str());
     } else {
         HLOG("cfg", "%s: unknown key '%s' ignored", src, k.c_str());
     }
@@ -365,6 +489,9 @@ void load_file(const std::string& path, bool create) {
             fputs(kCleFsr, w);
             fputs(kCleRendu, w);
             fputs(kCleGpu, w);
+            fputs(kCleSouris, w);
+            fputs(kCleHdr, w);
+            fputs(kCleFormat, w);
             fclose(w);
             HLOG("cfg", "%s created with default values", path.c_str());
         }
@@ -403,6 +530,9 @@ void load_file(const std::string& path, bool create) {
         if (!vues.count("fsr")) ajout += kCleFsr;
         if (!vues.count("fast_rendering")) ajout += kCleRendu;
         if (!vues.count("gpu")) ajout += kCleGpu;
+        if (!vues.count("mouse_keyboard")) ajout += kCleSouris;
+        if (!vues.count("hdr")) ajout += kCleHdr;
+        if (!vues.count("aspect_ratio")) ajout += kCleFormat;
         if (!ajout.empty()) {
             if (FILE* w = fopen(path.c_str(), "ab")) {
                 fputs(ajout.c_str(), w);
@@ -461,7 +591,10 @@ void settings_init(int argc, char** argv) {
     if (const char* e = getenv("RECOMP_FSR")) apply("fsr", e, "RECOMP_FSR");
     if (const char* e = getenv("RECOMP_FSR_VERSION")) apply("fsr_version", e, "RECOMP_FSR_VERSION");
     if (const char* e = getenv("RECOMP_FSR_SHARPNESS")) apply("fsr_sharpness", e, "RECOMP_FSR_SHARPNESS");
-    if (const char* e = getenv("RECOMP_GPU")) apply("gpu", e, "RECOMP_GPU");   // essais : la carte AMD intégrée…
+    if (const char* e = getenv("RECOMP_GPU")) apply("gpu", e, "RECOMP_GPU");
+    if (const char* e = getenv("RECOMP_MOUSE_KEYBOARD")) apply("mouse_keyboard", e, "RECOMP_MOUSE_KEYBOARD");
+    if (const char* e = getenv("RECOMP_HDR")) apply("hdr", e, "RECOMP_HDR");
+    if (const char* e = getenv("RECOMP_ASPECT")) apply("aspect_ratio", e, "RECOMP_ASPECT");
     if (const char* e = getenv("RECOMP_WINDOW")) apply("window_mode", e, "RECOMP_WINDOW");
     if (const char* e = getenv("RECOMP_LANGUAGE")) apply("language", e, "RECOMP_LANGUAGE");
     if (const char* e = getenv("RECOMP_VIBRATION")) apply("vibration", e, "RECOMP_VIBRATION");
@@ -505,6 +638,16 @@ void settings_init(int argc, char** argv) {
              s.fsr_version == 3 ? "FSR 3.1" : s.fsr_version == 4 ? "FSR 4" : "automatic", s.fsr_sharpness);
     }
     if (s.gpu != "auto") HLOG("cfg", "graphics card requested: '%s'", s.gpu.c_str());
+    if (s.hdr) HLOG("cfg", "HDR requested: peak %d nits, paper white %d nits", s.hdr_peak, s.hdr_paper_white);
+    if (!s.aspect_x) HLOG("cfg", "aspect ratio: the screen's (auto)");
+    else if (s.aspect_x * 9 != s.aspect_y * 16) HLOG("cfg", "aspect ratio: %d:%d", s.aspect_x, s.aspect_y);
+    if (s.mouse_keyboard) {
+        auto nom = [](int8_t b) { return b < 0 ? "none" : kNomsActions[b]; };
+        HLOG("cfg", "mouse mode: Joy-Con 2 pair, mouse = right Joy-Con 2 mouse at %d %%; buttons left %s, right %s, "
+             "middle %s, back %s, forward %s; wheel up %s, down %s; release key 0x%X", s.mouse_speed,
+             nom(s.mouse_buttons[0]), nom(s.mouse_buttons[1]), nom(s.mouse_buttons[2]), nom(s.mouse_buttons[3]),
+             nom(s.mouse_buttons[4]), nom(s.mouse_buttons[5]), nom(s.mouse_buttons[6]), s.mouse_release);
+    }
     {   // touches du clavier changées par le joueur (page Contrôles du launcher)
         const Settings defaut;
         int n = 0;
