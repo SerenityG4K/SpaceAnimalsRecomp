@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Compile les passes du DLSS (runtime/os/dlss_avant.comp, dlss_apres.comp, dlss_composer.comp) en SPIR-V et écrit
-runtime/os/dlss_spirv.h, inclus par vk_render.cpp. À relancer après une modification d'un de ces fichiers ;
+"""Compile les passes du DLSS (runtime/os/dlss_avant.comp, dlss_apres.comp, dlss_composer.comp) et la conversion
+HDR ↔ SDR de la présentation (hdr_sdr.comp) en SPIR-V et écrit runtime/os/dlss_spirv.h, inclus par vk_render.cpp. À relancer après une modification d'un de ces fichiers ;
 dlss_spirv.h est rangé avec les sources (les joueurs n'ont pas à le refaire).
 
 Rangé ici et non dans recomp/shaders/ : tout changement d'un script de ce dossier-là fait refaire l'étape « shaders »
@@ -21,7 +21,7 @@ import tempfile
 OS_DIR = os.path.dirname(os.path.abspath(__file__))
 RACINE = os.path.dirname(os.path.dirname(OS_DIR))
 PASSES = [("dlss_avant.comp", "DLSS_AVANT_SPV"), ("dlss_apres.comp", "DLSS_APRES_SPV"),
-          ("dlss_composer.comp", "DLSS_COMPOSER_SPV")]
+          ("dlss_composer.comp", "DLSS_COMPOSER_SPV"), ("hdr_sdr.comp", "HDR_SDR_SPV")]
 
 
 def glslang():
@@ -34,8 +34,8 @@ def glslang():
 
 def main():
     g = glslang()
-    lignes = ["// Produit par runtime/os/dlss_spirv.py à partir de dlss_avant.comp, dlss_apres.comp et dlss_composer.comp : "
-              "ne pas modifier à la main.",
+    lignes = ["// Produit par runtime/os/dlss_spirv.py à partir de dlss_avant.comp, dlss_apres.comp, dlss_composer.comp et "
+              "hdr_sdr.comp : ne pas modifier à la main.",
               "#pragma once", "#include <cstdint>", ""]
     with tempfile.TemporaryDirectory() as tmp:
         for src, nom in PASSES:

@@ -639,8 +639,13 @@ void reglages_lire() {
         else if (k == "vibration") g.reglages.vibration = std::clamp(atoi(v.c_str()), 0, 100);
         else if (k == "mouse_keyboard") lire_bool(v, &g.reglages.souris);
         else if (k == "hdr") lire_bool(v, &g.reglages.hdr);
-        else if (k == "hdr_peak") g.reglages.hdr_pic = std::clamp(atoi(v.c_str()), 400, 10000);
-        else if (k == "hdr_paper_white") g.reglages.hdr_blanc = std::clamp(atoi(v.c_str()), 80, 500);
+        else if (k == "hdr_peak" || k == "hdr_paper_white") {   // hors limites : ramené dedans, comme le jeu
+            long n;
+            if (lire_entier(v, &n)) {
+                if (k == "hdr_peak") g.reglages.hdr_pic = (int)std::clamp<long>(n, 400, 10000);
+                else g.reglages.hdr_blanc = (int)std::clamp<long>(n, 80, 500);
+            }
+        }
         else if (k == "aspect_ratio") g.reglages.format = v.empty() ? std::string("16:9") : minuscules(v);
         else if (k == "mouse_speed") {
             long n;

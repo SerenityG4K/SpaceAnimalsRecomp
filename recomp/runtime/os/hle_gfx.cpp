@@ -99,10 +99,19 @@ bool wide_display(int* w, int* h) {
         const int mode = display_mode();
         const int dh = (int)kDisplayH[mode];
         double r = settings().aspect_y ? (double)settings().aspect_x / settings().aspect_y : 0;
+        int sw = 0, sh = 0;
+        gfx_screen_pixels(&sw, &sh);   // en pixels réels : l'arrondi des points (mise à l'échelle) faussait le format
+        const double ecran = sw > 0 && sh > 0 ? (double)sw / sh : 0;
         if (r <= 0) {   // auto : format de l'écran du PC
-            int sw = 0, sh = 0;
-            gfx_screen_size(&sw, &sh);
-            r = sw > 0 && sh > 0 ? (double)sw / sh : 16.0 / 9;
+            r = ecran > 0 ? ecran : 16.0 / 9;
+        } else if (ecran > 16.0 / 9 + 0.01 && std::fabs(r / ecran - 1) < 0.04) {
+            // « 21:9 » est un nom commercial : 3440 × 1440 (43:18, 2,389), 2560 × 1080 (64:27, 2,370), 3840 × 1600
+            // (12:5) ; 21:9 à la lettre (2,333) laissait des bandes. Un format choisi à moins de 4 % de celui de l'écran
+            // prend celui de l'écran.
+            if (std::fabs(r - ecran) > 1e-6)
+                HLOG("gfx", "aspect ratio %d:%d taken as the screen's %dx%d (%.3f)", settings().aspect_x,
+                     settings().aspect_y, sw, sh, ecran);
+            r = ecran;
         }
         int dw = (int)kDisplayW[mode];
         if (r > 16.0 / 9 + 0.01) dw = (int)lround(dh * r / 2) * 2;   // largeur paire

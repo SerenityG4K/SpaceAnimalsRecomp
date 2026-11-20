@@ -395,12 +395,17 @@ void apply(const std::string& key, const std::string& val, const char* src) {
         bool b;
         if (parse_bool(v, &b)) g_settings.hdr = b;
         else HLOG("cfg", "%s: hdr = '%s' invalid (true or false): ignored", src, v.c_str());
-    } else if (k == "hdr_peak" || k == "hdr_paper_white") {
+    } else if (k == "hdr_peak" || k == "hdr_paper_white") {   // hors limites : ramené dedans, comme le launcher
         long n;
         const bool pic = k == "hdr_peak";
         const long lo = pic ? 400 : 80, hi = pic ? 10000 : 500;
-        if (parse_int(v, &n) && n >= lo && n <= hi) (pic ? g_settings.hdr_peak : g_settings.hdr_paper_white) = (int)n;
-        else HLOG("cfg", "%s: %s = '%s' invalid (%ld to %ld nits): ignored", src, k.c_str(), v.c_str(), lo, hi);
+        if (parse_int(v, &n)) {
+            int& r = pic ? g_settings.hdr_peak : g_settings.hdr_paper_white;
+            r = (int)std::clamp(n, lo, hi);
+            if (n < lo || n > hi) HLOG("cfg", "%s: %s = %ld out of %ld to %ld nits: %d", src, k.c_str(), n, lo, hi, r);
+        } else {
+            HLOG("cfg", "%s: %s = '%s' invalid (%ld to %ld nits): ignored", src, k.c_str(), v.c_str(), lo, hi);
+        }
     } else if (k == "aspect_ratio") {
         // 16:9, 21:9, 32:9, auto, ou tout « l:h » entre 4:3 et 4:1 (43:18 pour un écran 3440 × 1440 par exemple)
         const std::string l = lower(v);

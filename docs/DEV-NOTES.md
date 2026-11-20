@@ -441,6 +441,7 @@ python link.py                                   # after modifying the runtime
 | `RECOMP_MOUSE_KEYBOARD=0\|1` | overrides `mouse_keyboard` in `recomp.ini` (the game's mouse mode, `hle_kbm.cpp`) |
 | `RECOMP_ASPECT=16:9\|21:9\|32:9\|auto` | overrides `aspect_ratio` in `recomp.ini` (aspect ratio, `hle_gfx.cpp`) |
 | `RECOMP_HDR=0\|1` | overrides `hdr` in `recomp.ini` (the game's HDR10 output, `hle_gfx.cpp`, `vk_render.cpp`) |
+| `RECOMP_HDR_LOSS_TEST=<frame>` | from that frame, the screen is taken as no longer offering HDR10 (HDR → SDR conversion, tests) |
 | `RECOMP_JCMS_CONTACT=0\|1` | mouse mode: right Joy-Con 2 lifted or laid down, whatever the window focus (tests without a player) |
 | `RECOMP_CNTFRQ=hz` | frequency of the guest counter (31,250,000 by default, that of the Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | old reuse, by address, of a packaged image without comparing its contents (stale textures) |
@@ -3790,10 +3791,26 @@ User request: HDR (issue #30). Reference: Triforce (OoT), "Native" mode.
   (PQ into PQ). Without HDR10 on the display (HDR off in Windows), the game stays in SDR, as before. Log: "HDR: the
   display offers HDR10", "presented image: …, format 64 (NVN 61)".
 * **Settings**: `hdr` (false by default), `hdr_peak` (400 to 10000 nits, 1000 by default), `hdr_paper_white` (80 to
-  500, 203 by default); `RECOMP_HDR=0|1` overrides `hdr`. Launcher: Graphics page, IMAGE · DISPLAY tabs.
+  500, 203 by default; out of range: brought back within the limits, like the launcher); `RECOMP_HDR=0|1` overrides
+  `hdr`. Launcher: Graphics page, IMAGE · DISPLAY tabs.
+* **One decision, a swapchain that follows the screen** (review of the PR, 2026-11-20): what the game is told
+  (`g.hdr10`) is decided once, when the swapchain is first created; if the game asks before the window exists, the
+  answer is SDR and the swapchain follows it. The swapchain itself follows what the screen offers: checked once a
+  second and at each recreation. HDR lost while playing (turned off in Windows, window moved to an SDR screen): SDR
+  swapchain, and the game's PQ picture goes through `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = paper white,
+  soft shoulder above 0.8) before the present copy; HDR back: HDR10 swapchain again. An 8-bit image on the HDR10
+  swapchain goes the other way (sRGB → PQ). `RECOMP_HDR_LOSS_TEST=n` pretends the screen loses HDR10 at frame n
+  (tested: "the display no longer offers HDR10", swapchain format 50, the game keeps running).
+* **SDR format**: `B8G8R8A8_SRGB` in the sRGB colour space only (`VK_EXT_swapchain_colorspace` adds the same format in
+  other colour spaces: P3, extended sRGB…).
+* **Snapshots and launcher clips** (`readback_half`): in HDR the presented image is converted by the same pass, then
+  reduced into an 8-bit sRGB image (they were skipped, hence blank).
+* **DLSS / FSR in HDR**: their inputs and outputs are RGBA16F, in the scene before the HDR output, so HDR does not
+  change them; only the swap of the game's upscale (`upsample.frag`) for their full-size output required the 8-bit
+  target. In HDR the game upscales into a `B10G11R11` float target (one sample, no conversion): accepted too (DLSS
+  section).
 * **Not done**: no HDR metadata sent to the display (`VK_EXT_hdr_metadata`: Windows usually ignores it), no RenoDX (it
-  would need a Star Fox shader set), no SDR → HDR conversion (the game outputs PQ from the first frame). The snapshot
-  (`RECOMP_SNAPSHOT`) cannot read 10-bit images.
+  would need a Star Fox shader set).
 
 ## Aspect ratio: native 21:9, 32:9 rendering (2026-11-19; not published)
 
@@ -3816,5 +3833,9 @@ User request: 32:9 (issue #2), "done properly": native 5120 × 1440 rendering, c
 * **Settings**: `aspect_ratio` = `16:9` (default, as before), `21:9`, `32:9`, `auto` (the PC screen's shape), or any
   `w:h` between 4:3 and 4:1; narrower than 16:9: 16:9. `RECOMP_ASPECT` overrides it. Launcher: Graphics page, DISPLAY
   tab (was HDR), Aspect ratio row.
+* **"21:9" screens** are not 21:9: 3440 × 1440 is 43:18 (2.389), 2560 × 1080 is 64:27 (2.370), 3840 × 1600 is 12:5. A
+  ratio chosen within 4 % of the screen's takes the screen's exact ratio (measured in real pixels, `gfx_screen_pixels`,
+  not in points: the display-scaling rounding skewed it). And the present copy fills the window when the black bars
+  would be 2 pixels or less.
 * **Limits seen**: some backdrops are images made for 16:9 (the title screen's Earth ends before the left edge in
   32:9). In-flight play (HUD, reticle) has not been checked in 32:9 yet.

@@ -15,6 +15,7 @@ void gfx_count_frame(uint64_t frame);
 // écran virtuel (hle_gfx.cpp) : période de vblank en ticks du compteur invité (31,25 MHz), image affichée à un vblank
 uint64_t vi_vblank_period();
 void gfx_screen_size(int* w, int* h);   // résolution de l'écran principal de l'hôte
+void gfx_screen_pixels(int* w, int* h); // la même en pixels réels, sans la mise à l'échelle de Windows (son format exact)
 // Écran virtuel annoncé au jeu (hle_gfx.cpp) : hauteur du mode (réglage resolution), largeur selon le format (réglage
 // aspect_ratio). Rend vrai s'il est plus large que 16:9.
 bool gfx_virtual_display(int* w, int* h);

@@ -227,6 +227,10 @@ void gfx_screen_size(int* w, int* h) {
     *w = (int)lround(GetSystemMetrics(SM_CXSCREEN) / k);
     *h = (int)lround(GetSystemMetrics(SM_CYSCREEN) / k);
 }
+void gfx_screen_pixels(int* w, int* h) {   // pixels réels (le processus est compatible DPI) : format exact de l'écran
+    *w = GetSystemMetrics(SM_CXSCREEN);
+    *h = GetSystemMetrics(SM_CYSCREEN);
+}
 
 void gfx_count_frame(uint64_t frame) {
     using namespace std::chrono;

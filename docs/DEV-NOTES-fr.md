@@ -438,6 +438,7 @@ python link.py                                   # après modification du runtim
 | `RECOMP_MOUSE_KEYBOARD=0\|1` | remplace `mouse_keyboard` de `recomp.ini` (mode souris du jeu, `hle_kbm.cpp`) |
 | `RECOMP_ASPECT=16:9\|21:9\|32:9\|auto` | remplace `aspect_ratio` de `recomp.ini` (format de l'image, `hle_gfx.cpp`) |
 | `RECOMP_HDR=0\|1` | remplace `hdr` de `recomp.ini` (sortie HDR10 du jeu, `hle_gfx.cpp`, `vk_render.cpp`) |
+| `RECOMP_HDR_LOSS_TEST=<image>` | à partir de cette image, l'écran est censé ne plus proposer le HDR10 (conversion HDR → SDR, essais) |
 | `RECOMP_JCMS_CONTACT=0\|1` | mode souris : Joy-Con 2 droit levé ou posé, quel que soit le focus de la fenêtre (essais sans joueur) |
 | `RECOMP_CNTFRQ=hz` | fréquence du compteur invité (31 250 000 par défaut, celle de la Switch 2) |
 | `RECOMP_ALIAS_PACKAGED=1` | ancienne réutilisation, par adresse, d'une image packagée sans comparer son contenu (textures périmées) |
@@ -3839,10 +3840,26 @@ Demande de l'utilisateur : le HDR (issue n° 30). Référence : Triforce (OoT), 
   telle quelle (PQ dans PQ). Sans HDR10 à l'écran (HDR désactivé dans Windows), le jeu reste en SDR, comme avant.
   Journal : « HDR: the display offers HDR10 », « presented image: …, format 64 (NVN 61) ».
 * **Réglages** : `hdr` (faux par défaut), `hdr_peak` (400 à 10000 nits, 1000 par défaut), `hdr_paper_white` (80 à 500,
-  203 par défaut) ; `RECOMP_HDR=0|1` remplace `hdr`. Launcher : page Graphismes, onglets IMAGE · ÉCRAN.
+  203 par défaut ; hors limites : ramenés dedans, comme dans le launcher) ; `RECOMP_HDR=0|1` remplace `hdr`. Launcher :
+  page Graphismes, onglets IMAGE · ÉCRAN.
+* **Une décision, une swapchain qui suit l'écran** (relecture de la PR, 2026-11-20) : ce qu'on dit au jeu (`g.hdr10`)
+  est décidé une fois, à la première création de la swapchain ; si le jeu demande avant que la fenêtre n'existe, la
+  réponse est SDR et la swapchain la suit. La swapchain, elle, suit ce que l'écran propose : regardé une fois par
+  seconde et à chaque recréation. HDR perdu en cours de partie (coupé dans Windows, fenêtre passée sur un écran SDR) :
+  swapchain SDR, et l'image PQ du jeu passe par `hdr_sdr.comp` (PQ → nits, BT.2020 → BT.709, 1 = blanc papier, épaule
+  douce au-dessus de 0,8) avant la copie de présentation ; HDR revenu : swapchain HDR10 de nouveau. Une image 8 bits sur
+  la swapchain HDR10 fait le chemin inverse (sRGB → PQ). `RECOMP_HDR_LOSS_TEST=n` fait comme si l'écran perdait le
+  HDR10 à l'image n (essayé : « the display no longer offers HDR10 », swapchain au format 50, le jeu continue).
+* **Format SDR** : `B8G8R8A8_SRGB` dans l'espace sRGB seulement (`VK_EXT_swapchain_colorspace` ajoute le même format
+  dans d'autres espaces : P3, sRGB étendu…).
+* **Instantanés et extraits du launcher** (`readback_half`) : en HDR, l'image présentée passe par la même conversion,
+  puis est réduite dans une image sRGB 8 bits (elles étaient sautées, d'où des images vides).
+* **DLSS / FSR en HDR** : leurs entrées et sorties sont en RGBA16F, dans la scène avant la sortie HDR : le HDR ne les
+  change pas ; seul le remplacement de l'agrandissement du jeu (`upsample.frag`) par leur sortie pleine taille voulait
+  une cible 8 bits. En HDR, le jeu agrandit dans une cible `B10G11R11` flottante (un échantillon, sans conversion) :
+  acceptée aussi (section DLSS).
 * **Pas fait** : pas de métadonnées HDR envoyées à l'écran (`VK_EXT_hdr_metadata` : Windows les ignore en général),
-  pas de RenoDX (il faudrait un jeu de shaders propre à Star Fox), pas de conversion SDR → HDR (le jeu sort en PQ dès
-  la première image). L'instantané (`RECOMP_SNAPSHOT`) ne lit pas les images 10 bits.
+  pas de RenoDX (il faudrait un jeu de shaders propre à Star Fox).
 
 ## Format de l'image : 21:9, 32:9 en rendu natif (2026-11-19 ; pas publié)
 
@@ -3866,5 +3883,9 @@ Demande de l'utilisateur : le 32:9 (issue n° 2), « fait proprement » : rendu 
 * **Réglages** : `aspect_ratio` = `16:9` (par défaut, comme avant), `21:9`, `32:9`, `auto` (format de l'écran du PC), ou
   tout `l:h` entre 4:3 et 4:1 ; plus étroit que 16:9 : 16:9. `RECOMP_ASPECT` le remplace. Launcher : page Graphismes,
   onglet ÉCRAN (ex-HDR), ligne Format.
+* **Les écrans « 21:9 »** ne sont pas en 21:9 : 3440 × 1440 est en 43:18 (2,389), 2560 × 1080 en 64:27 (2,370), 3840 ×
+  1600 en 12:5. Un format choisi à moins de 4 % de celui de l'écran prend le format exact de l'écran (mesuré en pixels
+  réels, `gfx_screen_pixels`, pas en points : l'arrondi de la mise à l'échelle le faussait). Et la copie de
+  présentation remplit la fenêtre quand les bandes noires feraient 2 pixels ou moins.
 * **Limites vues** : certains décors sont des images faites pour le 16:9 (la Terre de l'écran titre s'arrête avant le
   bord gauche en 32:9). Le jeu en vol (affichage tête haute, viseur) n'a pas encore été vérifié en 32:9.

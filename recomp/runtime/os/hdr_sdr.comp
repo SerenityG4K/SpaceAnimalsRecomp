@@ -1,0 +1,56 @@
+// Passe de conversion HDR ↔ SDR (vk_render.cpp : hdr_sdr). Source de dlss_spirv.h (dlss_spirv.py).
+//
+// Le jeu sort en HDR10 quand on le lui dit (nn::vi, hle_gfx.cpp) : image finale RGB10A2 codée en PQ (ST 2084), primaires
+// BT.2020. Elle va telle quelle sur une swapchain HDR10. Cette passe sert quand les deux ne s'accordent pas :
+//   sens 0 (HDR → SDR) : l'écran a perdu son HDR en cours de partie (coupé dans Windows, fenêtre passée sur un écran
+//     SDR) alors que le jeu sort toujours en PQ ; et les instantanés et extraits du launcher (8 bits sRGB). PQ → nits,
+//     BT.2020 → BT.709, 1 = blanc papier (hdr_paper_white), épaule douce pour les hautes lumières ;
+//   sens 1 (SDR → HDR) : une image 8 bits (avant que le jeu ne passe en HDR) sur la swapchain HDR10. sRGB → linéaire,
+//     blanc papier, BT.709 → BT.2020, codage PQ.
+// Sortie RGBA16F de la taille de la source, que la présentation copie (blit) sur l'image d'écran.
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D source;              // image du jeu (lue texel par texel)
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D sortie;
+layout(push_constant) uniform Constantes {
+    ivec2 taille;
+    float blanc;      // blanc papier, en nits
+    int sens;         // 0 : HDR → SDR (linéaire) ; 1 : SDR → PQ ; 2 : SDR → PQ, source 8 bits UNORM (sRGB à décoder)
+} pc;
+
+const float M1 = 2610.0 / 16384.0, M2 = 2523.0 / 4096.0 * 128.0;
+const float C1 = 3424.0 / 4096.0, C2 = 2413.0 / 4096.0 * 32.0, C3 = 2392.0 / 4096.0 * 32.0;
+
+vec3 pq_vers_nits(vec3 e) {
+    const vec3 p = pow(clamp(e, 0.0, 1.0), vec3(1.0 / M2));
+    return 10000.0 * pow(max(p - C1, 0.0) / (C2 - C3 * p), vec3(1.0 / M1));
+}
+vec3 nits_vers_pq(vec3 l) {
+    const vec3 y = pow(clamp(l / 10000.0, 0.0, 1.0), vec3(M1));
+    return pow((C1 + C2 * y) / (1.0 + C3 * y), vec3(M2));
+}
+vec3 srgb_vers_lineaire(vec3 c) {
+    return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(0.04045, c));
+}
+// au-dessus de 0,8 : courbe qui tend vers 1 au lieu de couper les hautes lumières
+vec3 epaule(vec3 x) {
+    const float k = 0.8;
+    const vec3 h = k + (1.0 - k) * (1.0 - exp(-(x - k) / (1.0 - k)));
+    return mix(x, h, step(k, x));
+}
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.taille.x || p.y >= pc.taille.y) return;
+    const vec4 c = texelFetch(source, p, 0);
+    // matrices des primaires (colonnes, GLSL)
+    const mat3 bt2020_vers_709 = mat3(1.6605, -0.1246, -0.0182, -0.5876, 1.1329, -0.1006, -0.0728, -0.0083, 1.1187);
+    const mat3 bt709_vers_2020 = mat3(0.6274, 0.0691, 0.0164, 0.3293, 0.9195, 0.0880, 0.0433, 0.0114, 0.8956);
+    if (pc.sens == 0) {
+        const vec3 s = max(bt2020_vers_709 * (pq_vers_nits(c.rgb) / pc.blanc), 0.0);
+        imageStore(sortie, p, vec4(epaule(s), 1.0));
+    } else {
+        const vec3 l = pc.sens == 2 ? srgb_vers_lineaire(c.rgb) : c.rgb;
+        imageStore(sortie, p, vec4(nits_vers_pq(bt709_vers_2020 * l * pc.blanc), 1.0));
+    }
+}
