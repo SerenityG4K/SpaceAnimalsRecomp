@@ -480,8 +480,34 @@ bool touche_lire(std::string v, unsigned* t) {
     }
     char* fin = nullptr;
     const unsigned long sc = strtoul(v.c_str(), &fin, 0);
-    if (fin == v.c_str() || !(sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF))) return false;
+    if (fin == v.c_str() || *fin || !(sc <= 0xFF || (sc >= 0xE000 && sc <= 0xE0FF))) return false;
     *t = (unsigned)sc | (sc ? mods : 0);
+    return true;
+}
+// AltGr : la disposition du clavier en a un si l'un de ses caractères se tape avec Ctrl+Alt (comme le jeu,
+// runtime/os/input.cpp)
+bool disposition_altgr() {
+    const HKL hkl = GetKeyboardLayout(0);
+    for (wchar_t c = 0x21; c <= 0xFF; c++) {
+        const SHORT r = VkKeyScanExW(c, hkl);
+        if (r != -1 && (HIBYTE(r) & 6) == 6) return true;
+    }
+    const SHORT r = VkKeyScanExW(0x20AC, hkl);
+    return r != -1 && (HIBYTE(r) & 6) == 6;
+}
+// Lecture de recomp.ini comme le jeu (runtime/os/settings.cpp, parse_bool et parse_int) : sans tenir compte des
+// majuscules ; une valeur que le jeu refuse garde ici aussi la valeur d'avant
+bool lire_bool(const std::string& v0, bool* b) {
+    const std::string v = minuscules(trim(v0));
+    if (v == "1" || v == "true" || v == "yes" || v == "on" || v == "oui" || v == "vrai") return *b = true, true;
+    if (v == "0" || v == "false" || v == "no" || v == "off" || v == "non" || v == "faux") return *b = false, true;
+    return false;
+}
+bool lire_entier(const std::string& v, long* n) {   // un suffixe est toléré (« 150 % »), comme dans le jeu
+    char* fin = nullptr;
+    const long x = strtol(v.c_str(), &fin, 10);
+    if (fin == v.c_str()) return false;
+    *n = x;
     return true;
 }
 
@@ -591,7 +617,8 @@ void reglages_lire() {
         if (k == "refresh_rate") g.reglages.hz = std::clamp(atoi(v.c_str()), 30, 240);
         else if (k == "resolution") g.reglages.resolution = v == "auto" ? 0 : atoi(v.c_str());
         else if (k == "native_resolution") {   // ancien « Comme la console » : 67 % (si render_scale manque)
-            if ((v == "false" || v == "0" || v == "non" || v == "off") && !echelle_lue) g.reglages.echelle = 67;
+            bool natif = true;
+            if (lire_bool(v, &natif) && !natif && !echelle_lue) g.reglages.echelle = 67;
         } else if (k == "render_scale") {
             g.reglages.echelle = std::clamp(atoi(v.c_str()), 67, 100);
             echelle_lue = true;
@@ -610,14 +637,17 @@ void reglages_lire() {
         else if (k == "window_mode") g.reglages.sans_bordure = !(v == "windowed" || v == "window" || v == "fenetre");
         else if (k == "language") g.reglages.langue = v.empty() ? "auto" : v;
         else if (k == "vibration") g.reglages.vibration = std::clamp(atoi(v.c_str()), 0, 100);
-        else if (k == "mouse_keyboard") g.reglages.souris = v == "true" || v == "1" || v == "yes" || v == "on";
-        else if (k == "mouse_speed") g.reglages.souris_vitesse = std::clamp(atoi(v.c_str()), 10, 1000);
-        else if (k.rfind("mouse_", 0) == 0) {
+        else if (k == "mouse_keyboard") lire_bool(v, &g.reglages.souris);
+        else if (k == "mouse_speed") {
+            long n;
+            if (lire_entier(v, &n)) g.reglages.souris_vitesse = (int)std::clamp<long>(n, 10, 1000);
+        } else if (k.rfind("mouse_", 0) == 0) {   // nom d'action inconnu : gardé tel quel, comme le jeu
+            const std::string m = minuscules(v);
             for (int i = 0; i < NB_BOUTONS_SOURIS; i++)
                 if (k == SOURIS_CLES[i]) {
-                    g.reglages.souris_boutons[i] = -1;
+                    if (m == "none") g.reglages.souris_boutons[i] = -1;
                     for (int b = 0; b < NB_TOUCHES; b++)
-                        if (v == TOUCHES_CLES[b] + 4) g.reglages.souris_boutons[i] = b;
+                        if (m == TOUCHES_CLES[b] + 4) g.reglages.souris_boutons[i] = b;
                 }
         }
         else if (k.rfind("pad_", 0) == 0) {
@@ -658,9 +688,17 @@ void reglages_ecrire() {
         {"language", g.reglages.langue},
         {"vibration", std::to_string(g.reglages.vibration)},
         {"mouse_keyboard", g.reglages.souris ? "true" : "false"},
-        {"mouse_speed", std::to_string(g.reglages.souris_vitesse)},
     };
-    for (int i = 0; i < NB_BOUTONS_SOURIS; i++) cles.push_back({SOURIS_CLES[i], souris_bouton_nom(g.reglages.souris_boutons[i])});
+    // réglages du mode souris (vitesse, entrées) : seulement s'il est mis, ou s'ils sont déjà dans le fichier (le jeu a
+    // les mêmes valeurs par défaut)
+    const bool souris_ecrite = g.reglages.souris || std::any_of(v.begin(), v.end(), [](const std::string& l) {
+        const std::string t = trim(l);
+        return t.rfind("mouse_", 0) == 0 && t.rfind("mouse_keyboard", 0) != 0;
+    });
+    if (souris_ecrite) {
+        cles.push_back({"mouse_speed", std::to_string(g.reglages.souris_vitesse)});
+        for (int i = 0; i < NB_BOUTONS_SOURIS; i++) cles.push_back({SOURIS_CLES[i], souris_bouton_nom(g.reglages.souris_boutons[i])});
+    }
     if (g.reglages.touches_ecrites)   // touches du clavier : seulement une fois que le joueur en a changé une
         for (int i = 0; i < NB_TOUCHES; i++) {
             cles.push_back({TOUCHES_CLES[i], touche_texte(g.reglages.touches[i])});
@@ -748,18 +786,23 @@ void reglages_ecrire() {
             std::vector<std::string> bloc = {
                 "",
                 "; Souris et clavier : true ou false. La manette émulée devient une paire de Joy-Con 2 et la souris du PC le",
-                "; Joy-Con 2 droit posé comme une souris : le jeu passe dans son mode souris. mouse_speed : vitesse de la souris,",
-                "; en % (10 à 1000). mouse_left … mouse_forward : bouton de la Switch de chaque bouton de la souris (a, b, x, y,",
-                "; l, r, zl, zr, plus, minus, lstick, rstick, up, down, left, right, ou none). Page Contrôles du launcher, onglet",
-                "; Souris.",
+                "; Joy-Con 2 droit posé comme une souris : le jeu passe dans son mode souris. F9 (mouse_release) rend le",
+                "; curseur, un clic dans l'image le reprend. mouse_speed : vitesse de la souris, en % (10 à 1000) ; mouse_left",
+                "; … mouse_wheel_down : action de la manette de chaque entrée de la souris (a, b, x, y, l, r, zl, zr, plus,",
+                "; minus, lstick, rstick, up, down, left, right, ls_up … rs_right, left_sl … right_sr, ou none). Page",
+                "; Contrôles du launcher, onglet Souris.",
                 "; Mouse and keyboard: true or false. The emulated controller becomes a pair of Joy-Con 2 and the PC mouse the",
-                "; right Joy-Con 2 laid down as a mouse: the game enters its mouse mode. mouse_speed: mouse speed, in % (10 to",
-                "; 1000). mouse_left … mouse_forward: Switch button of each mouse button (a, b, x, y, l, r, zl, zr, plus, minus,",
-                "; lstick, rstick, up, down, left, right, or none). Launcher's Controls page, Mouse tab.",
-                k + " = " + val,
-                "mouse_speed = " + std::to_string(g.reglages.souris_vitesse)};
-            for (int i = 0; i < NB_BOUTONS_SOURIS; i++)
-                bloc.push_back(std::string(SOURIS_CLES[i]) + " = " + souris_bouton_nom(g.reglages.souris_boutons[i]));
+                "; right Joy-Con 2 laid down as a mouse: the game enters its mouse mode. F9 (mouse_release) releases the",
+                "; cursor, a click in the picture takes it back. mouse_speed: mouse speed, in % (10 to 1000); mouse_left …",
+                "; mouse_wheel_down: controller action of each mouse input (a, b, x, y, l, r, zl, zr, plus, minus, lstick,",
+                "; rstick, up, down, left, right, ls_up … rs_right, left_sl … right_sr, or none). Launcher's Controls page,",
+                "; Mouse tab.",
+                k + " = " + val};
+            if (souris_ecrite) {
+                bloc.push_back("mouse_speed = " + std::to_string(g.reglages.souris_vitesse));
+                for (int i = 0; i < NB_BOUTONS_SOURIS; i++)
+                    bloc.push_back(std::string(SOURIS_CLES[i]) + " = " + souris_bouton_nom(g.reglages.souris_boutons[i]));
+            }
             auto pos = std::find_if(v.begin(), v.end(), [](const std::string& l) { return trim(l) == "[keyboard]"; });
             if (pos != v.end()) {   // avant la ligne vide qui précède la section
                 while (pos != v.begin() && trim(*(pos - 1)).empty()) --pos;
@@ -767,6 +810,11 @@ void reglages_ecrire() {
             } else {
                 v.insert(v.end(), bloc.begin(), bloc.end());
             }
+            continue;
+        }
+        if (!fait && k.rfind("mouse_", 0) == 0) {   // mode souris mis après coup : après les autres lignes mouse_…
+            auto pos = std::find_if(v.rbegin(), v.rend(), [](const std::string& l) { return trim(l).rfind("mouse_", 0) == 0; });
+            v.insert(pos != v.rend() ? pos.base() : v.end(), k + " = " + val);
             continue;
         }
         if (!fait) v.push_back(k + " = " + val);
@@ -1764,11 +1812,17 @@ LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 g.capture = -1, g.capture_mod = 0;
             } else if (!(l & (1 << 30))) {   // pas une répétition
                 const unsigned sc = (unsigned)((l >> 16) & 0xFF) | ((l & (1 << 24)) ? 0xE000u : 0u);
+                // AltGr (Ctrl gauche + Alt droit pour Windows, sur une disposition qui l'a) : ni Ctrl ni Alt, comme dans
+                // le jeu (runtime/os/input.cpp, host_modifiers_held) ; appuyé seul, c'est Alt droit
+                const bool altgr = GetKeyState(VK_RMENU) < 0 && disposition_altgr();
                 if (w == VK_SHIFT || w == VK_CONTROL || w == VK_MENU) {
-                    if (!g.capture_mod) g.capture_mod = sc;
+                    if (!g.capture_mod || (altgr && g.capture_mod == 0x1D)) g.capture_mod = altgr ? 0xE038u : sc;
                 } else if (sc & 0xFF) {
-                    const unsigned mods = (GetKeyState(VK_CONTROL) < 0 ? MODIF_CTRL : 0) |
-                                          (GetKeyState(VK_SHIFT) < 0 ? MODIF_SHIFT : 0) | (GetKeyState(VK_MENU) < 0 ? MODIF_ALT : 0);
+                    // (un jeu construit avant les combinaisons les refuse : la note de la page le dit, dessin.cpp)
+                    const bool ctrl = GetKeyState(VK_RCONTROL) < 0 || (GetKeyState(VK_LCONTROL) < 0 && !altgr);
+                    const bool alt = GetKeyState(VK_LMENU) < 0 || (GetKeyState(VK_RMENU) < 0 && !altgr);
+                    const unsigned mods = (ctrl ? MODIF_CTRL : 0) | (GetKeyState(VK_SHIFT) < 0 ? MODIF_SHIFT : 0) |
+                                          (alt ? MODIF_ALT : 0);
                     touche_affecter(g.capture, sc | mods);
                     g.capture = -1, g.capture_mod = 0;
                 }

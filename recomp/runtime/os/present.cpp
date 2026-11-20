@@ -137,6 +137,7 @@ LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HLOG("gfx", "window closed: process exiting");
         vkr::save_caches();   // pipelines créés pendant la partie
         fflush(nullptr);
+        kbm_release();
         ExitProcess(0);
     }
     return DefWindowProcW(h, msg, wp, lp);

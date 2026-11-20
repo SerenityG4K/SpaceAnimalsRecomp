@@ -3730,9 +3730,18 @@ User request: play with keyboard and mouse, using the game's mouse mode (Switch 
 * **`hle_kbm.cpp`** replaces the SDK's Jcms functions: player 1's right Joy-Con receives the raw mouse movements (Raw
   Input, without Windows acceleration, multiplied by `mouse_speed`), at most one state every 4 ms; it is laid down while
   the window has focus. And `nn::hid::GetSixAxisSensorState`: at rest, the right Joy-Con lying on its side (acceleration
-  x = −1 G) while laid down, flat otherwise. The Windows cursor is hidden and held in the window (Alt+Tab releases it).
-  The mouse buttons press Switch buttons (`input.cpp`; R and ZR by default, the two buttons under the fingers of a
-  Joy-Con 2 held as a mouse); the keyboard drives the controller as before.
+  x = −1 G) while laid down, flat otherwise. The mouse buttons press Switch buttons (`input.cpp`; R and ZR by default,
+  the two buttons under the fingers of a Joy-Con 2 held as a mouse); the keyboard drives the controller as before.
+* **The Windows cursor** is hidden and held in the game's picture: borderless, as soon as the window is active;
+  windowed, after a click in the picture (the title bar stays reachable to move or resize the window; F11 or
+  Alt+Enter to windowed releases it). `mouse_release` (F9 by default, a key like `key_…`), Alt+Tab or losing focus
+  release it; a click in the picture takes it back, and that click presses nothing in the game (buttons held at
+  capture are ignored until released). Every exit path (window closed, guest `ExitProcess`, crash, out of memory)
+  calls `kbm_release` before ending the process. High-resolution wheels send fractions of a 120 notch: they add up to
+  a notch. The capture is written for Windows: elsewhere `mouse_keyboard` stays off (`settings.cpp`), for the Linux
+  port.
+* **Motion sensors**: while the mode is on, `GetSixAxisSensorState` always answers at rest (right Joy-Con on its side
+  while laid down). That is what the mode needs; the runtime has no motion input from PC controllers either way.
 * **Settings**: `mouse_keyboard` (false by default: Pro controller, nothing changes), `mouse_speed` (10 to 1000%),
   `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward`, `mouse_wheel_up`, `mouse_wheel_down`:
   any controller action (`a` … `right`, `ls_up` … `rs_right`, `left_sl`, `left_sr`, `right_sl`, `right_sr`, `none`);
@@ -3746,7 +3755,16 @@ User request: play with keyboard and mouse, using the game's mouse mode (Switch 
   Npad state, no key by default). A key can require Ctrl, Shift, Alt (`key_rs_up = shift+0x11`): `touches_actives`
   (`input.cpp`) keeps the most specific combination of each key (W: left stick, Shift+W: right stick), and a modifier
   key bound on its own does not count during a combination that uses it. The launcher captures the combination
-  (modifiers held), or the modifier key released on its own.
+  (modifiers held), or the modifier key released on its own. **AltGr** (AZERTY, QWERTZ, US international…): Windows
+  reports it as left Ctrl + right Alt; on a layout that has it (one of its characters typed with Ctrl+Alt,
+  `VkKeyScanExW`), right Alt held counts neither as Ctrl nor as Alt, in the game (`host_modifiers_held`) and in the
+  launcher's capture. The menu convenience keys (Enter, Backspace, Esc, Tab) stop as soon as their key is bound,
+  alone or in a combination. A game built before combinations ignores those keys: the Controls page says so while
+  the launcher offers a rebuild.
+* **`recomp.ini`**: the appended block only holds `mouse_keyboard` (the other settings are explained in it); the
+  launcher writes `mouse_speed` and the `mouse_…` inputs only once the mode is on (or when they are already there),
+  and the SL · SR keyboard row only shows in mouse mode. Launcher and game read these settings the same way (case,
+  `yes` / `on` / `oui`, out-of-range speed brought back within 10 to 1000).
 * **Dead ends**: the game's USB mouse (variable above) does not aim; forcing the "joycon-dual-ms" style is not enough
   without a motion sensor. The slight smoothing of the aim comes from the game (reticle), not from the mouse.
 * **References**: Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) for Nmouse, Jcms and

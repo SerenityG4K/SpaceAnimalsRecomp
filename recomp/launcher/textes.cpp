@@ -178,6 +178,10 @@ const Texte TEXTES[] = {
                  L"même temps : une combinaison (Maj + W et W font deux actions). Valable au prochain lancement du jeu.",
      L"Click a key to change it; a key already in use is swapped. Hold Ctrl, Shift or Alt with it for a combination "
      L"(Shift + W and W do two actions). Applies the next time the game starts."},
+    {"ctl_note_reconstruire", L"Cliquez sur une touche pour la changer. Les combinaisons (Ctrl, Maj, Alt) ne marchent "
+                              L"qu'avec le jeu reconstruit : d'ici là, le jeu ignore ces touches.",
+     L"Click a key to change it. Key combinations (Ctrl, Shift, Alt) only work once the game is rebuilt: until then, "
+     L"the game ignores those keys."},
     // onglet Manette (2026-11-12) : manettes Xbox, PlayStation, Switch Pro et Joy-Con (SDL3)
     {"ong_clavier", L"CLAVIER", L"KEYBOARD"},
     {"ong_manette", L"MANETTE", L"CONTROLLER"},
@@ -199,10 +203,11 @@ const Texte TEXTES[] = {
     {"sou_aucun", L"Aucun", L"None"},
     {"sou_note", L"La souris devient le Joy-Con 2 droit posé sur la table : le jeu passe de lui-même en visée à la souris. "
                  L"Dans ce mode, le jeu met le boost et le frein sur le stick droit (haut, bas), l'inclinaison sur le "
-                 L"stick gauche (gauche, droite). Valable au prochain lancement du jeu.",
+                 L"stick gauche (gauche, droite). F9 rend le curseur, un clic dans le jeu le reprend. Valable au prochain "
+                 L"lancement du jeu.",
      L"The mouse becomes the right Joy-Con 2 lying on the desk: the game switches to mouse aiming by itself. In this "
-     L"mode the game puts boost and brake on the right stick (up, down), tilt on the left stick (left, right). Applies "
-     L"the next time the game starts."},
+     L"mode the game puts boost and brake on the right stick (up, down), tilt on the left stick (left, right). F9 "
+     L"releases the cursor, a click in the game takes it back. Applies the next time the game starts."},
     {"pad_branchee", L"Manette : %ls", L"Controller: %ls"},
     {"pad_autres", L"  (+ %d autre(s))", L"  (+ %d more)"},
     {"pad_aucune", L"Aucune manette branchée : cliquez sur un bouton (dessin ou liste), puis sur celui du dessin qui doit "

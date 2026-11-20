@@ -101,7 +101,10 @@ struct Settings {
     // appui bref par cran). Par défaut R et ZR, les deux boutons sous les doigts du Joy-Con 2 tenu en souris.
     enum { M_GAUCHE, M_DROIT, M_MILIEU, M_ARRIERE, M_AVANT, M_MOLETTE_HAUT, M_MOLETTE_BAS, M_NB };
     int8_t mouse_buttons[M_NB] = {K_R, K_ZR, K_RSTICK, -1, -1, -1, -1};
-    std::string file;                // fichier de réglages utilisé
+    // touche qui rend le curseur de Windows (scancode et modificateurs, comme keys ; 0 : aucune) ; un clic dans l'image
+    // le reprend. F9 par défaut.
+    unsigned mouse_release = 0x43;
+    std::string file;               // fichier de réglages utilisé
 };
 
 const Settings& settings();

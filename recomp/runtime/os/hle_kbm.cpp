@@ -22,13 +22,17 @@
 // (+0x14), u32 attributs (+0x18 : bit 0 capteur présent, bit 1 posé), u32 réservé }. Le plus récent d'abord.
 // JcmsHandle : u32 { u8 Npad, u8 type } (nn::hid::utility::MakeJcmsHandle). JcmsType : u8.
 //
-// Souris : déplacements bruts (Raw Input, sans l'accélération de Windows : la visée suit la main). Tant que la
-// fenêtre du jeu a le focus, le curseur de Windows est caché et retenu dans la fenêtre ; Alt+Tab, la touche Windows ou
-// un clic hors de la fenêtre le rendent.
+// Souris : déplacements bruts (Raw Input, sans l'accélération de Windows : la visée suit la main). Le curseur de
+// Windows est caché et retenu dans l'image du jeu : en plein écran dès que la fenêtre est active, en fenêtré après un
+// clic dans l'image (la barre de titre reste à portée pour déplacer ou redimensionner la fenêtre). La touche
+// mouse_release (F9 par défaut), Alt+Tab, la touche Windows ou la fermeture du jeu le rendent ; un clic dans l'image le
+// reprend (ce clic n'appuie sur rien dans le jeu). Capture écrite pour Windows : ailleurs, le mode reste coupé
+// (settings.cpp).
 #include "gfx.h"
 #include "settings.h"
 #include "svc_util.h"
 
+#ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -36,6 +40,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -51,7 +56,27 @@ namespace {
 std::atomic<int64_t> g_dx{0}, g_dy{0};   // Raw Input accumulé depuis le dernier état Jcms
 std::atomic<bool> g_captured{false};
 
+#ifdef _WIN32
 // ---------------------------------------------------------------- capture du curseur
+std::atomic<bool> g_rendu{false};      // rendu par mouse_release : pas de reprise sans un clic dans l'image
+std::atomic<uint32_t> g_masque{0};     // boutons de la souris tenus à la reprise : ignorés jusqu'à leur relâchement
+
+bool down_vk(int vk) { return GetAsyncKeyState(vk) & 0x8000; }
+
+// boutons de la souris tenus (bits Settings::M_GAUCHE … M_AVANT)
+uint32_t boutons_tenus() {
+    uint32_t b = 0;
+    if (down_vk(VK_LBUTTON)) b |= 1u << Settings::M_GAUCHE;
+    if (down_vk(VK_RBUTTON)) b |= 1u << Settings::M_DROIT;
+    if (down_vk(VK_MBUTTON)) b |= 1u << Settings::M_MILIEU;
+    if (down_vk(VK_XBUTTON1)) b |= 1u << Settings::M_ARRIERE;
+    if (down_vk(VK_XBUTTON2)) b |= 1u << Settings::M_AVANT;
+    return b;
+}
+
+// fenêtre à cadre (fenêtré) : sa barre de titre doit rester à portée du curseur
+bool fenetre_a_cadre(HWND h) { return (GetWindowLongW(h, GWL_STYLE) & WS_CAPTION) == WS_CAPTION; }
+
 void clip(HWND h) {
     RECT r;
     GetClientRect(h, &r);
@@ -61,20 +86,21 @@ void clip(HWND h) {
     RECT s{a.x, a.y, b.x, b.y};
     ClipCursor(&s);
 }
-void capture(HWND h, bool on) {
+void capture(HWND h, bool on, const char* pourquoi) {
     if (on == g_captured.load()) return;
     g_captured = on;
     if (on) {
         clip(h);
         SetCursor(nullptr);
+        g_rendu = false;
+        g_masque = boutons_tenus();   // le clic qui reprend la souris n'appuie sur rien dans le jeu
     } else {
         ClipCursor(nullptr);
     }
     g_dx = 0, g_dy = 0;   // rien de ce qui s'est passé hors capture
-    HLOG("input", "mouse %s", on ? "captured by the game window" : "released");
+    HLOG("input", "mouse %s (%s)", on ? "captured by the game window" : "released", pourquoi);
 }
-
-bool down_vk(int vk) { return GetAsyncKeyState(vk) & 0x8000; }
+#endif
 
 // ---------------------------------------------------------------- capteur souris des Joy-Con 2 (Jcms)
 struct JcmsState {
@@ -234,18 +260,23 @@ bool molette_appui(int sens) {
 }
 }  // namespace
 
+#ifdef _WIN32
 // ---------------------------------------------------------------- boutons de la souris (input.cpp)
 uint32_t kbm_mouse_buttons() {
     if (!settings().mouse_keyboard || !g_captured.load() || !gfx_window_focused()) return 0;
-    uint32_t b = 0;
+    uint32_t b = boutons_tenus();
+    if (uint32_t m = g_masque.load()) {   // tenus depuis la reprise : ignorés tant qu'ils ne sont pas relâchés
+        m &= b;
+        g_masque = m;
+        b &= ~m;
+    }
     if (molette_appui(0)) b |= 1u << Settings::M_MOLETTE_HAUT;
     if (molette_appui(1)) b |= 1u << Settings::M_MOLETTE_BAS;
-    if (down_vk(VK_LBUTTON)) b |= 1u << Settings::M_GAUCHE;
-    if (down_vk(VK_RBUTTON)) b |= 1u << Settings::M_DROIT;
-    if (down_vk(VK_MBUTTON)) b |= 1u << Settings::M_MILIEU;
-    if (down_vk(VK_XBUTTON1)) b |= 1u << Settings::M_ARRIERE;
-    if (down_vk(VK_XBUTTON2)) b |= 1u << Settings::M_AVANT;
     return b;
+}
+
+void kbm_release() {
+    if (g_captured.exchange(false)) ClipCursor(nullptr);
 }
 
 // ---------------------------------------------------------------- fenêtre (present.cpp)
@@ -270,16 +301,43 @@ bool kbm_wndproc(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp, intptr_t* 
         UINT size = sizeof ri;
         if (GetRawInputData((HRAWINPUT)lp, RID_INPUT, &ri, &size, sizeof(RAWINPUTHEADER)) == (UINT)-1) break;
         if (ri.header.dwType != RIM_TYPEMOUSE) break;
-        if (!g_captured.load() && GetForegroundWindow() == h && !IsIconic(h)) capture(h, true);
+        // plein écran : reprise dès que la fenêtre est active ; fenêtré ou souris rendue : au clic dans l'image
+        if (!g_captured.load() && !g_rendu.load() && !fenetre_a_cadre(h) && GetForegroundWindow() == h && !IsIconic(h))
+            capture(h, true, "borderless window active");
         if (!(ri.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {   // (une tablette ou un bureau à distance : absolu, ignoré)
             g_dx += ri.data.mouse.lLastX;
             g_dy += ri.data.mouse.lLastY;
         }
-        if ((ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) && g_captured.load()) {   // molette : crans de 120
+        // molette : crans de 120 ; une molette à haute résolution en envoie des fractions, additionnées jusqu'au cran
+        // (remises à zéro quand le sens change)
+        static int reste = 0;
+        if ((ri.data.mouse.usButtonFlags & RI_MOUSE_WHEEL) && g_captured.load()) {
             const int d = (short)ri.data.mouse.usButtonData;
-            if (d) molette_cran(d > 0 ? 0 : 1, std::max(1, std::abs(d) / WHEEL_DELTA));
+            if (d && (reste > 0) != (d > 0)) reste = 0;
+            reste += d;
+            const int n = reste / WHEEL_DELTA;
+            if (n) {
+                molette_cran(n > 0 ? 0 : 1, std::abs(n));
+                reste -= n * WHEEL_DELTA;
+            }
         }
         break;   // DefWindowProc fait le ménage du message
+    }
+    case WM_LBUTTONDOWN:   // clic dans l'image (pas sur le cadre) : la souris est reprise
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN:
+        if (!g_captured.load()) capture(h, true, "click in the game");
+        break;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {   // mouse_release : la souris est rendue (un clic dans l'image la reprend)
+        const unsigned t = settings().mouse_release, sc = (unsigned)((lp >> 16) & 0xFF) | ((lp & (1 << 24)) ? 0xE000u : 0u);
+        if (g_captured.load() && t && sc == (t & 0xFFFF) && !(lp & (1 << 30)) &&
+            ((t & Settings::MODIF_MASK) & ~host_modifiers_held()) == 0) {
+            capture(h, false, "release key");
+            g_rendu = true;
+        }
+        break;
     }
     case WM_SETCURSOR:
         if (g_captured.load() && LOWORD(lp) == HTCLIENT) {
@@ -290,18 +348,31 @@ bool kbm_wndproc(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp, intptr_t* 
         break;
     case WM_KILLFOCUS:
     case WM_CANCELMODE:
-        capture(h, false);
+        capture(h, false, "focus lost");
         break;
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE) capture(h, false);
+        if (LOWORD(wp) == WA_INACTIVE) capture(h, false, "window inactive");
         break;
     case WM_SIZE:
     case WM_MOVE:
         if (g_captured.load()) clip(h);
         break;
+    case WM_STYLECHANGED:   // plein écran → fenêtré (F11, Alt+Entrée) : la barre de titre redevient accessible
+        if (g_captured.load() && fenetre_a_cadre(h)) capture(h, false, "window mode");
+        break;
+    case WM_DESTROY:
+        capture(h, false, "window closed");
+        break;
     }
     return false;
 }
+#else
+// ailleurs que sous Windows : pas de capture de la souris (le mode est coupé, settings.cpp)
+uint32_t kbm_mouse_buttons() { return 0; }
+void kbm_release() {}
+void kbm_window_created(void*) {}
+bool kbm_wndproc(void*, unsigned, uintptr_t, intptr_t, intptr_t*) { return false; }
+#endif
 
 void hle_kbm_init() {
     if (!settings().mouse_keyboard) return;

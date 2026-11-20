@@ -3775,10 +3775,20 @@ Demande de l'utilisateur : jouer au clavier et à la souris, avec le mode souris
 * **`hle_kbm.cpp`** remplace les fonctions Jcms du SDK : le Joy-Con droit du joueur 1 reçoit les déplacements bruts de
   la souris (Raw Input, sans l'accélération de Windows, multipliés par `mouse_speed`), un état au plus toutes les 4 ms ;
   il est posé tant que la fenêtre a le focus. Et `nn::hid::GetSixAxisSensorState` : au repos, le Joy-Con droit couché
-  sur la tranche (accélération x = −1 G) tant qu'il est posé, sinon à plat. Le curseur de Windows est caché et retenu
-  dans la fenêtre (Alt+Tab le rend). Les boutons de la souris appuient sur des boutons de la Switch (`input.cpp` ; par
-  défaut R et ZR, les deux boutons sous les doigts d'un Joy-Con 2 tenu en souris) ; le clavier pilote la manette comme
-  avant.
+  sur la tranche (accélération x = −1 G) tant qu'il est posé, sinon à plat. Les boutons de la souris appuient sur des
+  boutons de la Switch (`input.cpp` ; par défaut R et ZR, les deux boutons sous les doigts d'un Joy-Con 2 tenu en
+  souris) ; le clavier pilote la manette comme avant.
+* **Le curseur de Windows** est caché et retenu dans l'image du jeu : en plein écran, dès que la fenêtre est active ;
+  en fenêtré, après un clic dans l'image (la barre de titre reste à portée pour déplacer ou redimensionner la fenêtre ;
+  F11 ou Alt+Entrée vers le fenêtré le rend). `mouse_release` (F9 par défaut, une touche comme `key_…`), Alt+Tab ou la
+  perte du focus le rendent ; un clic dans l'image le reprend, et ce clic n'appuie sur rien dans le jeu (les boutons
+  tenus à la reprise sont ignorés jusqu'à leur relâchement). Toutes les fins du processus (fenêtre fermée,
+  `ExitProcess` de l'invité, plantage, mémoire épuisée) appellent `kbm_release` avant de terminer. Les molettes à haute
+  résolution envoient des fractions du cran de 120 : elles s'additionnent jusqu'au cran. La capture est écrite pour
+  Windows : ailleurs, `mouse_keyboard` reste coupé (`settings.cpp`), pour le portage Linux.
+* **Capteurs de mouvement** : tant que le mode est mis, `GetSixAxisSensorState` répond toujours au repos (Joy-Con droit
+  sur la tranche tant qu'il est posé). C'est ce que le mode demande ; le runtime n'a de toute façon pas d'entrée de
+  mouvement venue des manettes du PC.
 * **Réglages** : `mouse_keyboard` (faux par défaut : manette Pro, rien ne change), `mouse_speed` (10 à 1000 %),
   `mouse_left`, `mouse_right`, `mouse_middle`, `mouse_back`, `mouse_forward`, `mouse_wheel_up`, `mouse_wheel_down` :
   n'importe quelle action de la manette (`a` … `right`, `ls_up` … `rs_right`, `left_sl`, `left_sr`, `right_sl`,
@@ -3793,7 +3803,16 @@ Demande de l'utilisateur : jouer au clavier et à la souris, avec le mode souris
   l'état Npad, aucune touche par défaut). Une touche peut demander Ctrl, Maj, Alt (`key_rs_up = shift+0x11`) :
   `touches_actives` (`input.cpp`) garde la combinaison la plus précise de chaque touche (W : stick gauche, Maj+W :
   stick droit), et une touche modificatrice liée seule ne compte pas pendant une combinaison qui se sert d'elle. Le
-  launcher saisit la combinaison (modificateurs tenus), ou la touche modificatrice relâchée seule.
+  launcher saisit la combinaison (modificateurs tenus), ou la touche modificatrice relâchée seule. **AltGr** (AZERTY,
+  QWERTZ, US international…) : Windows le rapporte comme Ctrl gauche + Alt droit ; sur une disposition qui l'a (un de
+  ses caractères se tape avec Ctrl+Alt, `VkKeyScanExW`), Alt droit tenu ne compte ni comme Ctrl ni comme Alt, dans le
+  jeu (`host_modifiers_held`) comme dans la saisie du launcher. Les touches de confort des menus (Entrée, Retour
+  arrière, Échap, Tab) s'arrêtent dès que leur touche est liée, seule ou en combinaison. Un jeu construit avant les
+  combinaisons ignore ces touches : la page Contrôles le dit tant que le launcher propose une reconstruction.
+* **`recomp.ini`** : le bloc ajouté ne contient que `mouse_keyboard` (les autres réglages y sont expliqués) ; le
+  launcher n'écrit `mouse_speed` et les entrées `mouse_…` qu'une fois le mode mis (ou s'ils y sont déjà), et la ligne
+  SL · SR du clavier ne s'affiche qu'en mode souris. Launcher et jeu lisent ces réglages de la même façon (majuscules,
+  `yes` / `on` / `oui`, vitesse hors limites ramenée entre 10 et 1000).
 * **Pistes écartées** : la souris USB du jeu (variable ci-dessus) ne vise pas ; le style « joycon-dual-ms » imposé
   ne suffit pas sans capteur de mouvement. Le léger lissage de la visée vient du jeu (réticule), pas de la souris.
 * **Références** : Recompia (Pokopia, github.com/Dittobyte/Recompia, `docs/hid_mouse_sw2.md`) pour Nmouse, Jcms et les

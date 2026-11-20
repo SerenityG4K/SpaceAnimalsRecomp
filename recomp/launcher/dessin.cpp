@@ -1424,7 +1424,7 @@ void page_controles() {
     y += 20;
     const std::wstring ou = g.langue == Langue::Fr ? L"ou  " : L"or  ";
     struct Ligne { std::wstring bouton; std::vector<int> actions; std::wstring manette; unsigned confort; };
-    const std::vector<Ligne> L = {
+    std::vector<Ligne> L = {
         {L"A", {K_A}, L"B  /  ○", 0x1C},
         {L"B", {K_B}, L"A  /  ✕", 0x0E},
         {L"X", {K_X}, L"Y  /  △", 0},
@@ -1438,11 +1438,12 @@ void page_controles() {
         {T("stick_g"), {K_LS_UP, K_LS_LEFT, K_LS_DOWN, K_LS_RIGHT, K_LSTICK}, T("stick_g"), 0},
         {T("stick_d"), {K_RS_UP, K_RS_LEFT, K_RS_DOWN, K_RS_RIGHT, K_RSTICK}, T("stick_d"), 0},
         {T("croix"), {K_UP, K_LEFT, K_DOWN, K_RIGHT}, T("croix"), 0},
-        {T("slsr"), {K_LSL, K_LSR, K_RSL, K_RSR}, L"—", 0},   // SL et SR de chaque Joy-Con (mode souris)
     };
+    // SL et SR de chaque Joy-Con : seulement en mode souris (la manette Pro, sinon, n'en a pas)
+    if (g.reglages.souris) L.push_back({T("slsr"), {K_LSL, K_LSR, K_RSL, K_RSR}, L"—", 0});
     static const wchar_t* const sens[5] = {L"▲", L"◀", L"▼", L"▶", L"●"};
     static const wchar_t* const slsr[4] = {L"L·SL", L"L·SR", L"R·SL", L"R·SR"};
-    const float pas = 22, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
+    const float pas = g.reglages.souris ? 22 : 23, esp = 4, lc = (c1f - c1 - 4 * esp) / 5;
     for (size_t i = 0; i < L.size(); i++) {
         if (i % 2 == 0) rect(c0 - 8, y - 2, PX1 - 24, y + 21, VERT, 0.035f);
         texte(L[i].bouton, F_GRAS, c0, y + 1, BLANC, 1.f, 0.f, 0, c1 - c0 - 6);
@@ -1450,7 +1451,7 @@ void page_controles() {
             case_touche(c1, c1 + 2 * lc + esp, y, L[i].actions[0], nullptr);
             // touche de confort des menus (Entrée, Retour arrière, Échap, Tab), tant qu'elle n'est donnée à aucune action
             bool prise = false;
-            for (unsigned t : g.reglages.touches) prise = prise || t == L[i].confort;
+            for (unsigned t : g.reglages.touches) prise = prise || (t & 0xFFFF) == L[i].confort;   // seule ou combinée
             if (L[i].confort && !prise)
                 texte(ou + nom_touche(L[i].confort), F_PETIT, c1 + 2 * lc + esp + 10, y + 3, GRIS, 1.f, 0.f, 0, c1f - (c1 + 2 * lc + esp + 10));
         } else {
@@ -1463,7 +1464,13 @@ void page_controles() {
         texte(m, F_CORPS, c2, y + 1, TEXTE, 1.f, 0.f, 0, PX1 - 24 - c2);
         y += pas;
     }
-    texte_lignes(T(g.capture >= 0 ? "ctl_attente" : "ctl_note"), F_PETIT, c0, PY1 - 52, PX1 - PX0 - 48, g.capture >= 0 ? VERT : GRIS);
+    // une combinaison (Ctrl, Maj, Alt) alors que le jeu attend sa reconstruction : un jeu construit avant les
+    // combinaisons ignore ces touches ; la note le dit
+    bool combinaison = false;
+    for (unsigned t : g.reglages.touches) combinaison = combinaison || (t & (MODIF_CTRL | MODIF_SHIFT | MODIF_ALT));
+    const bool avertir = g.capture < 0 && combinaison && g.jeu_obsolete;
+    texte_lignes(T(g.capture >= 0 ? "ctl_attente" : avertir ? "ctl_note_reconstruire" : "ctl_note"), F_PETIT, c0, PY1 - 52,
+                 PX1 - PX0 - 48, g.capture >= 0 ? VERT : avertir ? TEXTE : GRIS);
 }
 
 std::wstring duree_txt(ULONGLONG ms) {

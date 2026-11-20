@@ -34,5 +34,8 @@ void host_set_vibration(int side, float amp_low, float freq_low, float amp_high,
 void kbm_window_created(void* hwnd);
 bool kbm_wndproc(void* hwnd, unsigned msg, uintptr_t wp, intptr_t lp, intptr_t* res);
 uint32_t kbm_mouse_buttons();
+void kbm_release();   // (aussi dans hos.h) curseur de Windows rendu s'il est retenu, avant de terminer le processus
+// Ctrl, Maj, Alt tenus (Settings::MODIF_*, input.cpp) ; AltGr ne compte ni comme Ctrl ni comme Alt
+unsigned host_modifiers_held();
 
 }  // namespace hos

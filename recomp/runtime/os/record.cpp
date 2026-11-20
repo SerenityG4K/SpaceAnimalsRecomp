@@ -186,6 +186,7 @@ void writer_thread() {
             if (m.last && cfg().exit_after) {
                 HLOG("rec", "last clips written: game exit (RECOMP_RECORD_EXIT)");
                 fflush(nullptr);
+                kbm_release();
                 TerminateProcess(GetCurrentProcess(), 0);
             }
         }

@@ -636,6 +636,7 @@ static void svc_dispatch_impl(CPUState* ctx, uint32_t imm, uint64_t pc) {
     case 0x07:  // ExitProcess
         HLOG("kernel", "ExitProcess requested by the guest (%s)", symbolize(pc).c_str());
         fflush(nullptr);
+        kbm_release();
         ExitProcess(0);
     case 0x08: {  // CreateThread(entry x1, arg x2, sp x3, prio w4, core w5) → w1 handle
         std::lock_guard<std::mutex> lk(g_k);

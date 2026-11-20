@@ -345,18 +345,54 @@ unsigned modificateur(unsigned sc) {
     return 0;
 }
 
+// AltGr (claviers AZERTY, QWERTZ, US international…) : Windows le rapporte comme Ctrl gauche + Alt droit. Une disposition
+// a AltGr si l'un de ses caractères se tape avec Ctrl+Alt. Vu une fois par disposition (le joueur peut en changer).
+bool disposition_altgr() {
+    static std::mutex lk;
+    static HKL vue = nullptr;
+    static bool altgr = false;
+    const HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(GetForegroundWindow(), nullptr));
+    std::lock_guard<std::mutex> g(lk);
+    if (hkl != vue) {
+        vue = hkl;
+        altgr = false;
+        for (wchar_t c = 0x21; c <= 0xFF && !altgr; c++) {
+            const SHORT r = VkKeyScanExW(c, hkl);
+            altgr = r != -1 && (HIBYTE(r) & 6) == 6;
+        }
+        if (!altgr) altgr = [&] { const SHORT r = VkKeyScanExW(0x20AC, hkl); return r != -1 && (HIBYTE(r) & 6) == 6; }();
+        HLOG("input", "keyboard layout %p: %s", (void*)hkl, altgr ? "AltGr (right Alt) is not Ctrl+Alt" : "no AltGr");
+    }
+    return altgr;
+}
+bool altgr_tenu() { return key_vk(VK_RMENU) && disposition_altgr(); }
+
+}  // namespace
+
+// Ctrl, Maj et Alt tenus (Settings::MODIF_*). AltGr tenu ne compte ni comme Ctrl ni comme Alt : une action liée à
+// ctrl+X ne part pas avec AltGr+X ; Ctrl droit et Alt gauche restent des modificateurs.
+unsigned host_modifiers_held() {
+    const bool altgr = altgr_tenu();
+    const bool ctrl = key_vk(VK_RCONTROL) || (key_vk(VK_LCONTROL) && !altgr);
+    const bool alt = key_vk(VK_LMENU) || (key_vk(VK_RMENU) && !altgr);
+    return (ctrl ? Settings::MODIF_CTRL : 0) | (key_vk(VK_SHIFT) ? Settings::MODIF_SHIFT : 0) | (alt ? Settings::MODIF_ALT : 0);
+}
+
+namespace {
+
 // Actions de la manette dont la touche (avec ses modificateurs) est appuyée. Une touche liée sans modificateur compte
 // aussi quand d'autres sont tenus (Maj tenu pour un boost, W pour monter) ; mais si la même touche est liée ailleurs
 // avec plus de modificateurs, tous tenus, cette combinaison plus précise l'emporte seule (W : stick gauche, Maj+W :
 // stick droit). Une touche modificatrice liée seule ne compte pas pendant une combinaison qui se sert d'elle.
 void touches_actives(bool actif[Settings::K_NB]) {
     const unsigned* K = settings().keys;
-    const unsigned tenus = (key_vk(VK_CONTROL) ? Settings::MODIF_CTRL : 0) | (key_vk(VK_SHIFT) ? Settings::MODIF_SHIFT : 0) |
-                           (key_vk(VK_MENU) ? Settings::MODIF_ALT : 0);
+    const unsigned tenus = host_modifiers_held();
+    const bool altgr = altgr_tenu();
     bool brut[Settings::K_NB];
     for (int i = 0; i < Settings::K_NB; i++) {
         const unsigned sc = K[i] & 0xFFFF, m = K[i] & Settings::MODIF_MASK;
-        brut[i] = sc && (m & ~tenus) == 0 && key_sc(sc);
+        // le Ctrl gauche qu'envoie AltGr n'appuie pas une touche liée à Ctrl gauche
+        brut[i] = sc && (m & ~tenus) == 0 && key_sc(sc) && !(altgr && sc == 0x1D);
     }
     unsigned servis = 0;   // modificateurs d'une combinaison active
     for (int i = 0; i < Settings::K_NB; i++) {
@@ -462,10 +498,10 @@ HostPad host_poll_input() {
             if (actif[i]) p.buttons |= kBoutons[i];
         for (int i = Settings::K_LSL; i <= Settings::K_RSR; i++)
             if (actif[i]) p.buttons |= BTN_LEFT_SL << (i - Settings::K_LSL);
-        // touches de confort des menus, sauf si le joueur a donné cette touche à une action
+        // touches de confort des menus, sauf si le joueur a donné cette touche à une action (seule ou en combinaison)
         auto libre = [&](unsigned sc) {
             for (int i = 0; i < Settings::K_NB; i++)
-                if (K[i] == sc) return false;
+                if ((K[i] & 0xFFFF) == sc) return false;
             return true;
         };
         if (libre(0x1C) && libre(0xE01C) && key_vk(VK_RETURN)) p.buttons |= BTN_A;   // Entrée, et celle du pavé
